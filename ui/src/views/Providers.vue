@@ -1,148 +1,224 @@
 <script setup>
 /**
- * Providers.vue — External upstream LLM providers.
- * Shows configured upstreams (OpenRouter, Anthropic, OpenAI, custom)
- * with status dot (online/offline from /api/providers/test), API key
- * entry, enable/disable toggle, and delete. Add provider modal opens
- * from the header.
+ * Providers.vue — external upstream LLM providers.
+ *
+ * Backend contracts:
+ *   GET  /api/upstreams              → list of upstream entries
+ *     [{ name, kind, url, auth_style, auth_value_env, auth_configured,
+ *        timeout_seconds, slot_name, warmup_strategy, advertise_models,
+ *        models: [...cached model ids...] }, ...]
+ *   GET  /api/upstreams/{name}       → single entry
+ *   POST /api/upstreams/{name}/test  → { ok, status?, latency_ms,
+ *                                        models_count?, error?, body_excerpt? }
+ *   GET  /api/providers/catalog      → { [catalog_id]: catalog entry }
+ *     Each catalog entry: { id, name, base_url, auth, auth_header_name,
+ *                           models_path, default_models, default_model,
+ *                           capabilities, docs_url, category, notes }
+ *
+ * Add/edit/delete: the API does not currently expose write paths for
+ * upstreams (Phase 1 PLAN §6 keeps /etc/hal0/upstreams.toml as the
+ * source of truth; a fully reactive editor lands later). The Add modal
+ * captures the form fields for offline use — it surfaces a clear hint
+ * that the user needs to drop the values into upstreams.toml + reload,
+ * and copies a TOML snippet to the clipboard so they can do it in one
+ * paste. Once a write endpoint lands, swap the clipboard path for a
+ * POST and the rest of the UI stays put.
+ *
+ * API keys are never sent over the wire (the backend only stores the
+ * env var *name* in auth_value_env). Display masks the auth value so
+ * leaked screenshots don't reveal a key — though, again, hal0 never
+ * has the key itself, only the env var pointer.
  */
-import { ref, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted } from 'vue'
 import { useToastsStore } from '../stores/toasts.js'
 import { api } from '../composables/useApi.js'
 import PageHeader from '../components/PageHeader.vue'
 import Card from '../components/Card.vue'
 import LoadingSkeleton from '../components/LoadingSkeleton.vue'
 import EmptyState from '../components/EmptyState.vue'
-import ConfirmDialog from '../components/ConfirmDialog.vue'
 
 const toasts = useToastsStore()
 
-const providers = ref([])
+const upstreams = ref([])     // /api/upstreams response
+const catalog   = ref({})     // /api/providers/catalog
 const loading   = ref(true)
 const error     = ref(null)
 
-const showAdd    = ref(false)
-const addForm    = ref({ type: 'openrouter', name: '', api_key: '', base_url: '' })
-const addErrors  = ref({})
-const adding     = ref(false)
+// Per-upstream test result keyed by name.
+const testResults = ref({})   // { [name]: { ok, latency_ms, models_count?, error?, status? } | 'testing' }
 
-const testResults = ref({})  // { [id]: 'ok' | 'error' | 'testing' }
-const deletingId  = ref(null)
-const deleting    = ref(false)
+// Add / edit modal state.
+const showForm  = ref(false)
+const editing   = ref(null)   // name of upstream being edited, or null
+const form = reactive({
+  name: '',
+  catalog_id: 'openrouter',
+  base_url: '',
+  auth_value_env: '',
+  warmup_strategy: 'none',
+})
+const formErrors = ref({})
 
-const PROVIDER_TYPES = [
-  { id: 'openrouter', label: 'OpenRouter',     url: 'https://openrouter.ai/api/v1' },
-  { id: 'openai',     label: 'OpenAI',          url: 'https://api.openai.com/v1' },
-  { id: 'anthropic',  label: 'Anthropic',       url: 'https://api.anthropic.com' },
-  { id: 'custom',     label: 'Custom OpenAI-compatible', url: '' },
-]
-
-async function loadProviders() {
+// ── loaders ──────────────────────────────────────────────────────────
+async function load() {
   loading.value = true
   error.value = null
   try {
-    const data = await api('/api/providers')
-    providers.value = Array.isArray(data) ? data : (data?.providers ?? [])
+    const [ups, cat] = await Promise.all([
+      api('/api/upstreams'),
+      api('/api/providers/catalog'),
+    ])
+    upstreams.value = Array.isArray(ups) ? ups : []
+    catalog.value   = cat || {}
   } catch (e) {
     error.value = e.message
-    providers.value = []
+    upstreams.value = []
+    catalog.value = {}
   } finally {
     loading.value = false
   }
 }
 
-function validateAdd() {
-  const errs = {}
-  if (!addForm.value.name.trim()) errs.name = 'Required'
-  if (!addForm.value.api_key.trim()) errs.api_key = 'Required'
-  if (addForm.value.type === 'custom' && !addForm.value.base_url.trim()) {
-    errs.base_url = 'Required for custom providers'
+// ── test connectivity ────────────────────────────────────────────────
+async function testUpstream(u) {
+  testResults.value[u.name] = 'testing'
+  try {
+    const res = await api(`/api/upstreams/${encodeURIComponent(u.name)}/test`, { method: 'POST' })
+    testResults.value[u.name] = res
+    if (res.ok) {
+      const ct = res.models_count != null ? ` · ${res.models_count} models` : ''
+      toasts.success(`${u.name} reachable in ${res.latency_ms}ms${ct}`)
+    } else {
+      toasts.error(`${u.name}: ${res.error ?? `HTTP ${res.status ?? 'fail'}`}`)
+    }
+  } catch (e) {
+    testResults.value[u.name] = { ok: false, error: e.message, latency_ms: 0 }
+    toasts.error(e.message)
   }
-  addErrors.value = errs
+}
+
+function testDotColor(name) {
+  const r = testResults.value[name]
+  if (r === 'testing') return 'var(--color-warning)'
+  if (!r) return null
+  return r.ok ? 'var(--color-success)' : 'var(--color-danger)'
+}
+
+// ── derived ──────────────────────────────────────────────────────────
+const catalogList = computed(() => Object.values(catalog.value))
+
+function catalogFor(u) {
+  // Best-effort match: try common shapes. The upstream itself doesn't
+  // carry a catalog_id today (would be a nice forward addition), but
+  // host-name matching is enough to show a friendly type chip.
+  for (const c of catalogList.value) {
+    if (c.base_url && u.url && u.url.startsWith(c.base_url)) return c
+  }
+  return null
+}
+
+// Mask the auth env var name's surrounding for display — the value is
+// never on the wire so we mask the *env-var name* visually as a hint
+// the secret is configured but not displayed.
+function maskedAuth(u) {
+  if (!u.auth_value_env) return 'none'
+  const name = u.auth_value_env
+  // env names look like HAL0_OPENROUTER_API_KEY — mask everything but
+  // the last 4 chars so the user can still recognise which key it is.
+  if (name.length <= 4) return '••••'
+  return '••••••••••' + name.slice(-4)
+}
+
+// ── add / edit form ──────────────────────────────────────────────────
+function openAddForm() {
+  editing.value = null
+  form.name = ''
+  form.catalog_id = 'openrouter'
+  applyCatalogDefaults('openrouter')
+  formErrors.value = {}
+  showForm.value = true
+}
+
+function openEditForm(u) {
+  editing.value = u.name
+  form.name = u.name
+  // Find best-match catalog so type stays meaningful.
+  const cat = catalogFor(u)
+  form.catalog_id = cat?.id ?? 'custom'
+  form.base_url = u.url ?? ''
+  form.auth_value_env = u.auth_value_env ?? ''
+  form.warmup_strategy = u.warmup_strategy ?? 'none'
+  formErrors.value = {}
+  showForm.value = true
+}
+
+function applyCatalogDefaults(cid) {
+  const cat = catalog.value[cid]
+  if (!cat) return
+  form.base_url = cat.base_url ?? ''
+  // Suggest a sensible env-var name; user can override.
+  if (!form.auth_value_env || editing.value === null) {
+    const slug = (cat.id || cid).toUpperCase().replace(/[^A-Z0-9]/g, '_')
+    form.auth_value_env = cat.auth === 'none' ? '' : `HAL0_${slug}_API_KEY`
+  }
+}
+
+function validateForm() {
+  const errs = {}
+  if (!form.name.trim()) errs.name = 'Required'
+  else if (!/^[a-zA-Z0-9._-]+$/.test(form.name)) errs.name = 'Use alnum + .-_ only'
+  if (!form.base_url.trim()) errs.base_url = 'Required'
+  else if (!/^https?:\/\//.test(form.base_url)) errs.base_url = 'Must start with http:// or https://'
+  formErrors.value = errs
   return Object.keys(errs).length === 0
 }
 
-function onTypeChange() {
-  const preset = PROVIDER_TYPES.find((t) => t.id === addForm.value.type)
-  if (preset?.url) addForm.value.base_url = preset.url
-}
+// Render the form values as a TOML snippet matching upstreams.toml's
+// `[[upstream]]` shape. The user pastes this into /etc/hal0/upstreams.toml
+// (or sets the env var first), then hits "Reload from disk" on Settings.
+const tomlSnippet = computed(() => {
+  const cat = catalog.value[form.catalog_id]
+  const auth = cat?.auth === 'none' ? 'none' : (cat?.auth === 'anthropic' ? 'header' : 'bearer')
+  const lines = [
+    '[[upstream]]',
+    `name = "${form.name}"`,
+    'kind = "remote"',
+    `url = "${form.base_url}"`,
+    `auth_style = "${auth}"`,
+  ]
+  if (form.auth_value_env) lines.push(`auth_value_env = "${form.auth_value_env}"`)
+  lines.push(`warmup_strategy = "${form.warmup_strategy}"`)
+  return lines.join('\n') + '\n'
+})
 
-async function submitAdd() {
-  if (!validateAdd()) return
-  adding.value = true
+async function copyTomlSnippet() {
+  if (!validateForm()) return
   try {
-    const body = {
-      type:    addForm.value.type,
-      name:    addForm.value.name,
-      api_key: addForm.value.api_key,
-    }
-    if (addForm.value.base_url) body.base_url = addForm.value.base_url
-    await api('/api/providers', { method: 'POST', body: JSON.stringify(body) })
-    toasts.success(`Provider "${addForm.value.name}" added`)
-    showAdd.value = false
-    addForm.value = { type: 'openrouter', name: '', api_key: '', base_url: '' }
-    addErrors.value = {}
-    await loadProviders()
-  } catch (e) {
-    toasts.error(e.message)
-  } finally {
-    adding.value = false
+    await navigator.clipboard.writeText(tomlSnippet.value)
+    toasts.success('TOML snippet copied — paste into /etc/hal0/upstreams.toml then reload')
+  } catch {
+    toasts.error('Clipboard unavailable; copy the snippet manually')
   }
 }
 
-async function testProvider(provider) {
-  testResults.value[provider.id] = 'testing'
-  try {
-    const data = await api(`/api/providers/${provider.id}/test`, { method: 'POST' })
-    testResults.value[provider.id] = data?.ok ? 'ok' : 'error'
-    if (data?.ok) toasts.success(`"${provider.name}" is reachable`)
-    else toasts.error(`"${provider.name}" test failed: ${data?.error ?? 'unknown'}`)
-  } catch (e) {
-    testResults.value[provider.id] = 'error'
-    toasts.error(e.message)
-  }
-}
-
-async function toggleEnabled(provider) {
-  try {
-    await api(`/api/providers/${provider.id}`, {
-      method: 'PUT',
-      body: JSON.stringify({ enabled: !provider.enabled }),
-    })
-    provider.enabled = !provider.enabled
-    toasts.success(`"${provider.name}" ${provider.enabled ? 'enabled' : 'disabled'}`)
-  } catch (e) {
-    toasts.error(e.message)
-  }
-}
-
-async function confirmDelete() {
-  if (!deletingId.value) return
-  deleting.value = true
-  try {
-    await api(`/api/providers/${deletingId.value}`, { method: 'DELETE' })
-    toasts.success('Provider removed')
-    deletingId.value = null
-    await loadProviders()
-  } catch (e) {
-    toasts.error(e.message)
-  } finally {
-    deleting.value = false
-  }
-}
-
-const testStatusColor = { ok: 'var(--color-success)', error: 'var(--color-danger)', testing: 'var(--color-warning)' }
-
-onMounted(loadProviders)
+onMounted(load)
 </script>
 
 <template>
   <div class="providers-page">
     <PageHeader title="Providers" subtitle="External LLM upstreams (OpenRouter, Anthropic, OpenAI, custom)">
       <template #actions>
-        <button class="btn-primary" type="button" @click="showAdd = true">
-          <svg width="13" height="13" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.5" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4v16m8-8H4"/></svg>
-          Add provider
+        <button class="btn-ghost" type="button" @click="load" title="Refresh from server">
+          <svg width="13" height="13" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" aria-hidden="true">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
+          </svg>
+          Reload
+        </button>
+        <button class="btn-primary" type="button" @click="openAddForm">
+          <svg width="13" height="13" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.5" aria-hidden="true">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M12 4v16m8-8H4"/>
+          </svg>
+          Add upstream
         </button>
       </template>
     </PageHeader>
@@ -154,57 +230,68 @@ onMounted(loadProviders)
         <Card v-for="i in 3" :key="i"><LoadingSkeleton :lines="2" /></Card>
       </template>
 
-      <template v-else-if="providers.length === 0">
+      <template v-else-if="upstreams.length === 0">
         <Card :padded="false">
           <EmptyState
             icon="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9a9 9 0 019-9"
-            title="No external providers"
+            title="No upstreams configured"
             description="Add OpenRouter, Anthropic, OpenAI, or a custom OpenAI-compatible upstream to enable external model routing."
-            cta-label="Add provider"
-            @cta="showAdd = true"
+            cta-label="Add upstream"
+            @cta="openAddForm"
           />
         </Card>
       </template>
 
       <template v-else>
-        <div class="providers-list">
-          <div v-for="p in providers" :key="p.id" class="provider-row">
-            <div class="provider-left">
+        <div class="upstreams-list">
+          <div v-for="u in upstreams" :key="u.name" class="upstream-row">
+            <div class="up-left">
               <span
                 class="status-dot"
-                :style="{ background: testResults[p.id] ? testStatusColor[testResults[p.id]] : (p.enabled ? 'var(--color-success)' : 'var(--color-fg-faint)') }"
-                :title="testResults[p.id] ?? (p.enabled ? 'enabled' : 'disabled')"
+                :style="{ background: testDotColor(u.name) ?? (u.auth_configured ? 'var(--color-fg-faint)' : 'transparent'), border: testDotColor(u.name) ? 'none' : '1px solid var(--color-border-hi)' }"
+                :title="testResults[u.name] === 'testing' ? 'testing' : (testResults[u.name]?.ok ? 'reachable' : (testResults[u.name]?.error ?? 'not tested'))"
                 aria-hidden="true"
               />
-              <div class="provider-info">
-                <span class="provider-name">{{ p.name }}</span>
-                <span class="provider-type">{{ p.type }} · {{ p.base_url ?? '' }}</span>
+              <div class="up-info">
+                <div class="up-name-row">
+                  <span class="up-name">{{ u.name }}</span>
+                  <span class="up-kind mono">{{ u.kind }}</span>
+                  <span v-if="catalogFor(u)" class="up-catalog mono">{{ catalogFor(u).name }}</span>
+                </div>
+                <span class="up-url mono">{{ u.url }}</span>
+                <div class="up-meta-row">
+                  <span class="up-meta mono">auth: {{ u.auth_style }}</span>
+                  <span class="up-meta mono">env: {{ maskedAuth(u) }}</span>
+                  <span v-if="u.models?.length" class="up-meta mono">{{ u.models.length }} models cached</span>
+                  <span v-if="testResults[u.name] && testResults[u.name] !== 'testing' && testResults[u.name].latency_ms != null"
+                        class="up-meta mono"
+                        :class="testResults[u.name].ok ? 'meta-good' : 'meta-bad'">
+                    {{ testResults[u.name].latency_ms }}ms
+                  </span>
+                </div>
               </div>
             </div>
-            <div class="provider-actions">
+            <div class="up-actions">
               <button
                 class="act-btn"
                 type="button"
-                :disabled="testResults[p.id] === 'testing'"
-                @click="testProvider(p)"
-                title="Test connectivity"
+                :disabled="testResults[u.name] === 'testing'"
+                @click="testUpstream(u)"
+                title="Probe /v1/models with configured auth"
               >
-                <span v-if="testResults[p.id] === 'testing'" class="spinner" aria-hidden="true" />
+                <span v-if="testResults[u.name] === 'testing'" class="spinner" aria-hidden="true" />
                 <template v-else>Test</template>
               </button>
-              <label class="toggle-wrap" :title="p.enabled ? 'Disable' : 'Enable'">
-                <input type="checkbox" class="toggle-hidden" :checked="p.enabled" @change="toggleEnabled(p)" :aria-label="`${p.enabled ? 'Disable' : 'Enable'} ${p.name}`" />
-                <span class="toggle-track" :class="p.enabled ? 'track-on' : ''">
-                  <span class="toggle-thumb" />
-                </span>
-              </label>
               <button
-                class="act-btn act-danger"
+                class="act-btn"
                 type="button"
-                @click="deletingId = p.id"
-                :aria-label="`Delete provider ${p.name}`"
+                @click="openEditForm(u)"
+                title="Edit"
+                :aria-label="`Edit upstream ${u.name}`"
               >
-                <svg width="12" height="12" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.5" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
+                <svg width="13" height="13" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" aria-hidden="true">
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/>
+                </svg>
               </button>
             </div>
           </div>
@@ -212,63 +299,81 @@ onMounted(loadProviders)
       </template>
     </div>
 
-    <!-- Add provider modal -->
+    <!-- Add / edit modal -->
     <Teleport to="body">
       <Transition name="fade">
-        <div v-if="showAdd" class="modal-overlay" @click.self="showAdd = false">
-          <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="add-provider-title">
+        <div v-if="showForm" class="modal-overlay" @click.self="showForm = false">
+          <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="up-form-title">
             <div class="modal-header">
-              <h2 id="add-provider-title" class="modal-title">Add provider</h2>
-              <button class="modal-close" type="button" @click="showAdd = false" aria-label="Close">
-                <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>
+              <h2 id="up-form-title" class="modal-title">
+                {{ editing ? `Edit upstream "${editing}"` : 'Add upstream' }}
+              </h2>
+              <button class="modal-close" type="button" @click="showForm = false" aria-label="Close">
+                <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.5">
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/>
+                </svg>
               </button>
             </div>
             <div class="modal-body">
+              <p class="hint-block">
+                Add and edit go through <code class="mono">/etc/hal0/upstreams.toml</code>.
+                Fill the form, copy the TOML snippet below, append it to the file, then click
+                <strong>Reload from disk</strong> on the Settings view. The hal0 daemon doesn't expose a
+                write endpoint for upstreams yet — file is the source of truth.
+              </p>
+
               <div class="field">
-                <label class="field-label" for="p-type">Provider type</label>
-                <select id="p-type" v-model="addForm.type" class="field-input" @change="onTypeChange">
-                  <option v-for="t in PROVIDER_TYPES" :key="t.id" :value="t.id">{{ t.label }}</option>
+                <label class="field-label" for="up-type">Provider type</label>
+                <select id="up-type" v-model="form.catalog_id" class="field-input" @change="applyCatalogDefaults(form.catalog_id)">
+                  <option v-for="c in catalogList" :key="c.id" :value="c.id">{{ c.name }} <span v-if="c.category">({{ c.category }})</span></option>
+                </select>
+                <p v-if="catalog[form.catalog_id]?.notes" class="field-hint">{{ catalog[form.catalog_id].notes }}</p>
+              </div>
+
+              <div class="field">
+                <label class="field-label" for="up-name">Name <span class="req">*</span></label>
+                <input id="up-name" v-model="form.name" :disabled="!!editing" class="field-input mono" :class="{ 'field-error': formErrors.name }" placeholder="e.g. openrouter-personal" />
+                <p v-if="formErrors.name" class="field-err">{{ formErrors.name }}</p>
+              </div>
+
+              <div class="field">
+                <label class="field-label" for="up-url">Base URL <span class="req">*</span></label>
+                <input id="up-url" v-model="form.base_url" class="field-input mono" :class="{ 'field-error': formErrors.base_url }" placeholder="https://api.example.com/v1" />
+                <p v-if="formErrors.base_url" class="field-err">{{ formErrors.base_url }}</p>
+              </div>
+
+              <div class="field">
+                <label class="field-label" for="up-env">API key env var</label>
+                <input id="up-env" v-model="form.auth_value_env" class="field-input mono" placeholder="HAL0_OPENROUTER_API_KEY" />
+                <p class="field-hint">
+                  Name of the env var that holds the API key. hal0 reads the value at request time and never stores the key on disk. Leave blank for unauthenticated upstreams.
+                </p>
+              </div>
+
+              <div class="field">
+                <label class="field-label" for="up-warmup">Warmup strategy</label>
+                <select id="up-warmup" v-model="form.warmup_strategy" class="field-input">
+                  <option value="none">none — wait until first request</option>
+                  <option value="lazy">lazy — warm on dashboard load</option>
+                  <option value="eager">eager — warm at startup</option>
                 </select>
               </div>
+
               <div class="field">
-                <label class="field-label" for="p-name">Name <span class="req">*</span></label>
-                <input id="p-name" v-model="addForm.name" class="field-input" :class="{ 'field-error': addErrors.name }" placeholder="e.g. OpenRouter (my account)" />
-                <p v-if="addErrors.name" class="field-err">{{ addErrors.name }}</p>
-              </div>
-              <div class="field">
-                <label class="field-label" for="p-key">API key <span class="req">*</span></label>
-                <input id="p-key" v-model="addForm.api_key" class="field-input" :class="{ 'field-error': addErrors.api_key }" type="password" placeholder="sk-…" autocomplete="off" />
-                <p v-if="addErrors.api_key" class="field-err">{{ addErrors.api_key }}</p>
-              </div>
-              <div class="field" v-if="addForm.type === 'custom'">
-                <label class="field-label" for="p-url">Base URL <span class="req">*</span></label>
-                <input id="p-url" v-model="addForm.base_url" class="field-input" :class="{ 'field-error': addErrors.base_url }" placeholder="https://api.example.com/v1" />
-                <p v-if="addErrors.base_url" class="field-err">{{ addErrors.base_url }}</p>
+                <label class="field-label">TOML snippet</label>
+                <pre class="toml-preview mono">{{ tomlSnippet }}</pre>
               </div>
             </div>
             <div class="modal-footer">
-              <button class="btn-ghost" type="button" @click="showAdd = false" :disabled="adding">Cancel</button>
-              <button class="btn-primary" type="button" @click="submitAdd" :disabled="adding">
-                <span v-if="adding" class="spinner" aria-hidden="true" />
-                {{ adding ? 'Adding…' : 'Add provider' }}
+              <button class="btn-ghost" type="button" @click="showForm = false">Close</button>
+              <button class="btn-primary" type="button" @click="copyTomlSnippet">
+                Copy TOML
               </button>
             </div>
           </div>
         </div>
       </Transition>
     </Teleport>
-
-    <ConfirmDialog
-      :open="!!deletingId"
-      title="Delete provider?"
-      message="This will remove the provider and its API key from hal0's config."
-      danger
-      confirm-label="Delete provider"
-      :loading="deleting"
-      @update:open="(v) => { if (!v) deletingId = null }"
-      @confirm="confirmDelete"
-      @cancel="deletingId = null"
-    />
   </div>
 </template>
 
@@ -278,54 +383,106 @@ onMounted(loadProviders)
 
 .error-banner { padding: 10px 16px; border-radius: var(--radius-lg); background: color-mix(in oklch, var(--color-danger) 10%, var(--color-surface)); border: 1px solid color-mix(in oklch, var(--color-danger) 30%, transparent); color: var(--color-danger); font-size: 13px; }
 
-.providers-list { display: flex; flex-direction: column; gap: 4px; }
-.provider-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 13px 16px; background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius-lg); }
-.provider-row:hover { border-color: var(--color-border-hi); }
-.provider-left { display: flex; align-items: center; gap: 12px; min-width: 0; }
-.status-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; transition: background 0.3s; }
-.provider-info { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
-.provider-name { font-size: 13px; font-weight: 600; color: var(--color-fg); }
-.provider-type { font-family: var(--font-mono); font-size: 11px; color: var(--color-fg-faint); }
-.provider-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+.upstreams-list { display: flex; flex-direction: column; gap: 4px; }
+.upstream-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 13px 16px;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+}
+.upstream-row:hover { border-color: var(--color-border-hi); }
 
-.act-btn { display: flex; align-items: center; gap: 5px; padding: 5px 10px; border-radius: var(--radius); border: 1px solid var(--color-border); background: transparent; color: var(--color-fg-muted); font-size: 12px; cursor: pointer; transition: background 0.1s, color 0.1s; }
+.up-left { display: flex; align-items: flex-start; gap: 12px; min-width: 0; flex: 1; }
+.status-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; margin-top: 6px; transition: background 0.2s; }
+.up-info { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.up-name-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.up-name { font-size: 13px; font-weight: 600; color: var(--color-fg); }
+.up-kind { font-size: 10px; padding: 1px 6px; border-radius: 3px; background: var(--color-surface-2); color: var(--color-fg-faint); border: 1px solid var(--color-border); }
+.up-catalog { font-size: 10px; padding: 1px 6px; border-radius: 3px; background: color-mix(in oklch, var(--color-accent) 12%, transparent); color: var(--color-accent); border: 1px solid color-mix(in oklch, var(--color-accent) 30%, transparent); }
+.up-url { font-size: 11.5px; color: var(--color-fg-muted); word-break: break-all; }
+.up-meta-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.up-meta { font-size: 10.5px; color: var(--color-fg-faint); }
+.up-meta.meta-good { color: var(--color-success); }
+.up-meta.meta-bad  { color: var(--color-danger); }
+
+.up-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+.act-btn {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 10px;
+  border-radius: var(--radius);
+  border: 1px solid var(--color-border);
+  background: transparent;
+  color: var(--color-fg-muted);
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.1s, color 0.1s;
+}
 .act-btn:hover { background: var(--color-surface-2); color: var(--color-fg); }
 .act-btn:disabled { opacity: 0.5; cursor: not-allowed; }
-.act-danger { width: 28px; height: 28px; padding: 0; justify-content: center; }
-.act-danger:hover { background: color-mix(in oklch, var(--color-danger) 12%, transparent); color: var(--color-danger); border-color: color-mix(in oklch, var(--color-danger) 30%, transparent); }
 
-/* Toggle */
-.toggle-wrap { cursor: pointer; }
-.toggle-hidden { display: none; }
-.toggle-track { display: block; width: 34px; height: 18px; border-radius: 9px; background: var(--color-surface-3); border: 1px solid var(--color-border); position: relative; transition: background 0.15s; }
-.toggle-track.track-on { background: var(--color-accent); border-color: var(--color-accent); }
-.toggle-thumb { position: absolute; left: 2px; top: 2px; width: 12px; height: 12px; border-radius: 50%; background: white; transition: transform 0.15s; }
-.toggle-track.track-on .toggle-thumb { transform: translateX(16px); }
-
-/* Modals */
+/* Modal */
 .modal-overlay { position: fixed; inset: 0; z-index: 200; background: rgba(0,0,0,0.6); backdrop-filter: blur(4px); display: flex; align-items: center; justify-content: center; padding: 16px; }
-.modal-box { background: var(--color-surface); border: 1px solid var(--color-border-hi); border-radius: var(--radius-xl); width: min(440px, 100%); max-height: 90vh; display: flex; flex-direction: column; box-shadow: 0 24px 64px rgba(0,0,0,0.6); overflow: hidden; }
+.modal-box { background: var(--color-surface); border: 1px solid var(--color-border-hi); border-radius: var(--radius-xl); width: min(520px, 100%); max-height: 90vh; display: flex; flex-direction: column; box-shadow: 0 24px 64px rgba(0,0,0,0.6); overflow: hidden; }
 .modal-header { display: flex; align-items: center; justify-content: space-between; padding: 16px 20px; border-bottom: 1px solid var(--color-border); }
 .modal-title { font-size: 15px; font-weight: 600; color: var(--color-fg); margin: 0; }
 .modal-close { width: 28px; height: 28px; border-radius: var(--radius); background: transparent; border: 1px solid transparent; color: var(--color-fg-faint); cursor: pointer; display: grid; place-items: center; }
 .modal-close:hover { background: var(--color-surface-2); color: var(--color-fg); }
 .modal-body { padding: 20px; overflow-y: auto; display: flex; flex-direction: column; gap: 14px; flex: 1; }
 .modal-footer { padding: 16px 20px; border-top: 1px solid var(--color-border); display: flex; justify-content: flex-end; gap: 8px; }
+
 .field { display: flex; flex-direction: column; gap: 5px; }
 .field-label { font-size: 12.5px; font-weight: 600; color: var(--color-fg-muted); }
 .req { color: var(--color-danger); }
 .field-input { padding: 7px 10px; border-radius: var(--radius); border: 1px solid var(--color-border); background: var(--color-surface-2); color: var(--color-fg); font-size: 13px; outline: none; transition: border-color 0.1s; box-sizing: border-box; width: 100%; }
 .field-input:focus { border-color: var(--color-border-hi); }
+.field-input.mono { font-family: var(--font-mono); }
+.field-input:disabled { opacity: 0.6; cursor: not-allowed; }
 .field-error { border-color: var(--color-danger) !important; }
-.field-err  { font-size: 11.5px; color: var(--color-danger); margin: 0; }
+.field-err   { font-size: 11.5px; color: var(--color-danger); margin: 0; }
+.field-hint  { font-size: 11.5px; color: var(--color-fg-faint); margin: 0; font-family: var(--font-mono); }
+.mono { font-family: var(--font-mono); }
+
+.hint-block {
+  font-size: 12px;
+  color: var(--color-fg-muted);
+  background: var(--color-surface-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  margin: 0;
+}
+.hint-block code { background: var(--color-surface-3); padding: 1px 4px; border-radius: 3px; }
+
+.toml-preview {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  padding: 10px 12px;
+  background: oklch(11% 0.01 250);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  color: var(--color-fg-muted);
+  white-space: pre-wrap;
+  margin: 0;
+  max-height: 180px;
+  overflow: auto;
+}
+
 .btn-primary { display: flex; align-items: center; gap: 6px; padding: 7px 16px; border-radius: var(--radius); background: var(--color-accent); color: var(--color-bg); font-size: 13px; font-weight: 600; border: none; cursor: pointer; }
 .btn-primary:hover:not(:disabled) { opacity: 0.88; }
 .btn-primary:disabled { opacity: 0.45; cursor: not-allowed; }
-.btn-ghost { padding: 7px 16px; border-radius: var(--radius); border: 1px solid var(--color-border); background: transparent; color: var(--color-fg-muted); font-size: 13px; cursor: pointer; }
+.btn-ghost { display: flex; align-items: center; gap: 6px; padding: 6px 12px; border-radius: var(--radius); border: 1px solid var(--color-border); background: transparent; color: var(--color-fg-muted); font-size: 12.5px; cursor: pointer; }
 .btn-ghost:hover:not(:disabled) { background: var(--color-surface-2); color: var(--color-fg); }
 .btn-ghost:disabled { opacity: 0.5; cursor: not-allowed; }
+
 .spinner { width: 11px; height: 11px; border: 2px solid rgba(255,255,255,0.3); border-top-color: white; border-radius: 50%; animation: spin 0.7s linear infinite; flex-shrink: 0; }
 @keyframes spin { to { transform: rotate(360deg); } }
+
 .fade-enter-active, .fade-leave-active { transition: opacity 0.12s; }
 .fade-enter-from, .fade-leave-to { opacity: 0; }
 </style>
