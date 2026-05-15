@@ -1,12 +1,12 @@
 {
   "_schema": "hal0.manifest.v1",
-  "_comment": "Toolbox image registry pins per hal0 release. Each entry under `toolbox_images` is keyed by short image name (vulkan, rocm, flm, moonshine, kokoro) and carries the canonical ghcr.io ref plus a sha256 digest. Empty/null digest means the image hasn't been published yet for this release — the runtime then pulls by tag and emits a warning. The `.github/workflows/toolbox.yml` build job patches this file post-publish with the actual content digests via cosign + buildx. Schema versioned via `_schema`; bump it when the shape changes. See PLAN.md §12 (toolbox images) and §17 (Risks: ghcr.io/hal0ai/ org provisioning may be deferred, so refs use ghcr.io/<owner>/ in the workflow).",
+  "_comment": "Toolbox image registry pins per hal0 release. Each entry under `toolbox_images` is keyed by short image name (vulkan, rocm, flm, moonshine, kokoro) and carries the canonical ghcr.io ref plus a sha256 digest. Empty/null digest means the image hasn't been published yet for this release \u2014 the runtime then pulls by tag and emits a warning. The `.github/workflows/toolbox.yml` build job patches this file post-publish with the actual content digests via cosign + buildx. Schema versioned via `_schema`; bump it when the shape changes. See PLAN.md \u00a712 (toolbox images) and \u00a717 (Risks: ghcr.io/hal0ai/ org provisioning may be deferred, so refs use ghcr.io/<owner>/ in the workflow).",
   "version": "0.0.0",
   "channel": "dev",
   "toolbox_images": {
     "vulkan": {
       "tag": "ghcr.io/hal0ai/hal0-toolbox-vulkan:v1",
-      "digest": null,
+      "digest": "sha256:d67bcb963bedfd842775672f1a47ecd7210b3f3bd7198b15735a3d3adb8173d7",
       "_notes": "llama.cpp Vulkan backend; default for Strix Halo iGPU"
     },
     "rocm": {
@@ -21,22 +21,38 @@
     },
     "moonshine": {
       "tag": "ghcr.io/hal0ai/hal0-toolbox-moonshine:v1",
-      "digest": null,
+      "digest": "sha256:ec89c762d562eade4a8366c80c67590a5e00159ffc1812818b07f9c7d3e4a30b",
       "_notes": "Moonshine STT (CPU/Vulkan); OpenAI-compat /v1/audio/transcriptions + WS"
     },
     "kokoro": {
       "tag": "ghcr.io/hal0ai/hal0-toolbox-kokoro:v1",
-      "digest": null,
+      "digest": "sha256:82a97ba0155de72d34d2c12591fd957c94bd09bd1da1b48c554088e40168c1dc",
       "_notes": "Kokoro-82M TTS (CPU ONNX); OpenAI-compat /v1/audio/speech",
       "_upstream_reference": "https://github.com/thewh1teagle/kokoro-onnx"
     }
   },
   "_legacy_toolboxes": {
     "_comment": "Old key shape (pre-2026-05-15). Kept for one release cycle so any out-of-tree readers don't break. Will be removed after Phase 5 ships.",
-    "vulkan":    { "image": "ghcr.io/hal0ai/hal0-toolbox-vulkan:v1",    "digest": "placeholder" },
-    "rocm":      { "image": "ghcr.io/hal0ai/hal0-toolbox-rocm:v1",      "digest": "placeholder" },
-    "flm":       { "image": "ghcr.io/hal0ai/hal0-toolbox-flm:v1",       "digest": "placeholder" },
-    "moonshine": { "image": "ghcr.io/hal0ai/hal0-toolbox-moonshine:v1", "digest": "placeholder" },
-    "kokoro":    { "image": "ghcr.io/hal0ai/hal0-toolbox-kokoro:v1",    "digest": "placeholder", "_upstream_reference": "ghcr.io/remsky/kokoro-fastapi-cpu:latest" }
+    "vulkan": {
+      "image": "ghcr.io/hal0ai/hal0-toolbox-vulkan:v1",
+      "digest": "placeholder"
+    },
+    "rocm": {
+      "image": "ghcr.io/hal0ai/hal0-toolbox-rocm:v1",
+      "digest": "placeholder"
+    },
+    "flm": {
+      "image": "ghcr.io/hal0ai/hal0-toolbox-flm:v1",
+      "digest": "placeholder"
+    },
+    "moonshine": {
+      "image": "ghcr.io/hal0ai/hal0-toolbox-moonshine:v1",
+      "digest": "placeholder"
+    },
+    "kokoro": {
+      "image": "ghcr.io/hal0ai/hal0-toolbox-kokoro:v1",
+      "digest": "placeholder",
+      "_upstream_reference": "ghcr.io/remsky/kokoro-fastapi-cpu:latest"
+    }
   }
 }
