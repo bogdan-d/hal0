@@ -36,32 +36,7 @@ from hal0.providers.base import ContainerSpec, Provider
 log = logging.getLogger(__name__)
 
 
-def _resolve_gpu_group_ids() -> list[int]:
-    """Return numeric GIDs for the GPU access groups on the host.
-
-    The toolbox image ships with a stock ``ubuntu:24.04`` ``/etc/group``
-    that has no ``render``/``video`` entries, so passing the **names** to
-    ``docker run --group-add`` fails fast ("unable to find group ...").
-    Pass the host's numeric GIDs instead — the kernel only cares about
-    the integers when checking access to ``/dev/dri/renderD128`` etc.
-
-    Falls back to the Linux convention (render=993, video=44) on systems
-    without ``grp`` (Windows hosts).  Skips groups that don't exist.
-    """
-    gids: list[int] = []
-    try:
-        import grp
-
-        for name, fallback in (("render", 993), ("video", 44)):
-            try:
-                gids.append(grp.getgrnam(name).gr_gid)
-            except KeyError:
-                # Group missing on this host — skip rather than guess.
-                log.debug("group %r not on host; skipping --group-add", name)
-    except ImportError:
-        # No grp module (Windows) — fall back to conventional Linux GIDs.
-        gids = [993, 44]
-    return gids
+from hal0.providers._gpu import resolve_gpu_group_ids as _resolve_gpu_group_ids
 
 # ── Toolbox image refs ─────────────────────────────────────────────────────────
 # Per PLAN.md §12 the hal0 toolbox images are published under

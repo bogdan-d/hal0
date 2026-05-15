@@ -94,7 +94,11 @@ def test_container_spec_vulkan_passes_dri(
     slot_cfg = {"port": 8090, "backend": "vulkan", "_paths": {}}
     spec = provider.container_spec(slot_cfg, model_info)
     assert "/dev/dri" in spec.devices
-    assert "video" in spec.group_add
+    # group_add is numeric GIDs (resolved from host) so toolbox image's
+    # stock /etc/group doesn't matter — should always be at least one
+    # integer-as-string when vulkan backend is selected.
+    assert spec.group_add
+    assert all(g.isdigit() for g in spec.group_add)
 
 
 # ─── health ───────────────────────────────────────────────────────────────────

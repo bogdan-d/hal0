@@ -17,11 +17,13 @@ Port target: new hal0 provider wrapping haloai lib/voice/moonshine_server.py.
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 import httpx
 
 from hal0.errors import Hal0Error
+from hal0.providers._gpu import resolve_gpu_group_ids
 from hal0.providers.base import ContainerSpec, Provider
 
 # ── Toolbox image ──────────────────────────────────────────────────────────────
@@ -116,8 +118,22 @@ class MoonshineProvider(Provider):
 
     # ── Image / container spec ─────────────────────────────────────────────────
 
-    def image_ref(self, _slot_cfg: dict[str, Any]) -> str:
-        """Return the Moonshine toolbox image reference."""
+    def image_ref(self, slot_cfg: dict[str, Any]) -> str:
+        """Resolve the Moonshine toolbox image.
+
+        Resolution order (matches ``llama_server.image_ref``):
+          1. ``slot_cfg["image"]`` — explicit override from slot TOML
+             (e.g. ``image = "hal0-toolbox-moonshine:dev"``).
+          2. ``HAL0_TOOLBOX_IMAGE_MOONSHINE`` env var — installer /
+             operator override without editing slot TOML.
+          3. The default ``ghcr.io/hal0-dev/hal0-toolbox-moonshine:v1``.
+        """
+        override = slot_cfg.get("image") or slot_cfg.get("slot", {}).get("image")
+        if override:
+            return str(override)
+        env_override = os.environ.get("HAL0_TOOLBOX_IMAGE_MOONSHINE", "").strip()
+        if env_override:
+            return env_override
         return _HAL0_MOONSHINE_IMAGE
 
     def container_spec(
@@ -160,7 +176,7 @@ class MoonshineProvider(Provider):
             devices=["/dev/dri"],
             cap_add=[],
             security_opt=["seccomp=unconfined", "apparmor=unconfined"],
-            group_add=["video", "render"],
+            group_add=[str(g) for g in resolve_gpu_group_ids()],
             port=port,
             network_mode="host",
             extra_args=[],

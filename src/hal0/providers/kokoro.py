@@ -27,11 +27,13 @@ See PLAN.md §1 (v1 ships — Kokoro TTS) and §12 (toolbox images).
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 import httpx
 
 from hal0.errors import Hal0Error
+from hal0.providers._gpu import resolve_gpu_group_ids
 from hal0.providers.base import ContainerSpec, Provider
 
 # ── Toolbox image ──────────────────────────────────────────────────────────────
@@ -126,8 +128,20 @@ class KokoroProvider(Provider):
 
     # ── Image / container spec ─────────────────────────────────────────────────
 
-    def image_ref(self, _slot_cfg: dict[str, Any]) -> str:
-        """Return the Kokoro toolbox image reference."""
+    def image_ref(self, slot_cfg: dict[str, Any]) -> str:
+        """Resolve the Kokoro toolbox image.
+
+        Resolution order (matches ``llama_server.image_ref``):
+          1. ``slot_cfg["image"]`` — explicit override from slot TOML.
+          2. ``HAL0_TOOLBOX_IMAGE_KOKORO`` env var.
+          3. The default ``ghcr.io/hal0-dev/hal0-toolbox-kokoro:v1``.
+        """
+        override = slot_cfg.get("image") or slot_cfg.get("slot", {}).get("image")
+        if override:
+            return str(override)
+        env_override = os.environ.get("HAL0_TOOLBOX_IMAGE_KOKORO", "").strip()
+        if env_override:
+            return env_override
         return _HAL0_KOKORO_IMAGE
 
     def container_spec(
@@ -165,7 +179,7 @@ class KokoroProvider(Provider):
         group_add: list[str] = []
         if backend == "vulkan":
             devices = ["/dev/dri"]
-            group_add = ["video", "render"]
+            group_add = [str(g) for g in resolve_gpu_group_ids()]
 
         return ContainerSpec(
             image=self.image_ref(slot_cfg),

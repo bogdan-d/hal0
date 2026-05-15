@@ -476,11 +476,15 @@ async def test_sentinel_inference_accepts_2xx() -> None:
     assert ok is True
 
 
-def test_provider_uses_v1_models_classification() -> None:
-    from hal0.slots.manager import _provider_uses_v1_models
+def test_provider_health_strategy_classification() -> None:
+    from hal0.slots.manager import _provider_health_strategy
 
-    assert _provider_uses_v1_models("flm")
-    assert _provider_uses_v1_models("vllm")
-    assert _provider_uses_v1_models("moonshine")
-    assert not _provider_uses_v1_models("llama-server")
-    assert not _provider_uses_v1_models("llamacpp")
+    # chat-multiplex providers that advertise models before infer works
+    assert _provider_health_strategy("flm") == "chat_sentinel"
+    assert _provider_health_strategy("vllm") == "chat_sentinel"
+    # moonshine has /health but stays 200 while loading — body must say so
+    assert _provider_health_strategy("moonshine") == "health_with_model_loaded"
+    # llama-server + kokoro: /health 2xx is authoritative
+    assert _provider_health_strategy("llama-server") == "health"
+    assert _provider_health_strategy("llamacpp") == "health"
+    assert _provider_health_strategy("kokoro") == "health"

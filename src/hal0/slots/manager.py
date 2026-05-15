@@ -880,8 +880,10 @@ class SlotManager:
             wait_s = max(0.1, backoff + jitter)
             try:
                 async with httpx.AsyncClient(timeout=_HEALTH_PROBE_TIMEOUT_S) as client:
-                    if _provider_uses_v1_models(provider):
-                        # FLM / vLLM / moonshine / kokoro path.
+                    strategy = _provider_health_strategy(provider)
+                    if strategy == "chat_sentinel":
+                        # FLM / vLLM path — providers that advertise
+                        # models before inference works.
                         resp = await client.get(f"{url}/v1/models")
                         if resp.status_code == 200:
                             data = (
@@ -891,7 +893,6 @@ class SlotManager:
                             )
                             models = data.get("data", []) if isinstance(data, dict) else []
                             if models:
-                                # Non-empty → confirm inference works.
                                 if await _sentinel_inference(client, url, models[0]):
                                     return
                                 last_error = "sentinel inference failed"
@@ -899,8 +900,24 @@ class SlotManager:
                                 last_error = "/v1/models returned empty data array"
                         else:
                             last_error = f"/v1/models HTTP {resp.status_code}"
+                    elif strategy == "health_with_model_loaded":
+                        # Moonshine: /health stays 200 while model is
+                        # loading; require model_loaded=true in body.
+                        resp = await client.get(f"{url}/health")
+                        if resp.status_code == 200:
+                            try:
+                                body = resp.json()
+                            except Exception:
+                                body = {}
+                            if isinstance(body, dict) and body.get("model_loaded"):
+                                return
+                            last_error = (
+                                f"/health 200 but model_loaded != true (body={body!r})"
+                            )
+                        else:
+                            last_error = f"/health HTTP {resp.status_code}"
                     else:
-                        # llama.cpp path — /health is authoritative.
+                        # llama-server / kokoro — /health 2xx is authoritative.
                         resp = await client.get(f"{url}/health")
                         if resp.status_code == 200:
                             return
@@ -953,13 +970,27 @@ def _model_default(cfg: SlotConfig | dict[str, Any]) -> str:
     return ""
 
 
-def _provider_uses_v1_models(provider: str) -> bool:
-    """Return True for providers that do not expose /health (FLM, vLLM, moonshine, kokoro).
+def _provider_health_strategy(provider: str) -> str:
+    """Pick the readiness probe shape for a provider.
 
-    The llama-server provider exposes /health; everyone else's readiness
-    signal is a non-empty /v1/models response plus an inference probe.
+    Returns one of:
+      - ``"health"``: GET /health → 2xx is sufficient. Used by
+        llama-server (canonical) and kokoro (whose /health body is
+        either empty or ``{"status":"ok"}``).
+      - ``"health_with_model_loaded"``: GET /health → 2xx + JSON body
+        with ``model_loaded == true``. Used by moonshine, whose /health
+        returns ``{model_loaded, model_id, model_arch}`` and stays 200
+        even while the model is still loading.
+      - ``"chat_sentinel"``: GET /v1/models must be non-empty AND a
+        ``max_tokens=1`` POST /v1/chat/completions must 2xx. Used by FLM
+        and vLLM, both of which advertise models before inference works.
     """
-    return provider.lower() not in ("llama-server", "llama_server", "llamacpp")
+    p = provider.lower()
+    if p in ("llama-server", "llama_server", "llamacpp", "kokoro"):
+        return "health"
+    if p in ("moonshine",):
+        return "health_with_model_loaded"
+    return "chat_sentinel"
 
 
 async def _sentinel_inference(
