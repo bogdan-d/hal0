@@ -102,22 +102,12 @@ jobs:
                        || true
           docker image prune -af || true
           docker buildx prune -af || true
-          # GHA runners give us /mnt with ~80 GB unused while / has only
-          # ~14 GB.  Move Docker's data-root to /mnt so build layers /
-          # overlay storage land on the big disk.  This is the only
-          # reliable fix for "Errno 28 No space left on device" inside a
-          # multi-GB pip install.
-          if [ -d /mnt ]; then
-            sudo systemctl stop docker docker.socket containerd
-            sudo mkdir -p /mnt/docker
-            if [ -d /var/lib/docker ]; then
-              sudo mv /var/lib/docker /mnt/docker/lib || sudo cp -a /var/lib/docker /mnt/docker/lib
-              sudo rm -rf /var/lib/docker
-            fi
-            sudo ln -sf /mnt/docker/lib /var/lib/docker
-            sudo systemctl start containerd docker
-          fi
-          df -h / /mnt 2>/dev/null || df -h /
+          # Earlier attempt moved Docker's data-root to /mnt for more
+          # space; turns out modern GHA Linux runners don't ship a /mnt
+          # volume (only /). Removed. The provenance/SBOM/cache-to-gha
+          # exclusions on comfyui (see Build & push step) are the real
+          # ENOSPC fix.
+          df -h /
 
       - name: Set up Docker Buildx
         if: steps.filter.outputs.build == 'true'
@@ -159,10 +149,15 @@ jobs:
           tags: |
             ${{ steps.tags.outputs.tag_v1 }}
             ${{ steps.tags.outputs.tag_sha }}
-          provenance: true
-          sbom: true
-          cache-from: type=gha,scope=toolbox-${{ matrix.image }}
-          cache-to: type=gha,scope=toolbox-${{ matrix.image }},mode=max
+          # ComfyUI's image is too big to cache reliably on the standard
+          # ubuntu-latest runner — cache-to with mode=max writes 5+ GB
+          # of layer exports to local disk before uploading, which hits
+          # ENOSPC during the PyTorch wheel install. Skip cache for
+          # comfyui; the other images are small enough to cache normally.
+          provenance: ${{ matrix.image != 'comfyui' }}
+          sbom: ${{ matrix.image != 'comfyui' }}
+          cache-from: ${{ matrix.image == 'comfyui' && '' || format('type=gha,scope=toolbox-{0}', matrix.image) }}
+          cache-to: ${{ matrix.image == 'comfyui' && '' || format('type=gha,scope=toolbox-{0},mode=max', matrix.image) }}
 
       - name: Install cosign
         if: steps.filter.outputs.build == 'true' && steps.build.outcome == 'success'
