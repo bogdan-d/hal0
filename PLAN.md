@@ -625,9 +625,10 @@ Working assumption: 1 person full-time + Claude as pair. Adjust if not.
 These were intentionally not settled during the grilling and need their
 own decisions before relevant milestones:
 
-- **Repo home + license** (deferred from Q4). Decide before phase 6 release prep
+- ~~**Repo home**~~ — RESOLVED 2026-05-15: GitHub org is `hal0ai` for both `hal0ai/hal0` and `hal0ai/hal0.dev`
+- **License** (still open). Apache 2.0 recommended; confirm before tag-and-release
 - **Hermes shutdown timing** on the haloai LXC. Decide at cutover (phase 7)
-- **`hal0.dev` web property** scope. Marketing site? Just `install.sh` + release JSON? Decide before phase 6
+- ~~**`hal0.dev` web property** scope~~ — RESOLVED 2026-05-15: marketing site + Starlight docs in a separate `hal0ai/hal0.dev` repo, Vercel-hosted
 - **Public launch story** — blog post? HN? home AI subreddit? Decide before phase 7
 - **Contribution model** — accepting external PRs from day one? GH issues open? Decide before phase 7
 
