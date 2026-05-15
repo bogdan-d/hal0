@@ -1,393 +1,280 @@
 #!/usr/bin/env bash
-# hal0 installer — non-interactive, idempotent
+# hal0 installer — idempotent, non-interactive.
 #
 # Usage:
-#   sudo bash install.sh           # standard FHS install
-#   bash install.sh --dev          # local dev layout under $PWD/hal0-home
+#   sudo bash install.sh             # standard install at /opt/hal0
+#   bash install.sh --dev            # local-only install under $PWD/.hal0-dev
+#   sudo bash install.sh --no-start  # set up everything but don't start units
 #
-# Override defaults via env vars before running:
-#   HAL0_CHANNEL=stable|nightly
-#   HAL0_AUTO_PULL=1|0             # pull toolbox + OpenWebUI images (Phase 2)
-#   HAL0_INSTALL_DIR               # override /usr/lib/hal0
-#   HAL0_PORT                      # override 8080
-#   HAL0_OPENWEBUI_PORT            # override 3001
+# Env overrides:
+#   HAL0_PREFIX        installation root (default /opt/hal0)
+#   HAL0_PORT          API port (default 8080)
+#   HAL0_USER          system user (default root — slot template uses root
+#                      because the container is the real sandbox boundary)
+#   HAL0_PYTHON        python interpreter (default python3)
+#   HAL0_NO_PROBE=1    skip the hardware probe at the end
+#   HAL0_TOOLBOX_IMAGE_VULKAN, HAL0_TOOLBOX_IMAGE_ROCM, ...
+#                      override per-backend container image refs
 
 set -euo pipefail
 IFS=$'\n\t'
 
-# ── Colour helpers ────────────────────────────────────────────────────────────
 if [[ -t 1 ]]; then
-    RED='\033[0;31m'; YELLOW='\033[1;33m'; GREEN='\033[0;32m'
-    BOLD='\033[1m'; RESET='\033[0m'
+    RED=$'\033[0;31m'; YEL=$'\033[1;33m'; GRN=$'\033[0;32m'; BLU=$'\033[0;36m'
+    BOLD=$'\033[1m';   DIM=$'\033[2m';    RST=$'\033[0m'
 else
-    RED=''; YELLOW=''; GREEN=''; BOLD=''; RESET=''
+    RED=; YEL=; GRN=; BLU=; BOLD=; DIM=; RST=
 fi
+info()  { printf "${GRN}✔${RST}  %s\n" "$*"; }
+warn()  { printf "${YEL}!${RST}  %s\n" "$*" >&2; }
+err()   { printf "${RED}✗${RST}  %s\n" "$*" >&2; }
+step()  { printf "\n${BOLD}── %s${RST}\n" "$*"; }
+die()   { err "$*"; exit 1; }
 
-info()  { printf "${GREEN}✔${RESET}  %s\n" "$*"; }
-warn()  { printf "${YELLOW}!${RESET}  %s\n" "$*" >&2; }
-error() { printf "${RED}✗${RESET}  %s\n" "$*" >&2; }
-step()  { printf "\n${BOLD}── %s${RESET}\n" "$*"; }
-die()   { error "$*"; exit 1; }
-
-# ── Parse flags ───────────────────────────────────────────────────────────────
 DEV_MODE=0
+NO_START=0
 for arg in "$@"; do
     case "$arg" in
         --dev) DEV_MODE=1 ;;
+        --no-start) NO_START=1 ;;
         --help|-h)
-            printf 'Usage: install.sh [--dev]\n'
-            # shellcheck disable=SC2016
-            printf '  --dev   install under %s/hal0-home instead of FHS paths\n' '$PWD'
+            cat <<EOF
+Usage: install.sh [--dev] [--no-start]
+  --dev        install under \$PWD/.hal0-dev/, no systemd setup
+  --no-start   set up everything but don't enable/start the API
+EOF
             exit 0
             ;;
-        *) warn "Unknown flag: $arg (ignored)" ;;
+        *) warn "unknown flag: ${arg} (ignored)" ;;
     esac
 done
 
-# ── Defaults (env-overridable) ─────────────────────────────────────────────────
-HAL0_CHANNEL="${HAL0_CHANNEL:-stable}"
-HAL0_AUTO_PULL="${HAL0_AUTO_PULL:-0}"
 HAL0_PORT="${HAL0_PORT:-8080}"
-HAL0_OPENWEBUI_PORT="${HAL0_OPENWEBUI_PORT:-3001}"
-HAL0_VERSION="0.0.0-dev"
+HAL0_USER="${HAL0_USER:-root}"
+PY="${HAL0_PYTHON:-python3}"
 
-# Dev-mode overrides all FHS paths to $PWD/hal0-home
 if [[ "${DEV_MODE}" -eq 1 ]]; then
-    HAL0_HOME="${HAL0_HOME:-${PWD}/hal0-home}"
-    HAL0_INSTALL_DIR="${HAL0_INSTALL_DIR:-${HAL0_HOME}/usr/lib/hal0}"
-    ETC_DIR="${HAL0_HOME}/etc/hal0"
-    VAR_DIR="${HAL0_HOME}/var/lib/hal0"
-    UNIT_DIR="${HAL0_HOME}/etc/systemd/system"
-    warn "Dev mode — all paths under ${HAL0_HOME}"
-    warn "  systemd units written to ${UNIT_DIR} (not installed or enabled)"
+    PREFIX="${HAL0_PREFIX:-${PWD}/.hal0-dev}"
+    ETC_DIR="${PREFIX}/etc/hal0"
+    VAR_DIR="${PREFIX}/var/lib/hal0"
+    UNIT_DIR="${PREFIX}/etc/systemd/system"
+    info "Dev mode — all paths under ${PREFIX}"
 else
-    HAL0_INSTALL_DIR="${HAL0_INSTALL_DIR:-/usr/lib/hal0}"
+    PREFIX="${HAL0_PREFIX:-/opt/hal0}"
     ETC_DIR="/etc/hal0"
     VAR_DIR="/var/lib/hal0"
     UNIT_DIR="/etc/systemd/system"
 fi
-
-VERSIONED_DIR="${HAL0_INSTALL_DIR}/${HAL0_VERSION}"
-CURRENT_LINK="${HAL0_INSTALL_DIR}/current"
+VENV_DIR="${PREFIX}/.venv"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-# ── Error trap ────────────────────────────────────────────────────────────────
-trap 'error "Install failed at line ${LINENO}. Check the output above for details."; exit 1' ERR
+trap 'err "install failed at line ${LINENO}. See output above."; exit 1' ERR
 
-# ── Pre-flight checks ─────────────────────────────────────────────────────────
 step "Pre-flight checks"
 
-# uid / sudo
-if [[ "${DEV_MODE}" -eq 0 ]]; then
-    if [[ "$(id -u)" -ne 0 ]]; then
-        if command -v sudo &>/dev/null; then
-            warn "Not running as root — re-exec under sudo"
-            exec sudo bash "$0" "$@"
-        else
-            die "pre-flight failed: must run as root or have sudo available.\n       Run: sudo bash install.sh"
-        fi
-    fi
-    info "Running as root"
-else
-    info "Dev mode — skipping root check"
-fi
-
-# systemd
-if ! command -v systemctl &>/dev/null || ! systemctl --version &>/dev/null 2>&1; then
-    die "pre-flight failed: systemd not found.\n       hal0 requires systemd. Install on Debian/Ubuntu:\n         apt install systemd"
-fi
-info "systemd present: $(systemctl --version | head -1)"
-
-# architecture
-ARCH="$(uname -m)"
-if [[ "${ARCH}" != "x86_64" ]]; then
-    die "pre-flight failed: hal0 v1 requires x86_64, got ${ARCH}.\n       ARM and other arches are planned for a future release."
-fi
-info "Architecture: ${ARCH}"
-
-# Docker
-if ! command -v docker &>/dev/null; then
-    die "pre-flight failed: docker not installed.\n       Install via: curl -fsSL https://get.docker.com | sh\n       Then add your user to the docker group: usermod -aG docker \$USER"
-fi
-if ! docker info &>/dev/null 2>&1; then
-    die "pre-flight failed: docker daemon not running or not accessible.\n       Start it: systemctl start docker\n       Or add your user to the docker group and re-login:\n         usermod -aG docker \$USER && newgrp docker"
-fi
-DOCKER_VER="$(docker version --format '{{.Server.Version}}' 2>/dev/null || echo 'unknown')"
-info "Docker: ${DOCKER_VER}"
-
-# Disk space (≥20GB free in /var/lib — or $VAR_DIR parent in dev mode)
-CHECK_DIR="/var/lib"
-[[ "${DEV_MODE}" -eq 1 ]] && CHECK_DIR="${PWD}"
-AVAIL_KB="$(df -k "${CHECK_DIR}" | awk 'NR==2{print $4}')"
-REQUIRED_KB=$((20 * 1024 * 1024))  # 20 GB
-if [[ "${AVAIL_KB}" -lt "${REQUIRED_KB}" ]]; then
-    AVAIL_GB=$(( AVAIL_KB / 1024 / 1024 ))
-    die "pre-flight failed: less than 20GB free in ${CHECK_DIR} (have ~${AVAIL_GB}GB).\n       Free up space or set a custom model dir via a symlink:\n         ln -s /mnt/large-disk/hal0-models /var/lib/hal0/models"
-fi
-AVAIL_GB=$(( AVAIL_KB / 1024 / 1024 ))
-info "Disk space: ~${AVAIL_GB}GB free in ${CHECK_DIR}"
-
-# Port availability (skip in dev mode — ports not bound by systemd)
-if [[ "${DEV_MODE}" -eq 0 ]]; then
-    for PORT in "${HAL0_PORT}" "${HAL0_OPENWEBUI_PORT}"; do
-        if ss -tlnp 2>/dev/null | grep -q ":${PORT} " || \
-           netstat -tlnp 2>/dev/null | grep -q ":${PORT} "; then
-            die "pre-flight failed: port ${PORT} is already in use.\n       Find the process: lsof -i :${PORT}\n       Set a different port: HAL0_PORT=8090 bash install.sh\n         (and update /etc/hal0/api.env + openwebui.env after install)"
-        fi
-    done
-    info "Ports ${HAL0_PORT} and ${HAL0_OPENWEBUI_PORT} are free"
-fi
-
-# ── System user ───────────────────────────────────────────────────────────────
-step "System user"
-
-if [[ "${DEV_MODE}" -eq 0 ]]; then
-    if ! id hal0 &>/dev/null 2>&1; then
-        useradd --system --no-create-home --shell /usr/sbin/nologin \
-            --comment "hal0 inference daemon" hal0
-        info "Created system user: hal0"
+if [[ "${DEV_MODE}" -eq 0 && "$(id -u)" -ne 0 ]]; then
+    if command -v sudo >/dev/null; then
+        warn "Re-exec under sudo"
+        exec sudo -E HAL0_PORT="${HAL0_PORT}" HAL0_USER="${HAL0_USER}" HAL0_PYTHON="${PY}" \
+            HAL0_PREFIX="${HAL0_PREFIX:-}" HAL0_NO_PROBE="${HAL0_NO_PROBE:-}" \
+            bash "$0" "$@"
     else
-        info "System user hal0 already exists"
+        die "must run as root (sudo bash install.sh)"
     fi
 fi
 
-# ── Filesystem layout ─────────────────────────────────────────────────────────
+if [[ "${DEV_MODE}" -eq 0 ]] && ! command -v systemctl >/dev/null; then
+    die "systemd not found — hal0 v1 requires systemd"
+fi
+info "system: $(uname -srm)"
+
+if ! command -v "${PY}" >/dev/null; then
+    die "python interpreter '${PY}' not found — install with 'apt install python3 python3-venv'"
+fi
+PY_VER="$(${PY} -c 'import sys; print(".".join(map(str, sys.version_info[:2])))')"
+info "python: ${PY} (${PY_VER})"
+
+if [[ ! "${PY_VER}" =~ ^3\.(11|12|13|14)$ ]]; then
+    warn "hal0 is tested on Python 3.11–3.14; ${PY_VER} may not work."
+fi
+
+# Soft Docker check — not fatal so the API can come up on hosts that'll
+# install Docker later. Slot loads will fail loudly when launched.
+if command -v docker >/dev/null && docker info >/dev/null 2>&1; then
+    info "docker: $(docker version --format '{{.Server.Version}}' 2>/dev/null || echo unknown)"
+else
+    warn "docker is not available — slot launches will fail until it is installed"
+fi
+
 step "Filesystem layout"
 
 mkdir -p \
-    "${VERSIONED_DIR}/bin" \
-    "${VERSIONED_DIR}/site-packages" \
-    "${VERSIONED_DIR}/ui" \
+    "${PREFIX}" \
     "${ETC_DIR}/slots" \
     "${VAR_DIR}/models" \
     "${VAR_DIR}/registry" \
-    "${VAR_DIR}/openwebui" \
     "${VAR_DIR}/slots" \
-    "${VAR_DIR}/cache"
+    "${VAR_DIR}/cache" \
+    "${UNIT_DIR}"
+info "directories under ${PREFIX}, ${ETC_DIR}, ${VAR_DIR}"
 
-# Per-slot working dirs for the four default slots
-for SLOT in primary embed stt tts; do
-    mkdir -p "${VAR_DIR}/slots/${SLOT}"
-done
+step "Python environment"
 
-if [[ "${DEV_MODE}" -eq 0 ]]; then
-    # Ownership: hal0 owns its runtime dirs; root owns code + config
-    chown -R hal0:hal0 "${VAR_DIR}" || true
-    chown -R root:root "${HAL0_INSTALL_DIR}" || true
-    # Config: readable by hal0 so the daemon can read its own config
-    chown -R root:hal0 "${ETC_DIR}" || true
-    chmod -R 750 "${ETC_DIR}" || true
+if [[ ! -d "${VENV_DIR}" ]]; then
+    "${PY}" -m venv "${VENV_DIR}"
+    info "created venv at ${VENV_DIR}"
 fi
-info "Directories created"
+PIP="${VENV_DIR}/bin/pip"
+HAL0_BIN="${VENV_DIR}/bin/hal0"
 
-# ── Symlink current version ───────────────────────────────────────────────────
-step "Installing hal0 ${HAL0_VERSION}"
+# Refresh pip + install hal0 in editable mode pointing at this checkout.
+${PIP} install --upgrade pip setuptools wheel >/dev/null
+${PIP} install -e "${REPO_ROOT}" >/dev/null
+info "installed hal0 from ${REPO_ROOT}"
 
-# Copy repo sources into the versioned dir
-# Phase 0: copy src/hal0 + ui/dist (if it exists) + installer/bin
-if [[ -d "${REPO_ROOT}/src/hal0" ]]; then
-    cp -r "${REPO_ROOT}/src/hal0" "${VERSIONED_DIR}/site-packages/"
-    info "Installed Python package"
-else
-    warn "src/hal0 not found — skipping package copy (Phase 0 scaffold only)"
+if [[ ! -x "${HAL0_BIN}" ]]; then
+    die "hal0 binary not produced at ${HAL0_BIN} — check pip install output"
 fi
+info "hal0 cli: ${HAL0_BIN}"
 
-if [[ -d "${REPO_ROOT}/ui/dist" ]]; then
-    cp -r "${REPO_ROOT}/ui/dist/." "${VERSIONED_DIR}/ui/"
-    info "Installed UI dist"
-else
-    warn "ui/dist not found — skipping UI copy (run 'cd ui && npm run build' first)"
-fi
+step "Configuration"
 
-# Install launcher scripts from installer/bin/
-if [[ -d "${REPO_ROOT}/installer/bin" ]]; then
-    cp "${REPO_ROOT}/installer/bin/"* "${VERSIONED_DIR}/bin/"
-    chmod +x "${VERSIONED_DIR}/bin/"*
-    info "Installed launcher scripts"
-fi
-
-# Create stub hal0 binary if none was built yet
-if [[ ! -f "${VERSIONED_DIR}/bin/hal0" ]]; then
-    cat > "${VERSIONED_DIR}/bin/hal0" <<'STUBEOF'
-#!/usr/bin/env bash
-# hal0 CLI stub — replace with real binary in Phase 1
-echo "hal0 ${1:-help} — not yet implemented (Phase 0 scaffold)" >&2
-case "${1:-}" in
-    serve)
-        echo "hal0 serve: listening on port ${HAL0_PORT:-8080} (stub)" >&2
-        # Keep running so systemd sees a live process during dev
-        exec sleep infinity
-        ;;
-    *) exit 1 ;;
-esac
-STUBEOF
-    chmod +x "${VERSIONED_DIR}/bin/hal0"
-    warn "Created hal0 stub binary — replace with real build in Phase 1"
-fi
-
-# Atomic symlink swap: new -> ln -sfn target link
-ln -sfn "${VERSIONED_DIR}" "${CURRENT_LINK}"
-info "Symlink: ${CURRENT_LINK} -> ${VERSIONED_DIR}"
-
-# ── Config defaults ───────────────────────────────────────────────────────────
-step "Default configuration"
-
-# hal0.toml — never clobber if it already exists
-if [[ ! -f "${ETC_DIR}/hal0.toml" ]]; then
-    cat > "${ETC_DIR}/hal0.toml" <<TOMLEOF
-# hal0 main configuration
+HAL0_TOML="${ETC_DIR}/hal0.toml"
+if [[ ! -f "${HAL0_TOML}" ]]; then
+    cat > "${HAL0_TOML}" <<TOML
+# hal0 configuration — created by install.sh ($(date -uIseconds))
 # Edit with: hal0 config edit
-# Validate with: hal0 config validate
-# Migrate schema: hal0 config migrate
+# Validate:  hal0 config validate
 
 [meta]
 schema_version = 1
 
-[api]
-port = ${HAL0_PORT}
-host = "0.0.0.0"
-log_level = "info"
+[slots]
+port_range_start = 8081
+port_range_end = 8099
 
 [dispatcher]
-prefetch_timeout_s = 8
-per_upstream_parallel_cap = 4
+prefetch_timeout_s = 8.0
+prefetch_parallel_cap = 4
 
-[update]
-channel = "${HAL0_CHANNEL}"
-auto_check = true
-TOMLEOF
-    info "Created /etc/hal0/hal0.toml"
+[telemetry]
+enabled = false
+TOML
+    info "wrote ${HAL0_TOML}"
 else
-    info "hal0.toml already exists — not clobbered"
+    info "${HAL0_TOML} exists — left alone"
 fi
 
-# api.env
-if [[ ! -f "${ETC_DIR}/api.env" ]]; then
-    cat > "${ETC_DIR}/api.env" <<ENVEOF
+API_ENV="${ETC_DIR}/api.env"
+if [[ ! -f "${API_ENV}" ]]; then
+    cat > "${API_ENV}" <<EOF
 HAL0_PORT=${HAL0_PORT}
 HAL0_LOG_LEVEL=info
-# Uncomment to enable telemetry (off by default)
-# HAL0_TELEMETRY=1
-ENVEOF
-    info "Created ${ETC_DIR}/api.env"
-else
-    info "api.env already exists — not clobbered"
+# Uncomment to pin specific toolbox images:
+# HAL0_TOOLBOX_IMAGE_VULKAN=ghcr.io/hal0-dev/hal0-toolbox-vulkan:v1
+# HAL0_TOOLBOX_IMAGE_ROCM=ghcr.io/hal0-dev/hal0-toolbox-rocm:v1
+EOF
+    info "wrote ${API_ENV}"
 fi
 
-# openwebui.env
-if [[ ! -f "${ETC_DIR}/openwebui.env" ]]; then
-    cat > "${ETC_DIR}/openwebui.env" <<ENVEOF
-OPENAI_API_BASE_URLS=http://127.0.0.1:${HAL0_PORT}/v1
-WEBUI_AUTH=False
-WEBUI_NAME=hal0
-ENABLE_OPENAI_API=True
-ENABLE_OLLAMA_API=False
-DATA_DIR=/app/backend/data
-DEFAULT_LOCALE=en
-ENVEOF
-    info "Created ${ETC_DIR}/openwebui.env"
-else
-    info "openwebui.env already exists — not clobbered"
+UPSTREAMS_TOML="${ETC_DIR}/upstreams.toml"
+if [[ ! -f "${UPSTREAMS_TOML}" ]]; then
+    cat > "${UPSTREAMS_TOML}" <<EOF
+# External LLM upstreams — populated via the WebUI Providers tab,
+# 'hal0 config edit' here, or directly with the API.
+EOF
+    info "wrote ${UPSTREAMS_TOML}"
 fi
 
-# Default slot TOMLs — skeletons, filled by hal0 probe in Phase 2
-declare -A SLOT_COMMENTS=(
-    [primary]="Primary chat/completion slot (llama.cpp backend)"
-    [embed]="Embedding slot (llama.cpp backend)"
-    [stt]="Speech-to-text slot (Moonshine backend)"
-    [tts]="Text-to-speech slot (Kokoro backend)"
-)
-declare -A SLOT_BACKENDS=(
-    [primary]="llama_server"
-    [embed]="llama_server"
-    [stt]="moonshine"
-    [tts]="kokoro"
-)
-
-for SLOT in primary embed stt tts; do
-    SLOT_TOML="${ETC_DIR}/slots/${SLOT}.toml"
-    if [[ ! -f "${SLOT_TOML}" ]]; then
-        cat > "${SLOT_TOML}" <<SLOTEOF
-# hal0 slot config: ${SLOT}
-# ${SLOT_COMMENTS[${SLOT}]}
-# Filled by: hal0 probe (Phase 2 — run after install to detect hardware)
-# Edit with: hal0 config edit (or \$EDITOR ${SLOT_TOML})
-
-[slot]
-name = "${SLOT}"
-backend = "${SLOT_BACKENDS[${SLOT}]}"
-# model = "unset"   # set via FirstRun wizard or: hal0 model assign <ref> --slot ${SLOT}
-# port = 0          # assigned automatically by hal0 (8081-8099 range)
-# gpu_layers = -1   # -1 = auto (all layers to GPU)
-# ctx_size = 4096
-# parallel = 4
-SLOTEOF
-        info "Created ${ETC_DIR}/slots/${SLOT}.toml"
-    else
-        info "slots/${SLOT}.toml already exists — not clobbered"
-    fi
-done
-
-# ── Systemd units ─────────────────────────────────────────────────────────────
 step "Systemd units"
 
+API_UNIT="${UNIT_DIR}/hal0-api.service"
+cat > "${API_UNIT}" <<EOF
+[Unit]
+Description=hal0 API daemon
+Documentation=https://github.com/hal0-dev/hal0
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=${HAL0_USER}
+WorkingDirectory=${PREFIX}
+EnvironmentFile=${API_ENV}
+ExecStart=${HAL0_BIN} serve --host 0.0.0.0 --port \${HAL0_PORT}
+Restart=on-failure
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=hal0-api
+
+[Install]
+WantedBy=multi-user.target
+EOF
+info "wrote ${API_UNIT}"
+
+SLOT_TEMPLATE_SRC="${REPO_ROOT}/packaging/systemd/hal0-slot@.service"
+SLOT_TEMPLATE_DST="${UNIT_DIR}/hal0-slot@.service"
+if [[ -f "${SLOT_TEMPLATE_SRC}" ]]; then
+    cp "${SLOT_TEMPLATE_SRC}" "${SLOT_TEMPLATE_DST}"
+    info "wrote ${SLOT_TEMPLATE_DST}"
+else
+    warn "${SLOT_TEMPLATE_SRC} not found — slot template not installed"
+fi
+
 if [[ "${DEV_MODE}" -eq 0 ]]; then
-    # Install units
-    for UNIT in hal0-api.service hal0-openwebui.service "hal0-slot@.service"; do
-        SRC="${REPO_ROOT}/installer/systemd/${UNIT}"
-        DST="${UNIT_DIR}/${UNIT}"
-        if [[ ! -f "${SRC}" ]]; then
-            die "Unit file not found: ${SRC}\n       Run install.sh from the hal0 repo root."
-        fi
-        cp "${SRC}" "${DST}"
-        info "Installed ${UNIT}"
-    done
-
     systemctl daemon-reload
-    info "systemctl daemon-reload done"
-
-    systemctl enable --now hal0-api hal0-openwebui
-    info "hal0-api and hal0-openwebui enabled and started"
-else
-    # Dev mode: write units to HAL0_HOME but don't install or enable
-    mkdir -p "${UNIT_DIR}"
-    for UNIT in hal0-api.service hal0-openwebui.service "hal0-slot@.service"; do
-        SRC="${REPO_ROOT}/installer/systemd/${UNIT}"
-        DST="${UNIT_DIR}/${UNIT}"
-        if [[ -f "${SRC}" ]]; then
-            cp "${SRC}" "${DST}"
-            info "Wrote ${DST} (not installed — dev mode)"
-        fi
-    done
+    info "systemctl daemon-reload"
 fi
 
-# ── Phase 2 stubs ─────────────────────────────────────────────────────────────
-step "Deferred steps"
-warn "TODO: pull toolbox images (Phase 2):"
-warn "  docker pull ghcr.io/hal0-dev/hal0-toolbox-vulkan:v1"
-warn "  docker pull ghcr.io/hal0-dev/hal0-toolbox-rocm:v1"
-warn "  docker pull ghcr.io/hal0-dev/hal0-toolbox-flm:v1"
-warn "  docker pull ghcr.io/hal0-dev/hal0-toolbox-moonshine:v1"
-warn "  docker pull ghcr.io/hal0-dev/hal0-toolbox-kokoro:v1"
-warn "TODO: run hal0 probe (Phase 2) — hardware detect + slot defaults"
+step "Hardware probe"
 
-# ── Done ──────────────────────────────────────────────────────────────────────
-printf '\n%s%shal0 installed successfully!%s\n\n' "${GREEN}" "${BOLD}" "${RESET}"
-
-if [[ "${DEV_MODE}" -eq 1 ]]; then
-    printf '  Layout root:  %s%s%s\n' "${BOLD}" "${HAL0_HOME}" "${RESET}"
-    printf '  Config:       %s%s%s\n' "${BOLD}" "${ETC_DIR}" "${RESET}"
-    printf '  Data:         %s%s%s\n' "${BOLD}" "${VAR_DIR}" "${RESET}"
-    printf '\n  systemd units were NOT installed (dev mode).\n'
-    printf '  To start services manually, run: bash scripts/dev-bootstrap.sh\n\n'
+if [[ -z "${HAL0_NO_PROBE:-}" ]]; then
+    HAL0_HOME_FOR_PROBE=""
+    if [[ "${DEV_MODE}" -eq 1 ]]; then
+        HAL0_HOME_FOR_PROBE="${PREFIX}"
+    fi
+    HAL0_HOME="${HAL0_HOME_FOR_PROBE}" "${VENV_DIR}/bin/python" - <<'PY'
+from hal0.hardware.probe import HardwareProbe
+p = HardwareProbe()
+info = p.probe()
+out = p.write(info)
+print(f"  wrote {out}")
+print(f"  ram_mb={info.ram_mb}  unified={info.unified_memory_mb}  gpus={len(info.gpus)}  npu={info.npu.present}")
+PY
 else
-    HOST="$(hostname -I | awk '{print $1}' 2>/dev/null || echo 'localhost')"
-    printf '  Dashboard:    %shttp://%s:%s%s\n' "${BOLD}" "${HOST}" "${HAL0_PORT}" "${RESET}"
-    printf '  OpenWebUI:    %shttp://%s:%s%s\n' "${BOLD}" "${HOST}" "${HAL0_OPENWEBUI_PORT}" "${RESET}"
-    printf '\n  Next steps:\n'
-    printf '  1. Open the dashboard and complete the FirstRun wizard\n'
-    printf '  2. Pick a model -- it will be downloaded and assigned to the primary slot\n'
-    printf '  3. Click "Open Chat" to start chatting in OpenWebUI\n'
-    printf '\n  Logs:  journalctl -fu hal0-api\n'
-    printf '  Units: systemctl status hal0-api hal0-openwebui\n\n'
+    warn "skipping probe (HAL0_NO_PROBE=1)"
 fi
+
+step "Service start"
+
+if [[ "${DEV_MODE}" -eq 1 || "${NO_START}" -eq 1 ]]; then
+    warn "not starting services automatically (dev / --no-start)."
+    warn "  start manually: ${HAL0_BIN} serve --host 0.0.0.0 --port ${HAL0_PORT}"
+else
+    systemctl enable --now hal0-api
+    sleep 1
+    if systemctl is-active --quiet hal0-api; then
+        info "hal0-api is running"
+    else
+        warn "hal0-api failed to start; check 'journalctl -u hal0-api -n 40'"
+    fi
+fi
+
+HOST="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
+[[ -z "${HOST}" ]] && HOST=localhost
+
+printf '\n%shal0 installed.%s\n\n' "${BOLD}${GRN}" "${RST}"
+printf '  CLI:        %s%s%s\n' "${BLU}" "${HAL0_BIN}" "${RST}"
+printf '  Config:     %s%s%s\n' "${BLU}" "${ETC_DIR}" "${RST}"
+printf '  Data:       %s%s%s\n' "${BLU}" "${VAR_DIR}" "${RST}"
+if [[ "${DEV_MODE}" -eq 0 && "${NO_START}" -eq 0 ]]; then
+    printf '  Dashboard:  %shttp://%s:%s%s\n' "${BLU}" "${HOST}" "${HAL0_PORT}" "${RST}"
+    printf '  Logs:       %sjournalctl -fu hal0-api%s\n' "${DIM}" "${RST}"
+fi
+printf '\n  Next steps:\n'
+printf '    %shal0 status%s          – system + slot summary\n' "${BOLD}" "${RST}"
+printf '    %shal0 slot list%s       – list configured slots\n' "${BOLD}" "${RST}"
+printf '    %shal0 model list%s      – list known models\n' "${BOLD}" "${RST}"
+printf '    %shal0 config show%s     – inspect /etc/hal0/hal0.toml\n' "${BOLD}" "${RST}"
+printf '\n'

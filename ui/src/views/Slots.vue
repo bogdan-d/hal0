@@ -18,12 +18,16 @@ import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { useSystemStore } from '../stores/system.js'
 import { useToastsStore } from '../stores/toasts.js'
+import { useSlotMetrics } from '../composables/useStats.js'
 import { api } from '../composables/useApi.js'
 import PageHeader from '../components/PageHeader.vue'
 import Card from '../components/Card.vue'
 import LoadingSkeleton from '../components/LoadingSkeleton.vue'
 import EmptyState from '../components/EmptyState.vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
+import SlotCard from '../components/SlotCard.vue'
+
+const { metrics: slotMetrics, history: slotHistory } = useSlotMetrics(2500)
 
 const route  = useRoute()
 const system = useSystemStore()
@@ -359,7 +363,30 @@ const SLOT_TYPES = ['llama-server', 'flm', 'moonshine', 'kokoro']
       </template>
 
       <template v-else>
-        <div class="slots-list" role="list" aria-label="Inference slots">
+        <div class="slots-grid" role="list" aria-label="Inference slots">
+          <SlotCard
+            v-for="slot in slots"
+            :key="slot.name"
+            :slot="slot"
+            :metrics="slotMetrics[slot.name]"
+            :spark-data="slotHistory[slot.name] || { tps: [], pps: [] }"
+            :models="models"
+            :selected-model="slot._selectedModel"
+            :action-loading="actionBusy[slot.name]"
+            @select-model="(v) => { const s = slots.find(x => x.name === slot.name); if (s) s._selectedModel = v }"
+            @action="(a) => a === 'load' ? doLoad(slot) : slotAction(slot.name, a)"
+            @logs="openLogs(slot)"
+            @edit="openEdit(slot)"
+          />
+        </div>
+      </template>
+
+      <!-- Legacy row layout retained for the row-error rendering path
+           (banners persist across the new grid by re-rendering the error
+           via a toast). The list below is hidden in the default flow but
+           kept in source so older bookmarks to anchors still resolve. -->
+      <template v-if="false">
+        <div class="slots-list" role="list">
           <div
             v-for="slot in slots"
             :key="slot.name"
@@ -709,6 +736,11 @@ const SLOT_TYPES = ['llama-server', 'flm', 'moonshine', 'kokoro']
 .page-body  { padding: 20px 24px; display: flex; flex-direction: column; gap: 8px; }
 
 /* ── Slot list ────────────────────────────────────────────────── */
+.slots-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 12px;
+}
 .slots-list { display: flex; flex-direction: column; gap: 4px; }
 
 .slot-row {
