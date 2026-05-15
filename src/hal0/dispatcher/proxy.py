@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from hal0.api.middleware.error_codes import Hal0Error
+from hal0.errors import Hal0Error
 from hal0.upstreams.registry import Upstream, UpstreamRegistry
 
 # NOTE: revisit in Phase 5 — absorb into router.py after Dispatcher is stable.

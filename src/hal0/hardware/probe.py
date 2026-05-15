@@ -28,7 +28,7 @@ from pathlib import Path
 
 import structlog
 
-from hal0.api.middleware.error_codes import Hal0Error
+from hal0.errors import Hal0Error
 from hal0.config import paths as _paths
 from hal0.config.schema import GPUInfo, HardwareInfo, NPUInfo
 

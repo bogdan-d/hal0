@@ -20,19 +20,9 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from hal0.errors import Hal0Error
+
 log = structlog.get_logger(__name__)
-
-
-class Hal0Error(Exception):
-    """Base class for typed errors with stable codes."""
-
-    code: str = "system.internal"
-    status: int = 500
-
-    def __init__(self, message: str, details: dict[str, Any] | None = None) -> None:
-        super().__init__(message)
-        self.message = message
-        self.details = details or {}
 
 
 def _envelope(code: str, message: str, details: dict[str, Any] | None = None) -> dict[str, Any]:

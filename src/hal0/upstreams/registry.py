@@ -32,7 +32,7 @@ from typing import Any
 import httpx
 import structlog
 
-from hal0.api.middleware.error_codes import Hal0Error
+from hal0.errors import Hal0Error
 from hal0.config import paths as _paths
 
 log = structlog.get_logger(__name__)

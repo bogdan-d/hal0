@@ -43,7 +43,7 @@ import httpx
 import structlog
 from fastapi.responses import Response, StreamingResponse
 
-from hal0.api.middleware.error_codes import Hal0Error
+from hal0.errors import Hal0Error
 from hal0.dispatcher.proxy import LegacyResolutionFailed, resolve_slot
 from hal0.dispatcher.single_flight import SingleFlightGroup
 from hal0.upstreams.registry import Upstream, UpstreamRegistry

@@ -31,7 +31,7 @@ from typing import Any
 
 import httpx
 
-from hal0.api.middleware.error_codes import Hal0Error
+from hal0.errors import Hal0Error
 from hal0.providers.base import ContainerSpec, Provider
 
 # ── Toolbox image ──────────────────────────────────────────────────────────────

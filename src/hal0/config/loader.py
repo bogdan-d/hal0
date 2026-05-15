@@ -24,7 +24,7 @@ from typing import Any
 
 import tomli_w
 
-from hal0.api.middleware.error_codes import Hal0Error
+from hal0.errors import Hal0Error
 from hal0.config import paths
 from hal0.config.schema import (
     CURRENT_SCHEMA_VERSION,

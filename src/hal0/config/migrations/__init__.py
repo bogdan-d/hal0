@@ -29,7 +29,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
-from hal0.api.middleware.error_codes import Hal0Error
+from hal0.errors import Hal0Error
 
 # A migration is a function: (dict) -> dict.  It receives the raw config
 # at version N-1 and returns the equivalent at version N.  It must not

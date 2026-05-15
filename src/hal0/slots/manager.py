@@ -436,7 +436,23 @@ class SlotManager:
         self._ensure_known(slot_name)
         rec = self._states.get(slot_name) or read_state(self._state_file(slot_name))
         if rec is None:
-            return Slot(name=slot_name, state=SlotState.OFFLINE)
+            # No state.json yet — but the TOML may exist (configured slot
+            # that hasn't been loaded). Synthesize an OFFLINE snapshot
+            # carrying the on-disk backend/provider so the dashboard chips
+            # render correctly before the first load.
+            cfg = await self._maybe_load_config(slot_name)
+            return Slot(
+                name=slot_name,
+                state=SlotState.OFFLINE,
+                port=int(cfg.get("port") or 0) if cfg else 0,
+                backend=cfg.get("backend") if cfg else None,
+                metadata={
+                    "provider": cfg.get("provider"),
+                    "backend": cfg.get("backend"),
+                }
+                if cfg
+                else {},
+            )
         # Reconcile with systemd reality.
         active = await self._is_active(slot_name)
         observed = rec.state
@@ -449,14 +465,48 @@ class SlotManager:
                 force=True,
             )
             observed = SlotState.ERROR
+        # Re-hydrate the top-level backend from the slot's TOML when the
+        # state.json record predates the extras-carry change (older state
+        # files were written without ``extra.backend``). The dashboard's
+        # SlotCard chips key off ``slot.backend`` directly — without this
+        # they'd show 'slot' (unknown) until the user re-loaded the slot.
+        backend = rec.extra.get("backend")
+        if backend is None:
+            cfg = await self._maybe_load_config(slot_name)
+            if cfg:
+                backend = cfg.get("backend")
         return Slot(
             name=slot_name,
             state=observed,
             port=rec.port,
             model_id=rec.model_id,
-            backend=rec.extra.get("backend"),
-            metadata={"updated_at": rec.updated_at, "message": rec.message, **rec.extra},
+            backend=backend,
+            metadata={
+                "updated_at": rec.updated_at,
+                "message": rec.message,
+                **rec.extra,
+                **({"backend": backend} if backend and "backend" not in rec.extra else {}),
+            },
         )
+
+    async def _maybe_load_config(self, slot_name: str) -> dict[str, Any] | None:
+        """Read the slot's TOML if it exists, swallowing parse errors.
+
+        Used by ``status()`` to re-hydrate the top-level ``backend`` field
+        on snapshots whose state.json predates the extras-carry change.
+        Returns ``None`` when the TOML is missing or invalid — callers
+        treat that as "no override available" rather than a hard failure.
+        """
+        path = self._config_file(slot_name)
+        if not path.exists():
+            return None
+        try:
+            return await self._load_slot_config(slot_name)
+        except SlotConfigError:
+            # Don't let a malformed slot TOML take out the status snapshot —
+            # /api/slots is supposed to be best-effort. The error will
+            # surface elsewhere (load/start/restart paths re-raise).
+            return None
 
     async def list(self) -> list[Slot]:
         """Return snapshots for all configured slots, concurrently."""
