@@ -2,7 +2,7 @@
 
 Implements `hal0 update [--channel=stable|nightly] [--check] [--rollback]`.
 
-The updater fetches hal0.dev/releases/latest.json, verifies the cosign
+The updater fetches the per-channel release manifest, verifies its cosign
 signature, extracts to a versioned directory, runs any pending config
 migrations, and atomically swaps the /usr/lib/hal0/current symlink.
 Running slots are NOT restarted unless --restart-slots is passed.
@@ -10,25 +10,49 @@ Running slots are NOT restarted unless --restart-slots is passed.
 Rollback swaps the symlink back to the retained previous version and
 restarts hal0-api.
 
-Port target: haloai lib/updater.py (569 lines).
-Depends on: cosign CLI on PATH, signed release pipeline (Phase 5).
-See PLAN.md §9 and §15 Phase 5.
+See PLAN.md §9 (update mechanism) and §17 risk #2 (cosign edge cases).
+The schema for release manifests lives at ``docs/release-manifest.md``.
 
 Key exports:
-    Updater — check / pull / rollback methods.
+    Updater — check / apply / pull / rollback methods.
+    ReleaseInfo — typed result of Updater.check.
+    ReleaseManifest — pydantic schema for the on-disk manifest.
+    UpdateError + subclasses — typed errors with system.update_* codes.
 """
 
 from __future__ import annotations
 
 from hal0.updater.updater import (
     DEFAULT_RELEASES_URL,
+    ReleaseInfo,
+    ReleaseManifest,
+    UpdateCosignFailed,
+    UpdateCosignMissing,
+    UpdateDownloadError,
+    UpdateError,
+    UpdateExtractError,
+    UpdateManifestInvalid,
     Updater,
+    UpdateRollbackUnavailable,
+    UpdateSwapError,
+    UpdateVerifyError,
     fetch_release_manifest,
     releases_url,
 )
 
 __all__ = [
     "DEFAULT_RELEASES_URL",
+    "ReleaseInfo",
+    "ReleaseManifest",
+    "UpdateCosignFailed",
+    "UpdateCosignMissing",
+    "UpdateDownloadError",
+    "UpdateError",
+    "UpdateExtractError",
+    "UpdateManifestInvalid",
+    "UpdateRollbackUnavailable",
+    "UpdateSwapError",
+    "UpdateVerifyError",
     "Updater",
     "fetch_release_manifest",
     "releases_url",

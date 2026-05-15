@@ -8,7 +8,6 @@ Entry point declared in pyproject.toml:
 from __future__ import annotations
 
 import json as jsonlib
-from enum import StrEnum
 
 import typer
 import uvicorn
@@ -19,6 +18,7 @@ from rich.table import Table
 
 import hal0
 from hal0.cli._shared import (
+    NOT_IMPLEMENTED,
     CliApiError,
     _api_base,
     _api_unreachable,
@@ -29,6 +29,7 @@ from hal0.cli._shared import (
 from hal0.cli.config_commands import app as config_app
 from hal0.cli.model_commands import app as model_app
 from hal0.cli.slot_commands import app as slot_app
+from hal0.cli.update_commands import update as _update_impl
 
 console = Console()
 
@@ -149,28 +150,11 @@ def probe() -> None:
 
 
 # ---------------------------------------------------------------------------
-# hal0 update
+# hal0 update — real implementation lives in hal0.cli.update_commands.
+# Registered via app.command() so the function's typer.Options surface.
 # ---------------------------------------------------------------------------
 
-
-class UpdateChannel(StrEnum):
-    stable = "stable"
-    nightly = "nightly"
-
-
-@app.command()
-def update(
-    channel: UpdateChannel | None = typer.Option(
-        None,
-        "--channel",
-        help="Update channel (stable or nightly).",
-    ),
-    check: bool = typer.Option(False, "--check", help="Only check for updates, do not apply."),
-    rollback: bool = typer.Option(False, "--rollback", help="Roll back to the previous version."),
-) -> None:
-    """Check for or apply a hal0 update, or roll back to the previous version."""
-    # Phase 5: hit /api/updates/{check,pull,rollback} per flag
-    console.print(NOT_IMPLEMENTED)
+app.command(name="update")(_update_impl)
 
 
 # ---------------------------------------------------------------------------
