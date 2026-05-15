@@ -22,8 +22,11 @@ const system = useSystemStore()
 
 const hw = computed(() => system.hardware ?? {})
 
+// Any of these statuses count as "actively serving" for the dashboard tile.
+// Keep this set in sync with stateClass() below and with Slots.vue.
+const ACTIVE_STATES = new Set(['running', 'ready', 'serving'])
 const slotSummary = computed(() => {
-  const running = system.slots.filter((s) => s.status === 'running').length
+  const running = system.slots.filter((s) => ACTIVE_STATES.has(s.status)).length
   const total   = system.slots.length
   return { running, total }
 })
@@ -50,14 +53,12 @@ const apiOk = computed(() => !system.error && system.status !== null)
 // Recent logs: Phase 1 — from system store
 const recentLogs = computed(() => system.status?.recent_logs ?? [])
 
+// Mirrors Slots.vue stateClass() exactly — keep in sync.
 const stateClass = (status) => ({
-  running:  'state-running',
-  ready:    'state-running',
-  idle:     'state-idle',
-  error:    'state-error',
-  offline:  'state-offline',
-  starting: 'state-idle',
-  pulling:  'state-idle',
+  running:   'state-running', ready: 'state-running', serving: 'state-running',
+  idle:      'state-idle',    warming: 'state-idle', starting: 'state-idle', pulling: 'state-idle',
+  error:     'state-error',
+  offline:   'state-offline', unloading: 'state-offline',
 }[status] ?? 'state-offline')
 </script>
 
