@@ -153,6 +153,40 @@ def _final_path(model_id: str, filename: str) -> Path:
     return paths.models_dir() / _sanitise_id(model_id) / filename
 
 
+def _comfyui_models_dir(subdir: str) -> Path:
+    """ComfyUI checkpoints/loras/vae directory under the persistent base dir.
+
+    Hal0 ComfyUI slots bind-mount ``/var/lib/hal0/comfyui`` into the
+    container at the same path, with ``models/<subdir>/<file>`` being
+    the layout ComfyUI's own ``CheckpointLoaderSimple`` /
+    ``LoraLoader`` / etc. expect when ``--base-directory`` points at
+    that root.
+
+    The subdir name is sanitised the same way model ids are so a curated
+    entry can't escape the comfyui tree by setting
+    ``comfyui_subdir="../../etc/passwd"``.
+    """
+    cleaned = _SANITISE_RE.sub("-", subdir).strip("-.") or "checkpoints"
+    return paths.var_lib() / "comfyui" / "models" / cleaned
+
+
+def _final_path_for_entry(
+    model_id: str,
+    filename: str,
+    comfyui_subdir: str | None,
+) -> Path:
+    """Pick the final on-disk path based on whether this is a ComfyUI asset.
+
+    Image-gen entries (``comfyui_subdir`` set) land under
+    ``/var/lib/hal0/comfyui/models/<subdir>/<filename>`` so ComfyUI's
+    own model loaders pick them up without a per-id rename. Everything
+    else uses the default ``/var/lib/hal0/models/<id>/<filename>`` layout.
+    """
+    if comfyui_subdir:
+        return _comfyui_models_dir(comfyui_subdir) / filename
+    return _final_path(model_id, filename)
+
+
 def _tmp_dir() -> Path:
     """Return the tempfile staging directory for in-flight pulls."""
     return paths.models_dir() / ".tmp"
@@ -196,6 +230,7 @@ async def run_pull(
     registry: ModelRegistry,
     hf_token: str | None = None,
     client: httpx.AsyncClient | None = None,
+    comfyui_subdir: str | None = None,
 ) -> None:
     """Background-task body: stream the file, hash it, install it, register it.
 
@@ -206,6 +241,13 @@ async def run_pull(
     Cancellation: callers set ``job.cancel_requested = True``. The next
     chunk read checks the flag, deletes the partial, transitions to
     ``cancelled``, and returns.
+
+    Args:
+        comfyui_subdir: When set (e.g. ``"checkpoints"``), the file lands
+            under ``/var/lib/hal0/comfyui/models/<subdir>/<filename>``
+            instead of the default ``/var/lib/hal0/models/<id>/<filename>``.
+            Curated image-gen entries set this so ComfyUI's own model
+            loaders find the file at the path their workflow nodes expect.
     """
     job.state = "running"
     job.started_at = time.time()
@@ -284,7 +326,7 @@ async def run_pull(
                         job._signal()
 
         # Download complete — atomic install.
-        final = _final_path(job.model_id, hf_file)
+        final = _final_path_for_entry(job.model_id, hf_file, comfyui_subdir)
         final.parent.mkdir(parents=True, exist_ok=True)
         os.replace(tmp_path, final)
         tmp_path = final  # so the cleanup `finally` doesn't unlink the installed file

@@ -10,18 +10,29 @@ endpoints.
 GET ``/v1/models`` aggregates the model ids advertised by every
 configured upstream's ``/v1/models``.  Returns the OpenAI shape so
 clients (OpenWebUI, the chat UI, third-party SDKs) work unmodified.
+
+POST ``/v1/images/generations`` (Team K) is the odd one out: ComfyUI's
+HTTP surface is a graph-submit + history-poll dance, not a direct
+OpenAI passthrough. The route resolves the slot via the dispatcher to
+discover the port, then drives the ComfyUIProvider directly to translate
+the OpenAI body to a workflow, run it, and unwrap the result PNGs back
+into the OpenAI response shape. See ``ComfyUIProvider.infer`` for the
+upstream protocol.
 """
 
 from __future__ import annotations
 
+import base64
 import json
 import re
 import time
 from typing import Any
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, Request
 from fastapi.responses import Response, StreamingResponse
 
+from hal0.api import image_cache
 from hal0.api.deps import DispatcherDep
 
 router = APIRouter()
@@ -225,6 +236,148 @@ async def audio_speech(request: Request, dispatcher: DispatcherDep) -> Response:
     # /v1/audio/speech is the TTS input direction — body is JSON
     # ({"model": "...", "input": "...", "voice": "..."}). Standard path.
     return await _dispatch_and_forward(request, dispatcher)
+
+
+# ── /v1/images/generations (ComfyUI provider, hal0-managed translation) ────
+
+
+def _extract_port_from_upstream_url(url: str) -> int | None:
+    """Pull the port out of an Upstream.url like ``http://127.0.0.1:8186/v1``.
+
+    Returns None when the URL is malformed or doesn't carry an explicit
+    port (remote upstreams could set this to host:443; we only support
+    image gen on a local slot, so a missing port is a configuration error
+    surfaced upstream as a 502).
+    """
+    try:
+        parsed = urlparse(url)
+    except (ValueError, AttributeError):
+        return None
+    return parsed.port
+
+
+@router.post("/images/generations")
+async def images_generations(request: Request, dispatcher: DispatcherDep) -> Response:
+    """OpenAI-compatible image generation.
+
+    Body shape (subset honoured)::
+
+        {
+          "model":           "sdxl-turbo",        # required; curated id
+          "prompt":          "a cat in a hat",    # required
+          "n":               1,                   # optional, batch_size
+          "size":            "1024x1024",         # optional, WxH
+          "response_format": "url" | "b64_json"   # optional, default "url"
+        }
+
+    Optional ``extra_body`` (hal0 extension): ``seed``, ``steps``,
+    ``cfg``, ``negative_prompt``.
+
+    Returns the OpenAI shape::
+
+        {
+          "created": 1716000000,
+          "data": [
+            {"url": "/api/images/cache/<uuid>.png"}     // response_format=url
+            // OR
+            {"b64_json": "<base64-encoded PNG>"}        // response_format=b64_json
+          ],
+          "_hal0": {... debug meta from the workflow translator ...}
+        }
+    """
+    from hal0.dispatcher.router import NoRouteFound, UpstreamUnavailable
+    from hal0.errors import Hal0Error
+    from hal0.providers import get_provider
+    from hal0.registry.curated import get_curated
+
+    class _ImagePromptRequired(Hal0Error):
+        code = "image.prompt_required"
+        status = 422
+
+    class _ImageModelNotCurated(Hal0Error):
+        code = "image.model_not_curated"
+        status = 404
+
+    body = await _read_json_body(request)
+    if not body.get("prompt"):
+        raise _ImagePromptRequired("body.prompt is required")
+
+    # 1. Resolve the slot the request should land on. We dispatch to get
+    #    the port + slot name; the dispatcher's heuristics already route
+    #    /v1/images/* to the `img` slot via the legacy fallback rule.
+    call = await dispatcher.dispatch(request, body=body)
+
+    # 2. Find the curated metadata for the requested model id so we know
+    #    which workflow template + checkpoint filename to pin into the
+    #    workflow.
+    requested = (body.get("model") or "").strip() or "sdxl-turbo"
+    curated = get_curated(requested)
+    if curated is None or curated.capability != "image":
+        raise _ImageModelNotCurated(
+            f"model {requested!r} is not in the curated image-gen catalogue; "
+            "current built-ins: sdxl-turbo, sd-1.5-pruned-emaonly, flux-schnell",
+            details={"model": requested},
+        )
+
+    # 3. Discover the local slot's port from the resolved upstream.
+    upstream = request.app.state.upstreams.get(call.upstream_name)
+    if upstream is None:
+        raise NoRouteFound(
+            f"image-gen dispatch landed on upstream {call.upstream_name!r} "
+            "which is not registered",
+            details={"upstream": call.upstream_name},
+        )
+    port = _extract_port_from_upstream_url(upstream.url)
+    if port is None:
+        raise UpstreamUnavailable(
+            f"image-gen upstream {call.upstream_name!r} has no parseable port "
+            f"in url={upstream.url!r}",
+            details={"upstream": call.upstream_name, "url": upstream.url},
+        )
+
+    # 4. Drive the ComfyUI provider directly. Inject the curated metadata
+    #    into the body so the provider's translator knows what to render
+    #    without re-looking-up the registry.
+    provider = get_provider("comfyui")
+    body_with_meta = {
+        **body,
+        "_hal0_model_class": curated.model_class or "sdxl-turbo",
+        "_hal0_ckpt_filename": curated.hf_file,
+    }
+    result = await provider.infer(port, body_with_meta)
+
+    # Track most-recent-model for dashboard.
+    last_used = getattr(request.app.state, "last_used_model", None)
+    if last_used is not None and call.upstream_name:
+        last_used[call.upstream_name] = requested
+
+    # 5. Emit OpenAI-shaped response.
+    response_format = (body.get("response_format") or "url").lower().strip()
+    images: list[dict[str, Any]] = []
+    for img in result.get("images", []):
+        png = img.get("png", b"")
+        if not isinstance(png, (bytes, bytearray)) or not png:
+            continue
+        if response_format == "b64_json":
+            images.append({"b64_json": base64.b64encode(bytes(png)).decode("ascii")})
+        else:
+            stem = image_cache.write_png(bytes(png))
+            images.append({"url": f"/api/images/cache/{stem}.png"})
+
+    payload = {
+        "created": int(time.time()),
+        "data": images,
+        "_hal0": {
+            "meta": result.get("meta", {}),
+            "prompt_id": result.get("prompt_id", ""),
+            "upstream": call.upstream_name,
+            "model": requested,
+        },
+    }
+    return Response(
+        content=json.dumps(payload).encode("utf-8"),
+        media_type="application/json",
+    )
 
 
 _MODEL_FIELD_RE = re.compile(

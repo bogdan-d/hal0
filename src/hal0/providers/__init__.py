@@ -18,6 +18,7 @@ See PLAN.md §1, §3 and ARCHITECTURE.md §Key boundaries.
 from __future__ import annotations
 
 from hal0.providers.base import ContainerSpec, Provider
+from hal0.providers.comfyui import ComfyUIProvider
 from hal0.providers.flm import FLMProvider
 from hal0.providers.kokoro import KokoroProvider
 from hal0.providers.llama_server import LlamaServerProvider
@@ -32,6 +33,7 @@ _PROVIDERS: dict[str, Provider] = {
     "flm": FLMProvider(),
     "moonshine": MoonshineProvider(),
     "kokoro": KokoroProvider(),
+    "comfyui": ComfyUIProvider(),
 }
 
 
@@ -53,6 +55,7 @@ def get_provider(name: str) -> Provider:
 
 
 __all__ = [
+    "ComfyUIProvider",
     "ContainerSpec",
     "FLMProvider",
     "KokoroProvider",

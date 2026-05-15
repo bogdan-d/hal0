@@ -29,6 +29,12 @@
       "digest": "sha256:e74a81d5032c5efbff9f4171108fa3ab98960cc367f47b159960e0d9c2b9b909",
       "_notes": "Kokoro-82M TTS (CPU ONNX); OpenAI-compat /v1/audio/speech",
       "_upstream_reference": "https://github.com/thewh1teagle/kokoro-onnx"
+    },
+    "comfyui": {
+      "tag": "ghcr.io/hal0ai/hal0-toolbox-comfyui:v1",
+      "digest": null,
+      "_notes": "ComfyUI image-gen on ROCm; SDXL + SD 1.5 + Flux. Translated from OpenAI /v1/images/generations.",
+      "_upstream_reference": "https://github.com/comfyanonymous/ComfyUI"
     }
   },
   "_legacy_toolboxes": {

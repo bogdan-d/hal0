@@ -20,6 +20,7 @@ from hal0.api.routes import (
 from hal0.api.routes import (
     hardware,
     health,
+    images,
     installer,
     logs,
     models,
@@ -292,6 +293,7 @@ def create_app() -> FastAPI:
     app.include_router(config_routes.router, prefix="/api/config", tags=["config"])
     app.include_router(updater.router, prefix="/api/updates", tags=["updater"])
     app.include_router(installer.router, prefix="/api/install", tags=["installer"])
+    app.include_router(images.router, prefix="/api/images", tags=["images"])
 
     return app
 

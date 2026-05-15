@@ -29,6 +29,10 @@ class CuratedModel(BaseModel):
     The wizard renders these as cards with name + size + VRAM badge +
     license badge. The ``hf_repo`` / ``hf_file`` pair is what gets piped
     into ``POST /api/models/{id}/pull`` to actually download the bytes.
+
+    Image-gen models (``recommended_slot="img"``, set ``model_class`` and
+    ``comfyui_subdir``) are pulled into ComfyUI's models tree instead of
+    the default per-id directory — see :func:`hal0.registry.pull.run_pull`.
     """
 
     model_config = {"populate_by_name": True, "str_strip_whitespace": True}
@@ -36,8 +40,8 @@ class CuratedModel(BaseModel):
     id: str = Field(..., description="Stable id used as the registry key, e.g. 'qwen3-4b'.")
     display_name: str = Field(..., description="Human-readable name for the card.")
     description: str = Field(..., description="One-line value prop.")
-    family: str = Field(..., description="Model family — 'qwen', 'llama', 'phi', etc.")
-    size_gb: float = Field(..., description="Approximate on-disk size of the GGUF, in GB.")
+    family: str = Field(..., description="Model family — 'qwen', 'llama', 'phi', 'sdxl', etc.")
+    size_gb: float = Field(..., description="Approximate on-disk size of the model file(s), in GB.")
     vram_gb_min: float = Field(
         ...,
         description="Minimum recommended VRAM (or unified pool) in GB.",
@@ -45,11 +49,16 @@ class CuratedModel(BaseModel):
     license: str = Field(..., description="SPDX-ish license short name, e.g. 'Apache-2.0'.")
     license_url: str = Field(..., description="HTTPS URL to the canonical license text.")
     hf_repo: str = Field(..., description="HuggingFace repo id, e.g. 'Qwen/Qwen3-4B-Instruct-GGUF'.")
-    hf_file: str = Field(..., description="Filename within the repo (the GGUF to fetch).")
-    context_length: int = Field(..., description="Native context window in tokens.")
+    hf_file: str = Field(..., description="Filename within the repo (GGUF, safetensors, etc.).")
+    context_length: int = Field(
+        default=0,
+        description=(
+            "Native context window in tokens. Zero/omitted for image-gen entries."
+        ),
+    )
     recommended_slot: str = Field(
         default="primary",
-        description="Default slot to assign the model to. 'primary' for chat.",
+        description="Default slot to assign the model to. 'primary' for chat, 'img' for image-gen.",
     )
     tags: list[str] = Field(
         default_factory=list,
@@ -58,6 +67,29 @@ class CuratedModel(BaseModel):
     notes: str = Field(
         default="",
         description="Operator-facing rationale for the quant pick or anything else worth surfacing.",
+    )
+    capability: str = Field(
+        default="chat",
+        description=(
+            "Primary capability — 'chat' (default), 'embed', 'asr', 'tts', 'image'. "
+            "The pull layer routes 'image' into the ComfyUI models tree."
+        ),
+    )
+    model_class: str = Field(
+        default="",
+        description=(
+            "Image-gen model class discriminator, e.g. 'sdxl-turbo', 'sd-1.5', "
+            "'flux-schnell'. Selects which ComfyUI workflow template to render. "
+            "Empty for non-image entries."
+        ),
+    )
+    comfyui_subdir: str = Field(
+        default="",
+        description=(
+            "Subdirectory under ComfyUI's models/ tree where this file should "
+            "land. Common values: 'checkpoints' (whole-model safetensors), "
+            "'loras', 'vae'. Empty means use the default per-id models tree."
+        ),
     )
 
 
@@ -118,6 +150,96 @@ CURATED_MODELS: list[CuratedModel] = [
             "Microsoft's official GGUF release ships 'q4' (no _K_M variant); "
             "we use that. Smallest validated catalogue entry — good 'just download something' pick."
         ),
+    ),
+    # ── Image-gen models (recommended_slot="img", routed through ComfyUI) ────
+    #
+    # Curated picks intentionally span the licensing spectrum:
+    #   - SDXL Turbo  : SAI Non-Commercial Research Community (research only).
+    #   - SD 1.5      : CreativeML Open RAIL-M (research + commercial w/ caveats).
+    #   - Flux Schnell: Apache-2.0 (the OSS unicorn — no usage restrictions).
+    # The picker UI must surface these license badges so users pick consciously.
+    CuratedModel(
+        id="sdxl-turbo",
+        display_name="SDXL Turbo",
+        description=(
+            "Stability AI's distilled 1-4 step SDXL. Real-time-ish image gen on "
+            "Strix Halo. Research-only license."
+        ),
+        family="sdxl",
+        size_gb=6.5,
+        vram_gb_min=8.0,
+        license="SAI-NC-Research-Community",
+        license_url=(
+            "https://huggingface.co/stabilityai/sdxl-turbo/blob/main/LICENSE.TXT"
+        ),
+        hf_repo="stabilityai/sdxl-turbo",
+        hf_file="sd_xl_turbo_1.0_fp16.safetensors",
+        context_length=0,
+        recommended_slot="img",
+        tags=["image", "sdxl", "fast", "research-only"],
+        notes=(
+            "Single-file FP16 checkpoint. Use the sdxl_turbo_simple workflow "
+            "with 4 steps + cfg≈1.0; that's what produces sharp output at this "
+            "step count."
+        ),
+        capability="image",
+        model_class="sdxl-turbo",
+        comfyui_subdir="checkpoints",
+    ),
+    CuratedModel(
+        id="sd-1.5-pruned-emaonly",
+        display_name="Stable Diffusion 1.5",
+        description=(
+            "RunwayML's classic SD 1.5 (pruned, EMA-only). Tiny by today's "
+            "standards, runs on a potato. CreativeML Open RAIL-M."
+        ),
+        family="sd",
+        size_gb=4.3,
+        vram_gb_min=4.0,
+        license="CreativeML-Open-RAIL-M",
+        license_url=(
+            "https://huggingface.co/runwayml/stable-diffusion-v1-5/blob/main/LICENSE"
+        ),
+        hf_repo="runwayml/stable-diffusion-v1-5",
+        hf_file="v1-5-pruned-emaonly.safetensors",
+        context_length=0,
+        recommended_slot="img",
+        tags=["image", "sd-1.5", "low-vram"],
+        notes=(
+            "Use the sd15_simple workflow (20 steps, Euler, cfg 7). Native "
+            "512x512 - quality drops above 768."
+        ),
+        capability="image",
+        model_class="sd-1.5",
+        comfyui_subdir="checkpoints",
+    ),
+    CuratedModel(
+        id="flux-schnell",
+        display_name="FLUX.1 [schnell]",
+        description=(
+            "Black Forest Labs' Flux Schnell. State-of-the-art quality, "
+            "Apache-2.0 licensed (rare in this space)."
+        ),
+        family="flux",
+        size_gb=23.8,
+        vram_gb_min=24.0,
+        license="Apache-2.0",
+        license_url="https://www.apache.org/licenses/LICENSE-2.0",
+        hf_repo="black-forest-labs/FLUX.1-schnell",
+        hf_file="flux1-schnell.safetensors",
+        context_length=0,
+        recommended_slot="img",
+        tags=["image", "flux", "apache", "high-vram"],
+        notes=(
+            "23 GB checkpoint — fits Strix Halo's 100 GB unified pool but the "
+            "default sdxl_turbo_simple workflow won't load Flux's T5 text "
+            "encoder. Ship a flux-specific workflow before promoting this in "
+            "the picker UI; for v1 it's catalogued so the curated list is "
+            "complete."
+        ),
+        capability="image",
+        model_class="flux-schnell",
+        comfyui_subdir="checkpoints",
     ),
 ]
 

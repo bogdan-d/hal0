@@ -1,0 +1,81 @@
+{
+  "_meta": {
+    "model_class": "sd-1.5",
+    "description": "SD 1.5, 20-step Euler, single positive prompt, empty negative. Native 512x512 — caller can override but expect quality drop above 768.",
+    "params": {
+      "ckpt_name": "node:4.inputs.ckpt_name",
+      "positive_prompt": "node:6.inputs.text",
+      "width": "node:5.inputs.width",
+      "height": "node:5.inputs.height",
+      "batch_size": "node:5.inputs.batch_size",
+      "seed": "node:3.inputs.seed",
+      "steps": "node:3.inputs.steps",
+      "cfg": "node:3.inputs.cfg",
+      "filename_prefix": "node:9.inputs.filename_prefix"
+    },
+    "defaults": {
+      "steps": 20,
+      "cfg": 7.0,
+      "sampler_name": "euler",
+      "scheduler": "normal",
+      "denoise": 1.0
+    }
+  },
+  "3": {
+    "class_type": "KSampler",
+    "inputs": {
+      "seed": 0,
+      "steps": 20,
+      "cfg": 7.0,
+      "sampler_name": "euler",
+      "scheduler": "normal",
+      "denoise": 1.0,
+      "model": ["4", 0],
+      "positive": ["6", 0],
+      "negative": ["7", 0],
+      "latent_image": ["5", 0]
+    }
+  },
+  "4": {
+    "class_type": "CheckpointLoaderSimple",
+    "inputs": {
+      "ckpt_name": "v1-5-pruned-emaonly.safetensors"
+    }
+  },
+  "5": {
+    "class_type": "EmptyLatentImage",
+    "inputs": {
+      "width": 512,
+      "height": 512,
+      "batch_size": 1
+    }
+  },
+  "6": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "text": "a placeholder prompt",
+      "clip": ["4", 1]
+    }
+  },
+  "7": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "text": "",
+      "clip": ["4", 1]
+    }
+  },
+  "8": {
+    "class_type": "VAEDecode",
+    "inputs": {
+      "samples": ["3", 0],
+      "vae": ["4", 2]
+    }
+  },
+  "9": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "filename_prefix": "hal0",
+      "images": ["8", 0]
+    }
+  }
+}

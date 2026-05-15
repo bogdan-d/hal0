@@ -19,11 +19,19 @@ def test_catalogue_has_named_picks() -> None:
 
 
 def test_catalogue_entries_have_hf_coordinates() -> None:
-    """Every entry must carry hf_repo + hf_file (the pull layer's input)."""
+    """Every entry must carry hf_repo + hf_file (the pull layer's input).
+
+    Allowed file extensions: .gguf for chat (llama.cpp), .safetensors /
+    .ckpt for image-gen (ComfyUI). Anything else trips this so a typo
+    doesn't make it into a release.
+    """
+    allowed_suffixes = (".gguf", ".safetensors", ".ckpt")
     for m in CURATED_MODELS:
         assert m.hf_repo, f"{m.id}: hf_repo is required"
         assert m.hf_file, f"{m.id}: hf_file is required"
-        assert m.hf_file.endswith(".gguf"), f"{m.id}: not a GGUF file"
+        assert m.hf_file.endswith(allowed_suffixes), (
+            f"{m.id}: hf_file {m.hf_file!r} not in allowed extensions {allowed_suffixes}"
+        )
 
 
 def test_get_curated_hit_and_miss() -> None:
