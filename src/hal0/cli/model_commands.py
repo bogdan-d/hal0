@@ -64,14 +64,66 @@ def model_list() -> None:
 
 @app.command("pull")
 def model_pull(
-    ref: str = typer.Argument(..., help="HuggingFace ref or curated alias (e.g. qwen3-4b)"),
+    ref: str = typer.Argument(..., help="Curated alias (e.g. qwen3-4b) or registered model id"),
 ) -> None:
-    """Download a model into the local registry (Phase 1: not yet wired)."""
+    """Download a model from Hugging Face into the local registry.
+
+    Starts the pull as a background job on the daemon, then polls
+    ``/api/models/<id>/pull/status`` every 500ms and prints a tqdm-style
+    progress bar until the job reaches a terminal state.
+    """
+    import time
+
+    url = _api_base()
+    if _api_unreachable(url):
+        raise typer.Exit(1)
+    try:
+        from hal0.cli._shared import api_post
+
+        start = api_post(f"/api/models/{ref}/pull")
+    except CliApiError as exc:
+        die(str(exc))
+        return
     console.print(
-        f"[yellow]Pull is not yet implemented in the CLI[/yellow] — model {ref!r} not fetched.\n"
-        "Drop the file into /var/lib/hal0/models/ then `hal0 model register <id> --path …`."
+        f"Starting pull for [bold]{ref}[/bold] "
+        f"({start.get('hf_repo', '?')}/{start.get('hf_file', '?')})…"
     )
-    raise typer.Exit(1)
+
+    # Poll status — keeps the CLI dependency footprint small. The HF
+    # tier is well within rate budget at 500ms.
+    last_pct = -1
+    while True:
+        try:
+            s = api_get(f"/api/models/{ref}/pull/status")
+        except CliApiError as exc:
+            die(str(exc))
+            return
+        state = s.get("state")
+        downloaded = int(s.get("bytes_downloaded") or 0)
+        total = int(s.get("bytes_total") or 0)
+        pct = int(downloaded * 100 / total) if total > 0 else 0
+        if pct != last_pct or state != "running":
+            bar = "#" * (pct // 4) + "-" * (25 - pct // 4)
+            console.print(
+                f"  [{bar}] {pct:3d}%  "
+                f"{_fmt_size(downloaded)} / {_fmt_size(total) if total else '?'}  "
+                f"[dim]{state}[/dim]",
+                end="\r",
+            )
+            last_pct = pct
+        if state in ("completed", "failed", "cancelled"):
+            console.print()
+            if state == "completed":
+                sha = (s.get("sha256") or "?")[:12]
+                console.print(
+                    f"[green]Done.[/green] {ref} → {s.get('path')}  "
+                    f"({_fmt_size(downloaded)}, sha256 {sha}…)"
+                )
+                return
+            err = s.get("error") or "(no error message)"
+            die(f"pull {state}: {err}")
+            return
+        time.sleep(0.5)
 
 
 @app.command("register")

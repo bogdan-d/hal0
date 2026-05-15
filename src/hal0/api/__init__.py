@@ -225,6 +225,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.model_registry = model_registry
     app.state.hardware_probe = hardware_probe
     app.state.hardware_stats = HardwareStats()
+    # Model-pull job registry — keyed by model_id, value is the
+    # ``PullJob`` dataclass holding live progress + cancel flags. SSE
+    # and status routes snapshot ``as_dict()`` rather than hold the
+    # dataclass across event-loop ticks.
+    app.state.model_pull_jobs = {}
     # /api/upstreams hands the dashboard the cached model list so the
     # "models advertised" column reflects live state without an extra
     # round trip per upstream.

@@ -8,6 +8,14 @@ const routes = [
     meta: { title: 'Dashboard' },
   },
   {
+    // Canonical FirstRun wizard route. ``/welcome`` is preserved below
+    // as an alias for back-compat with older bookmarks.
+    path: '/firstrun',
+    name: 'firstrun',
+    component: () => import('./views/FirstRun.vue'),
+    meta: { title: 'Setup', skipFirstRunGuard: true },
+  },
+  {
     path: '/slots',
     name: 'slots',
     component: () => import('./views/Slots.vue'),
@@ -53,7 +61,7 @@ const routes = [
     path: '/welcome',
     name: 'welcome',
     component: () => import('./views/FirstRun.vue'),
-    meta: { title: 'Setup' },
+    meta: { title: 'Setup', skipFirstRunGuard: true },
   },
   {
     path: '/:catchAll(.*)',
@@ -67,6 +75,43 @@ const router = createRouter({
   history: createWebHistory(),
   routes,
 })
+
+// ── First-run guard ──────────────────────────────────────────────────────────
+// On every navigation away from the wizard, check /api/install/state and
+// redirect to /firstrun when the dashboard is being loaded into a fresh
+// install (no models on disk AND no sentinel). The result is cached
+// per-session so we don't hit /api/install/state on every route change.
+let _firstRunDecision = null  // null = unknown, true = wizard, false = clear
+let _firstRunInflight = null
+
+async function _resolveFirstRun() {
+  if (_firstRunDecision !== null) return _firstRunDecision
+  if (_firstRunInflight) return _firstRunInflight
+  _firstRunInflight = (async () => {
+    try {
+      const r = await fetch('/api/install/state')
+      if (!r.ok) return false  // fail open — don't trap the user in a wizard if the API is misbehaving
+      const body = await r.json()
+      _firstRunDecision = !!body?.first_run
+      return _firstRunDecision
+    } catch {
+      return false
+    } finally {
+      _firstRunInflight = null
+    }
+  })()
+  return _firstRunInflight
+}
+
+router.beforeEach(async (to) => {
+  if (to.meta?.skipFirstRunGuard) return true
+  const needsWizard = await _resolveFirstRun()
+  if (needsWizard) return { name: 'firstrun' }
+  return true
+})
+
+// Expose a reset so FirstRun.vue can clear the cache after POST /install/complete.
+export function resetFirstRunGuard() { _firstRunDecision = null }
 
 router.afterEach((to) => {
   const base = 'hal0'

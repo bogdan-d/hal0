@@ -30,20 +30,34 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, BackgroundTasks, Request
 
 from hal0.api.middleware.error_codes import Hal0Error
 from hal0.config import paths
 from hal0.hardware.probe import HardwareProbe
+from hal0.registry.curated import CURATED_MODELS, get_curated
+from hal0.registry.model import Model
+from hal0.registry.pull import make_job, run_pull
+from hal0.registry.store import ModelAlreadyExists
 
 router = APIRouter()
 
 
-class ModelPullPending(Hal0Error):
-    """501 marker for endpoints Team B owns (model download flow)."""
+class PickDefaultError(Hal0Error):
+    """Errors specific to ``POST /api/install/pick-default``."""
 
-    code = "model.pull_pending"
-    status = 501
+    code = "install.pick_default_failed"
+    status = 400
+
+
+class CuratedModelNotFound(PickDefaultError):
+    """404 — caller asked for a curated id that's not in the catalogue."""
+
+    code = "install.curated_not_found"
+    status = 404
+
+
+_DEFAULT_SLOT = "primary"
 
 
 def _first_run_sentinel() -> Path:
@@ -196,25 +210,198 @@ async def install_complete(request: Request) -> dict[str, Any]:
     return {"first_run": False, "sentinel_path": str(sentinel)}
 
 
-# ── Team B's domain — model picker + pull ──────────────────────────────────
-# Curated picker list + model download flow lands with Team B's wave
-# (HF streaming download + SSE progress). Surface area kept as typed 501s
-# so the FirstRun wizard can detect "not implemented yet" vs "broken".
+# ── Curated picker + pick-default ──────────────────────────────────────────
 
 
 @router.get("/curated-models")
-async def curated_models() -> list[dict[str, object]]:
-    """Curated model picker list — Team B's wave (v0.2)."""
-    raise ModelPullPending(
-        "curated model picker not yet implemented; expected in v0.2 wave",
-        details={"owner": "team-b"},
+async def curated_models() -> dict[str, Any]:
+    """Return the curated model catalogue the FirstRun wizard renders.
+
+    Shape::
+
+        {
+            "models": [{...CuratedModel...}, ...],
+            "custom_allowed": true
+        }
+
+    The wizard reads this once on mount and renders one card per entry.
+    Off-catalogue picks go through a separate "Custom Hugging Face URL"
+    form which calls ``POST /api/models`` + ``POST /api/models/{id}/pull``
+    directly.
+    """
+    return {
+        "models": [m.model_dump(mode="json") for m in CURATED_MODELS],
+        "custom_allowed": True,
+    }
+
+
+def _ensure_registry_entry(registry: Any, model_id: str) -> Model:
+    """Create the registry entry for a curated id if it isn't there yet.
+
+    Mirrors what ``pull_model`` will record on completion, but populates
+    the entry *before* the download starts so the dashboard can show
+    "downloading…" against a real registry row instead of a phantom id.
+    The path is provisional — ``run_pull`` rewrites it to the final
+    location on success.
+    """
+    curated = get_curated(model_id)
+    if curated is None:
+        raise CuratedModelNotFound(
+            f"curated model {model_id!r} not in catalogue",
+            details={"model_id": model_id, "available": [m.id for m in CURATED_MODELS]},
+        )
+    if registry.has(model_id):
+        return registry.get(model_id)
+    # Provisional path: the pull will overwrite this on success. We need
+    # *some* string here because ``Model.path`` is required and TOML
+    # can't hold None.
+    provisional = paths.models_dir() / curated.id / curated.hf_file
+    entry = Model(
+        id=curated.id,
+        name=curated.display_name,
+        path=str(provisional),
+        size_bytes=0,
+        license=curated.license,
+        capabilities=["chat"],
+        hf_repo=curated.hf_repo,
+        hf_filename=curated.hf_file,
+        tags=["curated", *curated.tags],
+        metadata={
+            "license_url": curated.license_url,
+            "context_length": curated.context_length,
+            "family": curated.family,
+        },
     )
+    try:
+        registry.add(entry)
+    except ModelAlreadyExists:
+        # Race with another request — fine; whoever lost the race uses
+        # the existing entry.
+        return registry.get(model_id)
+    return entry
+
+
+def _assign_to_slot(slot: str, model_id: str) -> Path:
+    """Atomically update ``/etc/hal0/slots/<slot>.toml`` so ``model.default = <id>``.
+
+    Uses ``hal0.config.loader.write_toml_atomic`` so a half-written TOML
+    can't take out the slot. Creates the file from scratch if it doesn't
+    exist — this is the FirstRun path on a fresh install where the
+    primary slot was scaffolded but never had a model assigned.
+    """
+    from hal0.config.loader import write_toml_atomic
+
+    slot_path = paths.slots_config_dir() / f"{slot}.toml"
+    slot_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Read existing if present so we don't clobber port/backend.
+    data: dict[str, Any] = {}
+    if slot_path.exists():
+        import tomllib
+
+        try:
+            with open(slot_path, "rb") as f:
+                data = tomllib.load(f)
+        except (OSError, tomllib.TOMLDecodeError) as exc:
+            raise PickDefaultError(
+                f"could not parse existing slot TOML {slot_path}: {exc}",
+                details={"slot": slot, "path": str(slot_path)},
+            ) from exc
+
+    data.setdefault("name", slot)
+    data.setdefault("port", 8081 if slot == "primary" else 8080 + abs(hash(slot)) % 100)
+    data.setdefault("backend", "vulkan")
+    data.setdefault("provider", "llama-server")
+    model_section = data.get("model")
+    if not isinstance(model_section, dict):
+        model_section = {}
+    model_section["default"] = model_id
+    data["model"] = model_section
+
+    try:
+        write_toml_atomic(slot_path, data)
+    except OSError as exc:
+        raise PickDefaultError(
+            f"could not write slot TOML {slot_path}: {exc}",
+            details={"slot": slot, "path": str(slot_path)},
+        ) from exc
+    return slot_path
 
 
 @router.post("/pick-default")
-async def pick_default() -> dict[str, object]:
-    """Download a curated model + assign to primary slot — Team B's wave."""
-    raise ModelPullPending(
-        "default-model pick not yet implemented; expected in v0.2 wave",
-        details={"owner": "team-b"},
-    )
+async def pick_default(
+    request: Request,
+    background: BackgroundTasks,
+) -> dict[str, Any]:
+    """End-to-end "pick + download + assign" for the FirstRun wizard.
+
+    Body::
+
+        { "model_id": "qwen3-4b", "slot": "primary" }
+
+    Slot defaults to ``primary`` if omitted. Flow:
+
+    1. Look up the curated entry — 404 if unknown.
+    2. Seed the registry row (so the dashboard can show progress).
+    3. Update ``/etc/hal0/slots/<slot>.toml`` so ``model.default = <id>``.
+    4. Kick off the same pull background task ``POST /api/models/{id}/pull``
+       runs (single source of truth for the download logic).
+    """
+    try:
+        body = await request.json()
+    except Exception as exc:
+        raise PickDefaultError(
+            f"body must be valid JSON: {exc}",
+            details={"error": str(exc)},
+        ) from exc
+    if not isinstance(body, dict):
+        raise PickDefaultError("body must be a JSON object")
+    model_id = body.get("model_id")
+    if not isinstance(model_id, str) or not model_id.strip():
+        raise PickDefaultError(
+            "body.model_id is required (must be a non-empty string)",
+            details={"got": body},
+        )
+    slot = body.get("slot") or _DEFAULT_SLOT
+    if not isinstance(slot, str) or not slot.strip():
+        raise PickDefaultError(
+            "body.slot must be a non-empty string when provided",
+            details={"got": body},
+        )
+
+    registry = request.app.state.model_registry
+    _ensure_registry_entry(registry, model_id)
+    slot_path = _assign_to_slot(slot, model_id)
+
+    # Kick off the pull — same code path as the dedicated /pull endpoint.
+    jobs = request.app.state.model_pull_jobs
+    existing = jobs.get(model_id)
+    if existing is not None and existing.state in ("queued", "running"):
+        job = existing
+    else:
+        curated = get_curated(model_id)
+        if curated is None:
+            # _ensure_registry_entry would have raised — defensive only.
+            raise CuratedModelNotFound(
+                f"curated model {model_id!r} disappeared between lookup and pull",
+                details={"model_id": model_id},
+            )
+        job = make_job(model_id)
+        jobs[model_id] = job
+        hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+        background.add_task(
+            run_pull,
+            job,
+            hf_repo=curated.hf_repo,
+            hf_file=curated.hf_file,
+            registry=registry,
+            hf_token=hf_token,
+        )
+
+    return {
+        "model_id": model_id,
+        "slot": slot,
+        "slot_path": str(slot_path),
+        "pull_job_id": job.job_id,
+        "next": f"poll /api/models/{model_id}/pull/status",
+    }

@@ -8,12 +8,25 @@ plus any locally-registered models from the ModelRegistry.
 
 from __future__ import annotations
 
+import asyncio
+import json
+import os
 import time
 from typing import Any
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, BackgroundTasks, Request
+from fastapi.responses import StreamingResponse
 
 from hal0.api.middleware.error_codes import Hal0Error
+from hal0.registry.curated import get_curated
+from hal0.registry.pull import (
+    PullError,
+    PullInvalidSource,
+    PullJob,
+    PullJobNotFound,
+    make_job,
+    run_pull,
+)
 
 router = APIRouter()
 
@@ -49,18 +62,6 @@ def _is_alias(model_id: str) -> bool:
     if model_id.startswith("haloai:"):
         return True
     return model_id in _ALIAS_NAMES
-
-
-class ModelPullPending(Hal0Error):
-    """501 marker for the model-download wave (Team B's domain).
-
-    The HF streaming download + SSE progress endpoint is owned by Team B
-    and lands in the v0.2 wave; the surface here is a typed stub so the
-    Models view can detect "not implemented yet" vs "broken".
-    """
-
-    code = "model.pull_pending"
-    status = 501
 
 
 @router.get("")
@@ -131,7 +132,7 @@ def _model_to_dict(model: Any) -> dict[str, Any]:
     return {**getattr(model, "__dict__", {})}
 
 
-@router.get("/{model_id:path}")
+@router.get("/{model_id}")
 async def get_model(model_id: str, request: Request) -> dict[str, Any]:
     """Return a single model by id, preferring the local registry then
     falling back to whichever upstream advertises it."""
@@ -148,7 +149,7 @@ async def get_model(model_id: str, request: Request) -> dict[str, Any]:
     )
 
 
-@router.put("/{model_id:path}")
+@router.put("/{model_id}")
 async def update_model(model_id: str, request: Request) -> dict[str, Any]:
     """Apply partial updates to a registered model's metadata."""
     registry = request.app.state.model_registry
@@ -162,7 +163,7 @@ async def update_model(model_id: str, request: Request) -> dict[str, Any]:
     return _model_to_dict(model)
 
 
-@router.delete("/{model_id:path}")
+@router.delete("/{model_id}")
 async def delete_model(model_id: str, request: Request) -> dict[str, object]:
     """Remove a model from the local registry (does not delete files)."""
     registry = request.app.state.model_registry
@@ -170,12 +171,165 @@ async def delete_model(model_id: str, request: Request) -> dict[str, object]:
     return {"id": model_id, "deleted": bool(removed)}
 
 
-@router.post("/{model_id:path}/pull")
-async def pull_model(model_id: str) -> dict[str, object]:
-    # NOTE: Team B owns the model-download flow (HF streaming + SSE
-    # progress). This endpoint stays a typed 501 with a distinct error
-    # code so the UI can detect "feature pending" vs "broken".
-    raise ModelPullPending(
-        "model pull not yet implemented; expected in v0.2 wave",
-        details={"model_id": model_id, "owner": "team-b"},
+def _resolve_pull_source(
+    request: Request, model_id: str
+) -> tuple[str, str]:
+    """Resolve the (hf_repo, hf_file) tuple for a pull.
+
+    Priority:
+      1. The registry entry's ``hf_repo`` + ``hf_filename`` (set by
+         ``pick-default`` when the curated catalogue is the source).
+      2. The curated catalogue entry for ``model_id``.
+
+    Raises ``PullInvalidSource`` (422) when neither path yields a repo
+    + filename — typically because the caller hand-registered a model
+    and never set its HF coordinates.
+    """
+    registry = request.app.state.model_registry
+    try:
+        existing = registry.get(model_id)
+        repo = (existing.hf_repo or "").strip()
+        filename = (existing.hf_filename or "").strip()
+        if repo and filename:
+            return repo, filename
+    except Exception:
+        pass
+    curated = get_curated(model_id)
+    if curated is not None:
+        return curated.hf_repo, curated.hf_file
+    raise PullInvalidSource(
+        f"no hugging face source for model {model_id!r} — set hf_repo + hf_filename"
+        " on the registry entry or pick a curated model id",
+        details={"model_id": model_id},
     )
+
+
+@router.post("/{model_id}/pull", status_code=202)
+async def pull_model(
+    model_id: str,
+    request: Request,
+    background: BackgroundTasks,
+) -> dict[str, object]:
+    """Start a background HuggingFace pull and return a job handle.
+
+    Idempotent-ish: if a pull for this model_id is already in
+    ``queued``/``running`` state, the existing job's handle is returned
+    rather than spawning a duplicate. A completed/failed/cancelled job
+    is replaced.
+    """
+    jobs: dict[str, PullJob] = request.app.state.model_pull_jobs
+
+    # Don't double-pull. A user spamming the wizard's Download button
+    # shouldn't kick off two streams against the same HF URL.
+    existing = jobs.get(model_id)
+    if existing is not None and existing.state in ("queued", "running"):
+        return {
+            "id": existing.job_id,
+            "model_id": model_id,
+            "state": existing.state,
+            "resumed": True,
+        }
+
+    hf_repo, hf_file = _resolve_pull_source(request, model_id)
+    job = make_job(model_id)
+    jobs[model_id] = job
+
+    hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+    registry = request.app.state.model_registry
+    background.add_task(
+        run_pull,
+        job,
+        hf_repo=hf_repo,
+        hf_file=hf_file,
+        registry=registry,
+        hf_token=hf_token,
+    )
+    return {
+        "id": job.job_id,
+        "model_id": model_id,
+        "state": job.state,
+        "hf_repo": hf_repo,
+        "hf_file": hf_file,
+    }
+
+
+@router.get("/{model_id}/pull/status")
+async def pull_status(model_id: str, request: Request) -> dict[str, object]:
+    """Return the current pull job for ``model_id``.
+
+    Mirror of the updater route shape — `id`, `state`, `bytes_*`,
+    `error*`, `path`, `sha256`. Polling at ~500ms is fine; for live
+    progress prefer the SSE stream.
+    """
+    jobs: dict[str, PullJob] = request.app.state.model_pull_jobs
+    job = jobs.get(model_id)
+    if job is None:
+        raise PullJobNotFound(
+            f"no pull job for model {model_id!r}",
+            details={"model_id": model_id},
+        )
+    return job.as_dict()
+
+
+@router.get("/{model_id}/pull/stream")
+async def pull_stream(model_id: str, request: Request) -> StreamingResponse:
+    """SSE stream of pull progress.
+
+    Emits one ``data:`` frame at start, then one per ~256 KiB or every
+    500ms (whichever is rarer), and a final frame on completion
+    /failure/cancellation. Idempotent: subscribing after the job has
+    finished yields one frame with the terminal state and closes.
+    """
+    jobs: dict[str, PullJob] = request.app.state.model_pull_jobs
+    job = jobs.get(model_id)
+    if job is None:
+        raise PullJobNotFound(
+            f"no pull job for model {model_id!r}",
+            details={"model_id": model_id},
+        )
+
+    async def _gen() -> Any:
+        # Emit an immediate snapshot so SSE clients don't sit at zero
+        # while waiting for the first progress signal.
+        yield f"data: {json.dumps(job.as_dict())}\n\n"
+        while job.state in ("queued", "running"):
+            event = job.progress_event
+            try:
+                await asyncio.wait_for(event.wait(), timeout=5.0)
+            except asyncio.TimeoutError:
+                # Keep-alive — surfaces stuck downloads without closing
+                # the stream.
+                yield f"data: {json.dumps(job.as_dict())}\n\n"
+                continue
+            yield f"data: {json.dumps(job.as_dict())}\n\n"
+        # One terminal frame so the UI sees the final state and can close.
+        yield f"data: {json.dumps(job.as_dict())}\n\n"
+
+    return StreamingResponse(
+        _gen(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@router.post("/{model_id}/pull/cancel")
+async def pull_cancel(model_id: str, request: Request) -> dict[str, object]:
+    """Request cancellation of an in-flight pull.
+
+    Sets a cancel flag the background task observes on the next chunk
+    boundary; the partial download is unlinked, the job transitions to
+    ``cancelled``. Idempotent — cancelling a completed job is a no-op.
+    """
+    jobs: dict[str, PullJob] = request.app.state.model_pull_jobs
+    job = jobs.get(model_id)
+    if job is None:
+        raise PullJobNotFound(
+            f"no pull job for model {model_id!r}",
+            details={"model_id": model_id},
+        )
+    if job.state in ("queued", "running"):
+        job.cancel_requested = True
+    return job.as_dict()
