@@ -18,9 +18,16 @@ const props = defineProps({
   actionLoading: { type: String, default: null },
 })
 
-defineEmits(['action', 'select-model', 'logs', 'edit'])
+defineEmits(['action', 'select-model', 'logs', 'edit', 'delete'])
+
+// Mirror src/hal0/slots/__init__.py's BUILTIN_SLOTS tuple.  These slots
+// are always present and can be restarted / load / unload / swap-modeled,
+// but never deleted — SlotManager.delete() raises on them and the UI
+// shouldn't offer the affordance.
+const BUILTIN_SLOTS = new Set(['primary', 'embed', 'stt', 'tts'])
 
 const m = computed(() => props.metrics || {})
+const isBuiltin = computed(() => BUILTIN_SLOTS.has(props.slot.name))
 const running = computed(() => {
   const s = props.slot.status || props.slot.state
   return s === 'running' || s === 'ready' || s === 'serving' || s === 'idle'
@@ -214,6 +221,19 @@ const sparkSvg = computed(() => {
       </button>
       <button v-else class="sc-btn good" type="button" :disabled="busy" @click="$emit('action', selectedModel ? 'load' : 'load')" title="Start">
         <svg width="14" height="14" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5.14v14l11-7-11-7z"/></svg>
+      </button>
+      <!-- Delete is hidden for built-in slots (primary/embed/stt/tts); the
+           backend rejects deleting them and the UI shouldn't suggest it. -->
+      <button
+        v-if="!isBuiltin"
+        class="sc-btn danger"
+        type="button"
+        :disabled="busy"
+        @click="$emit('delete')"
+        title="Delete slot"
+        :aria-label="`Delete slot ${slot.name}`"
+      >
+        <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.6"><path stroke-linecap="round" stroke-linejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
       </button>
     </div>
   </div>

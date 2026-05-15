@@ -377,6 +377,7 @@ const SLOT_TYPES = ['llama-server', 'flm', 'moonshine', 'kokoro']
             @action="(a) => a === 'load' ? doLoad(slot) : slotAction(slot.name, a)"
             @logs="openLogs(slot)"
             @edit="openEdit(slot)"
+            @delete="deletingSlot = slot"
           />
         </div>
       </template>
