@@ -12,8 +12,14 @@ from contextlib import asynccontextmanager
 import structlog
 from fastapi import FastAPI
 
+from fastapi import Depends
+
 from hal0 import __version__
 from hal0.api.middleware import error_codes, request_id
+from hal0.api.middleware.auth import require_token, require_token_unless_public
+from hal0.api.routes import (
+    auth as auth_routes,
+)
 from hal0.api.routes import (
     config as config_routes,
 )
@@ -278,20 +284,66 @@ def create_app() -> FastAPI:
     request_id.install(app)
     error_codes.install(app)
 
-    # OpenAI-compatible endpoints
-    app.include_router(v1.router, prefix="/v1", tags=["v1"])
+    # ── Auth wiring ──────────────────────────────────────────────────
+    # The /api/auth router is mounted bare — its public endpoints are
+    # listed in PUBLIC_PATHS, and the admin token CRUD subrouter inside
+    # auth_routes.router carries its own require_admin dep.
+    app.include_router(auth_routes.router, prefix="/api/auth", tags=["auth"])
 
-    # Internal API
-    app.include_router(slots.router, prefix="/api/slots", tags=["slots"])
-    app.include_router(models.router, prefix="/api/models", tags=["models"])
-    app.include_router(hardware.router, prefix="/api", tags=["hardware"])
-    app.include_router(logs.router, prefix="/api/logs", tags=["logs"])
-    app.include_router(settings.router, prefix="/api/settings", tags=["settings"])
+    # /v1 mixes one public endpoint (/v1/models) with protected ones —
+    # use the path-aware variant so /v1/models stays open while
+    # /v1/chat/completions, /v1/embeddings, etc. require a token.
+    _v1_auth = [Depends(require_token_unless_public)]
+    app.include_router(v1.router, prefix="/v1", tags=["v1"], dependencies=_v1_auth)
+
+    # /api/install also mixes — first-run state + complete must remain
+    # reachable before any token can exist; the rest is admin-grade.
+    _installer_auth = [Depends(require_token_unless_public)]
+    app.include_router(
+        installer.router,
+        prefix="/api/install",
+        tags=["installer"],
+        dependencies=_installer_auth,
+    )
+
+    # Single-purpose protected routers — every endpoint requires a token
+    # when HAL0_AUTH_ENABLED=1, no path-aware bypass needed.
+    _admin_auth = [Depends(require_token)]
+    app.include_router(
+        slots.router, prefix="/api/slots", tags=["slots"], dependencies=_admin_auth
+    )
+    app.include_router(
+        models.router, prefix="/api/models", tags=["models"], dependencies=_admin_auth
+    )
+    app.include_router(
+        hardware.router, prefix="/api", tags=["hardware"], dependencies=_admin_auth
+    )
+    app.include_router(
+        logs.router, prefix="/api/logs", tags=["logs"], dependencies=_admin_auth
+    )
+    app.include_router(
+        settings.router,
+        prefix="/api/settings",
+        tags=["settings"],
+        dependencies=_admin_auth,
+    )
+    app.include_router(
+        providers.router, prefix="/api", tags=["providers"], dependencies=_admin_auth
+    )
+    app.include_router(
+        updater.router,
+        prefix="/api/updates",
+        tags=["updater"],
+        dependencies=_admin_auth,
+    )
+
+    # Health + config/urls routers carry endpoints that are entirely
+    # public per PUBLIC_PATHS (e.g. /api/status, /api/config/urls). Any
+    # future protected endpoints added to these routers should declare
+    # Depends(require_token) at the function level — keeping the public
+    # bypass to its narrow allowlist.
     app.include_router(health.router, prefix="/api", tags=["health"])
-    app.include_router(providers.router, prefix="/api", tags=["providers"])
     app.include_router(config_routes.router, prefix="/api/config", tags=["config"])
-    app.include_router(updater.router, prefix="/api/updates", tags=["updater"])
-    app.include_router(installer.router, prefix="/api/install", tags=["installer"])
 
     return app
 

@@ -40,6 +40,65 @@ Example:
 HAL0_PORT=9090 HAL0_OPENWEBUI_PORT=3002 sudo bash installer/install.sh
 ```
 
+## Authentication (`--auth=basic`)
+
+The default install posture is `--auth=off` — the API binds `:8080` and OpenWebUI binds `:3001` directly, with no auth in front. That's safe on a fully-trusted home LAN; it is **not** safe to expose to the internet.
+
+`--auth=basic` brings up the v0.2 auth POC: a Caddy reverse proxy in front of both services, with HTTP basic_auth at the edge for the dashboard and bearer-token auth for the OpenAI-compatible API.
+
+```sh
+# Interactive (prompts for admin user/password):
+sudo bash installer/install.sh --auth=basic
+
+# Non-interactive:
+HAL0_ADMIN_USER=alex HAL0_ADMIN_PASSWORD='hunter2' \
+  HAL0_HOSTNAME=hal0.local \
+  sudo bash installer/install.sh --auth=basic
+```
+
+What the flag does:
+
+1. Installs Caddy (`apt install caddy` on Debian/Ubuntu, `pacman -S caddy` on Arch/CachyOS). Other distros require a manual install; the script surfaces a clear error and a docs link.
+2. Prompts for or accepts via env: `HAL0_ADMIN_USER`, `HAL0_ADMIN_PASSWORD`, `HAL0_HOSTNAME` (default `hal0.local`), `HAL0_TLS_EMAIL` (default `admin@<hostname>`).
+3. Hashes the password via `caddy hash-password`, renders `/etc/hal0/Caddyfile` from `packaging/caddy/Caddyfile.template`.
+4. Drops `/etc/systemd/system/hal0-caddy.service` and starts it.
+5. Sets `HAL0_AUTH_ENABLED=1` in `/etc/hal0/api.env` and re-renders `/etc/hal0/openwebui.env` with `WEBUI_AUTH=True` + `WEBUI_AUTH_TRUSTED_EMAIL_HEADER=X-Forwarded-Email` so OpenWebUI auto-provisions a user from the Caddy-forwarded identity (no second login).
+6. Restarts `hal0-api` and `hal0-openwebui` so the new env takes effect.
+7. If avahi-daemon is running, drops `/etc/avahi/services/hal0.service` so `hal0.local` resolves on the LAN. Without avahi, add a static `/etc/hosts` entry on each client: `<hal0-ip>  hal0.local`.
+
+After install:
+
+- Dashboard: `https://hal0.local/` — basic_auth prompt → admin user → SPA.
+- Chat: `https://hal0.local/chat/` — single-sign-on via the same Caddy basic_auth identity.
+- OpenAI API: `https://hal0.local/v1/models` (no auth), `https://hal0.local/v1/chat/completions -H 'Authorization: Bearer hal0_...'` (token required).
+
+Mint a token via the Settings UI (Authentication panel → Create token) or via:
+
+```sh
+curl -k -u 'admin:hunter2' \
+  https://hal0.local/api/auth/tokens \
+  -H 'Content-Type: application/json' \
+  -d '{"label": "openwebui-bridge", "scope": "all"}'
+```
+
+The raw token is in the response **once** — copy it immediately. To revoke:
+
+```sh
+curl -k -u 'admin:hunter2' -X DELETE \
+  https://hal0.local/api/auth/tokens/<token-id>
+```
+
+The `tls internal` directive in the rendered Caddyfile mints a self-signed certificate via Caddy's internal CA. For a real (DNS-resolvable) hostname, edit `/etc/hal0/Caddyfile` to remove `tls internal` and Caddy will provision a Let's Encrypt cert on the next reload.
+
+To roll back:
+
+```sh
+sudo systemctl disable --now hal0-caddy
+sudo sed -i 's|^HAL0_AUTH_ENABLED=.*|HAL0_AUTH_ENABLED=0|' /etc/hal0/api.env
+sudo HAL0_AUTH_ENABLED=0 /opt/hal0/.venv/bin/python -m hal0.openwebui.env_writer
+sudo systemctl restart hal0-api hal0-openwebui
+```
+
 ## Dev mode (`--dev`)
 
 Runs the full installer logic but lays everything under `$PWD/hal0-home` instead of FHS paths. systemd units are **not** installed or enabled — they are written to `$PWD/hal0-home/etc/systemd/system/` for inspection only.
