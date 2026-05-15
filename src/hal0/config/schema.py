@@ -353,6 +353,19 @@ class HardwareInfo(BaseModel):
         description="MemAvailable at probe time, MiB.",
     )
     swap_mb: int = Field(default=0, ge=0, description="Total swap in MiB.")
+    # On AMD UMA (Strix Halo) the dashboard should show one unified pool — not
+    # ram_mb + vram_mb, which double-counts because GTT is carved from RAM.
+    # On discrete GPUs / non-UMA, this equals ram_mb.
+    unified_memory_mb: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "True unified-memory pool size in MiB (host RAM that the GPU can "
+            "share via GTT on UMA). Use this in the dashboard's "
+            "'Unified memory · N GB pool' label rather than summing ram_mb + "
+            "vram_mb (those overlap on UMA)."
+        ),
+    )
     gpus: list[GPUInfo] = Field(default_factory=list, description="Detected GPUs.")
     npu: NPUInfo = Field(
         default_factory=NPUInfo, description="Detected NPU (present=False if none)."

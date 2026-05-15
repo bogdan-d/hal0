@@ -156,6 +156,72 @@ def _parse_meminfo() -> tuple[int, int]:
     return total_kb // 1024, avail_kb // 1024
 
 
+_SIZE_UNITS_MB = {"KB": 1 / 1024, "MB": 1, "GB": 1024, "TB": 1024 * 1024}
+
+
+def _dmidecode_host_ram_mb() -> int | None:
+    """Sum physical DIMM sizes via `dmidecode -t memory`.
+
+    Used to recover the true host RAM when /proc/meminfo reflects an LXC
+    cgroup quota rather than the physical pool. Returns None when
+    dmidecode is unavailable or returns no usable Memory Device entries.
+    """
+    rc, out, _ = _run(["dmidecode", "-t", "memory"], timeout=4.0)
+    if rc != 0 or not out:
+        return None
+    total_mb = 0.0
+    in_device = False
+    for raw in out.splitlines():
+        line = raw.strip()
+        if line.startswith("Memory Device") or line == "Memory Device":
+            in_device = True
+            continue
+        if not in_device:
+            continue
+        if not line:
+            in_device = False
+            continue
+        if line.startswith("Size:"):
+            val = line.split(":", 1)[1].strip()
+            if val.startswith("No Module") or val == "Unknown" or val.startswith("0 "):
+                continue
+            parts = val.split()
+            if len(parts) >= 2:
+                try:
+                    n = float(parts[0])
+                except ValueError:
+                    continue
+                unit = parts[1].upper()
+                mult = _SIZE_UNITS_MB.get(unit)
+                if mult:
+                    total_mb += n * mult
+    if total_mb <= 0:
+        return None
+    return int(round(total_mb))
+
+
+def _derive_unified_memory_mb(ram_mb: int, gpu: GPUInfo | None) -> int:
+    """Compute the true unified-memory pool size in MiB.
+
+    On AMD UMA (Strix Halo etc.) the dedicated VRAM is a tiny BAR carve-out
+    and the bulk of GPU memory comes from the GTT pool, which is *shared*
+    with system RAM. Summing ram_mb + vram_mb would double-count.
+
+    Strategy (in order):
+      1. If running in an LXC where /proc/meminfo shows a cgroup quota
+         smaller than the host's physical RAM, prefer dmidecode's DIMM sum.
+      2. Otherwise return /proc/meminfo's MemTotal (already the right pool
+         on bare metal / VMs that see all physical RAM).
+      3. On non-UMA hardware (discrete GPUs), unified pool = ram_mb;
+         consumers add dedicated VRAM separately.
+    """
+    dmi = _dmidecode_host_ram_mb()
+    if dmi is not None and dmi > ram_mb * 1.1:
+        # /proc/meminfo is reporting a cgroup-restricted view; trust the DIMMs.
+        return dmi
+    return ram_mb
+
+
 # ── GPU detection ──────────────────────────────────────────────────────────────
 
 
@@ -374,12 +440,15 @@ class HardwareProbe:
             except OSError:
                 pass
 
+            unified_mb = _derive_unified_memory_mb(ram_total_mb, gpu if gpu.vendor else None)
+
             return HardwareInfo(
                 cpu_model=cpu_model,
                 cpu_cores=cpu_cores,
                 cpu_threads=cpu_threads,
                 ram_mb=ram_total_mb,
                 ram_available_mb=ram_avail_mb,
+                unified_memory_mb=unified_mb,
                 gpus=[gpu] if gpu.vendor else [],
                 npu=npu,
                 disk_free_mb=disk_mb,

@@ -51,28 +51,40 @@ const memTotalGb = computed(() => {
 })
 const memLabel = computed(() => (hw.value.gtt_total_mb ? 'GTT' : 'VRAM'))
 
-// ── Unified memory bar (Strix Halo: GTT + RAM + NPU + VRAM partitions) ──
-// Total pool is the larger of (ram_total + gtt_total) and ram_total, since
-// haloai exposes the partition explicitly. On non-UMA hardware we fall back
-// to a simple RAM-only bar.
+// ── Unified memory bar (Strix Halo: one physical pool, multiple consumers) ──
+// On AMD UMA, GTT *is* system RAM — they share the same DIMMs. Summing
+// ram_total + gtt_total would double-count, which is what produced the
+// "169 GB pool on a 128 GB machine" bug. The probe exposes the true
+// unified_memory_mb (via dmidecode when /proc/meminfo reports an LXC
+// cgroup quota); we trust that. host.host_mem_total_mb is the haloai
+// upstream's equivalent.
 const unifiedTotalGb = computed(() => {
+  const probed = hw.value.unified_memory_mb || hw.value.host?.host_mem_total_mb
+  if (probed) return probed / 1024
+  // Non-UMA / unknown: RAM + dedicated VRAM is a fair total (no overlap).
   const ramG = (hw.value.ram_total_mb || 0) / 1024
-  const gttG = (hw.value.gtt_total_mb || 0) / 1024
-  // Strix Halo reports the partition split; the host pool is the sum
-  // (haloai's host.host_mem_total_mb is the authoritative figure when present).
-  if (hw.value.host?.host_mem_total_mb) {
-    return hw.value.host.host_mem_total_mb / 1024
-  }
-  return ramG + gttG
+  const vramG = (hw.value.vram_total_mb || 0) / 1024
+  return ramG + vramG
 })
+
 const unifiedSegments = computed(() => {
   const totalG = unifiedTotalGb.value || 0
   if (totalG === 0) return []
+  // Used breakdown:
+  //   gtt   = GPU's GTT allocations (live model weights / KV cache on UMA)
+  //   npu   = NPU model resident bytes (also drawn from the unified pool)
+  //   vram  = dedicated VRAM in use (discrete GPUs only — 0 on UMA)
+  //   sys   = system RAM used by everything else (MemTotal - MemAvailable
+  //           minus what's already attributed to the GPU through GTT)
   const gtt = (hw.value.gtt_used_mb || 0) / 1024
-  const sys = (hw.value.ram_used_mb || 0) / 1024
+  const vram = (hw.value.vram_used_mb || 0) / 1024
   const npuMb = hw.value.npu_status?.model_mb || 0
   const npu = npuMb / 1024
-  const vram = (hw.value.vram_used_mb || 0) / 1024
+  // ram_used_gb is from /api/stats/hardware (haloai shape) — it's the OS-
+  // visible used total, which already includes pinned GTT bytes on UMA.
+  // Subtract gtt so we don't double-count GTT into both buckets.
+  const ramUsedG = hw.value.ram_used_gb ?? ((hw.value.ram_total_mb || 0) - (hw.value.ram_available_mb || 0)) / 1024
+  const sys = Math.max(0, ramUsedG - gtt)
   const used = gtt + sys + npu + vram
   const free = Math.max(0, totalG - used)
   const seg = (label, gb, cls) => ({
@@ -81,13 +93,15 @@ const unifiedSegments = computed(() => {
     pct: Math.max(0, (gb / totalG) * 100),
     cls,
   })
-  return [
+  const out = [
     seg('GTT · inference', gtt, 'seg-gtt'),
     seg('System RAM', sys, 'seg-sys'),
     seg('NPU / FLM', npu, 'seg-npu'),
-    seg('VRAM', vram, 'seg-vram'),
-    seg('Free', free, 'seg-free'),
   ]
+  // Hide the VRAM segment on UMA — it's always 0 and just clutters the legend.
+  if (vram > 0.01) out.push(seg('VRAM', vram, 'seg-vram'))
+  out.push(seg('Free', free, 'seg-free'))
+  return out
 })
 
 const npuOk = computed(() => !!hw.value.npu_status?.ok)
@@ -294,7 +308,7 @@ loadChatModels()
         <div class="um-head">
           <div class="um-title">Unified memory · {{ unifiedTotalGb.toFixed(0) }} GB pool</div>
           <div class="um-sub">
-            {{ ((hw.gtt_used_mb || 0) / 1024 + (hw.ram_used_mb || 0) / 1024).toFixed(1) }} GB used
+            {{ unifiedSegments.filter(s => s.cls !== 'seg-free').reduce((a, s) => a + s.gb, 0).toFixed(1) }} GB used
             <span class="dim"> · NPU {{ npuOk ? 'ready' : 'offline' }}</span>
           </div>
         </div>

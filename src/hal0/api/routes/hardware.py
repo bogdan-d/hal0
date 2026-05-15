@@ -22,14 +22,25 @@ def _flatten_for_ui(info: dict[str, Any]) -> dict[str, Any]:
     """
     gpus = info.get("gpus") or []
     primary_gpu = gpus[0] if gpus else {}
+    vendor = primary_gpu.get("vendor", "")
+    vram_mb = primary_gpu.get("vram_mb", 0)
+    ram_mb = info.get("ram_mb", 0)
+    unified_mb = info.get("unified_memory_mb", 0) or ram_mb
+    # On AMD UMA the probe's GPUInfo.vram_mb is max(vram, gtt) — i.e. the GTT
+    # pool. Surface it as gtt_total_mb; expose a separate dedicated_vram_mb
+    # only for non-UMA. This stops the dashboard from treating GTT and VRAM
+    # as independent buckets.
+    is_uma = vendor == "amd" and vram_mb > ram_mb * 0.5
     return {
         **info,
         "gpu_name": primary_gpu.get("name", ""),
-        "gpu_vendor": primary_gpu.get("vendor", ""),
-        "vram_total_mb": primary_gpu.get("vram_mb", 0),
-        "gtt_total_mb": primary_gpu.get("vram_mb", 0),
-        "ram_total_mb": info.get("ram_mb", 0),
+        "gpu_vendor": vendor,
+        "vram_total_mb": 0 if is_uma else vram_mb,
+        "gtt_total_mb": vram_mb if is_uma else 0,
+        "ram_total_mb": ram_mb,
         "ram_available_mb": info.get("ram_available_mb", 0),
+        "unified_memory_mb": unified_mb,
+        "is_uma": is_uma,
         "disk_free_mb": info.get("disk_free_mb", 0),
         "cpu_name": info.get("cpu_model", ""),
         "cpu_cores": info.get("cpu_cores", 0),

@@ -307,6 +307,86 @@ def test_probe_assembles_hardware_info(monkeypatch: pytest.MonkeyPatch, tmp_path
     assert info.probed_at  # ISO-8601 timestamp populated
 
 
+_DMIDECODE_SAMPLE = """\
+# dmidecode 3.5
+Getting SMBIOS data from sysfs.
+SMBIOS 3.7.0 present.
+
+Handle 0x0030, DMI type 16, 23 bytes
+Physical Memory Array
+\tLocation: System Board Or Motherboard
+\tNumber Of Devices: 8
+
+Handle 0x0033, DMI type 17, 100 bytes
+Memory Device
+\tArray Handle: 0x0030
+\tSize: 16 GB
+\tForm Factor: Other
+\tLocator: DIMM 0
+
+Handle 0x0034, DMI type 17, 100 bytes
+Memory Device
+\tArray Handle: 0x0030
+\tSize: 16 GB
+\tLocator: DIMM 1
+
+Handle 0x0035, DMI type 17, 100 bytes
+Memory Device
+\tArray Handle: 0x0030
+\tSize: No Module Installed
+\tLocator: DIMM 2
+"""
+
+
+def test_dmidecode_host_ram_mb(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(probe_mod, "_run", lambda *_a, **_k: (0, _DMIDECODE_SAMPLE, ""))
+    assert probe_mod._dmidecode_host_ram_mb() == 32 * 1024
+
+
+def test_dmidecode_host_ram_mb_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(probe_mod, "_run", lambda *_a, **_k: (-1, "", "binary not found"))
+    assert probe_mod._dmidecode_host_ram_mb() is None
+
+
+def test_derive_unified_uses_dmidecode_when_cgroup_capped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # LXC reports 64 GiB in /proc/meminfo, real host has 128 GiB DIMMs.
+    monkeypatch.setattr(probe_mod, "_dmidecode_host_ram_mb", lambda: 128 * 1024)
+    unified = probe_mod._derive_unified_memory_mb(64 * 1024, None)
+    assert unified == 128 * 1024
+
+
+def test_derive_unified_falls_back_to_meminfo_on_bare_metal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Bare metal: /proc/meminfo and dmidecode roughly agree → trust meminfo.
+    monkeypatch.setattr(probe_mod, "_dmidecode_host_ram_mb", lambda: 32500)
+    unified = probe_mod._derive_unified_memory_mb(32000, None)
+    assert unified == 32000
+
+
+def test_probe_assembles_unified_memory_on_uma(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(probe_mod, "_parse_cpuinfo", lambda: ("Strix Halo", 16, 32))
+    # LXC sees a 64 GiB cgroup but real host has 128 GiB of DIMMs.
+    monkeypatch.setattr(probe_mod, "_parse_meminfo", lambda: (64 * 1024, 60 * 1024))
+    monkeypatch.setattr(probe_mod, "_dmidecode_host_ram_mb", lambda: 128 * 1024)
+    monkeypatch.setattr(
+        probe_mod,
+        "_detect_gpu",
+        lambda: GPUInfo(vendor="amd", name="Radeon 8060S", vram_mb=105 * 1024),
+    )
+    monkeypatch.setattr(probe_mod, "_detect_npu", lambda: probe_mod.NPUInfo(present=False))
+    monkeypatch.setattr(probe_mod, "_disk_free_mb", lambda _: 1024)
+    monkeypatch.setattr(probe_mod, "_read_text", lambda _: None)
+
+    info = HardwareProbe().probe()
+    assert info.unified_memory_mb == 128 * 1024
+    # Raw counters stay honest.
+    assert info.ram_mb == 64 * 1024
+    assert info.gpus[0].vram_mb == 105 * 1024
+
+
 def test_probe_async(monkeypatch: pytest.MonkeyPatch) -> None:
     """probe_async returns the same value as probe() (just from a thread)."""
     monkeypatch.setattr(probe_mod, "_parse_cpuinfo", lambda: ("X", 1, 1))
