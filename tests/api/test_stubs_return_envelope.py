@@ -13,12 +13,14 @@ from fastapi.testclient import TestClient
 # Endpoints leave this list as they get wired up; the remaining ones are
 # all genuine Phase 2+ surfaces (installer, updater, logs streaming, etc.)
 _STUB_ENDPOINTS = [
-    # Step 2 wired /api/slots/{name} to the real SlotManager — removed
-    # from the stub list because an unknown slot now returns the typed
-    # slot.not_found envelope, not system.not_implemented.
-    ("GET", "/api/logs/api"),
-    ("GET", "/api/updates/check"),
-    ("GET", "/api/install/state"),
+    # /api/logs, /api/settings, /api/install/state, /api/updates/check
+    # are now wired (see Team C's wave). The remaining 501 surfaces all
+    # live behind their owner's wave with a typed envelope code; they
+    # are covered by their own per-team route tests rather than this
+    # generic system.not_implemented assertion.
+    #
+    # Intentionally empty: no Phase-0 stubs remain in the route surface
+    # that still emit ``code: "system.not_implemented"``.
 ]
 
 
@@ -42,10 +44,35 @@ def _assert_envelope(body: dict, path: str) -> None:
 
 @pytest.mark.parametrize("method,path", _STUB_ENDPOINTS)
 def test_stub_returns_501_envelope(client: TestClient, method: str, path: str) -> None:
-    """Stub endpoint returns 501 with well-formed error envelope."""
+    """Stub endpoint returns 501 with well-formed envelope (currently none)."""
     response = client.request(method, path)
     assert response.status_code == 501, (
         f"{method} {path}: expected 501, got {response.status_code}. Body: {response.text[:200]}"
     )
     body = response.json()
     _assert_envelope(body, f"{method} {path}")
+
+
+# Endpoints owned by other teams' waves keep a typed-domain 501 (NOT
+# system.not_implemented) so the UI can branch on the specific code.
+# Asserting the typed code prevents an accidental regression to the
+# generic stub envelope.
+_TYPED_PENDING_ENDPOINTS: list[tuple[str, str, str]] = [
+    ("POST", "/api/models/qwen3-4b-q4/pull", "model.pull_pending"),
+    ("GET", "/api/install/curated-models", "model.pull_pending"),
+]
+
+
+@pytest.mark.parametrize("method,path,code", _TYPED_PENDING_ENDPOINTS)
+def test_typed_pending_endpoint_returns_domain_code(
+    client: TestClient, method: str, path: str, code: str
+) -> None:
+    """Cross-team pending endpoints carry their domain code, not the generic stub."""
+    response = client.request(method, path)
+    assert response.status_code == 501, (
+        f"{method} {path}: expected 501, got {response.status_code}. Body: {response.text[:200]}"
+    )
+    body = response.json()
+    assert body["error"]["code"] == code, (
+        f"{method} {path}: expected code={code!r}, got {body['error']['code']!r}"
+    )

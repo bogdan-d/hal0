@@ -51,8 +51,15 @@ def _is_alias(model_id: str) -> bool:
     return model_id in _ALIAS_NAMES
 
 
-class NotImplementedYet(Hal0Error):
-    code = "system.not_implemented"
+class ModelPullPending(Hal0Error):
+    """501 marker for the model-download wave (Team B's domain).
+
+    The HF streaming download + SSE progress endpoint is owned by Team B
+    and lands in the v0.2 wave; the surface here is a typed stub so the
+    Models view can detect "not implemented yet" vs "broken".
+    """
+
+    code = "model.pull_pending"
     status = 501
 
 
@@ -165,4 +172,10 @@ async def delete_model(model_id: str, request: Request) -> dict[str, object]:
 
 @router.post("/{model_id:path}/pull")
 async def pull_model(model_id: str) -> dict[str, object]:
-    raise NotImplementedYet(f"pull_model {model_id}: model-download flow lands with the installer")
+    # NOTE: Team B owns the model-download flow (HF streaming + SSE
+    # progress). This endpoint stays a typed 501 with a distinct error
+    # code so the UI can detect "feature pending" vs "broken".
+    raise ModelPullPending(
+        "model pull not yet implemented; expected in v0.2 wave",
+        details={"model_id": model_id, "owner": "team-b"},
+    )
