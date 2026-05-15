@@ -1,7 +1,8 @@
 <script setup>
-import { computed, ref, watch } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { useSystemStore } from '../stores/system.js'
+import { api } from '../composables/useApi.js'
 
 const props = defineProps({
   open: Boolean,
@@ -14,6 +15,28 @@ const system = useSystemStore()
 
 const running = computed(() => system.slots.filter((s) => s.status === 'running').length)
 const total   = computed(() => system.slots.length)
+
+// ── OpenWebUI chat link ────────────────────────────────────────────
+// /api/config/urls returns the live hostnames + a runtime flag for
+// whether hal0-openwebui.service is active. We refuse to render the
+// link until the API answers — a hardcoded localhost:3001 used to ship
+// here, which broke for anyone hitting the dashboard from another
+// machine on the LAN.
+const chatUrl = ref('')
+const chatEnabled = ref(false)
+
+async function loadChatUrl() {
+  try {
+    const r = await api('/api/config/urls')
+    chatUrl.value = r?.openwebui ?? ''
+    chatEnabled.value = !!r?.openwebui_enabled
+  } catch {
+    // Leave chatEnabled = false; the link stays hidden rather than
+    // dangling at a 404 if the API is down.
+  }
+}
+
+onMounted(loadChatUrl)
 
 // ── Nav definition ─────────────────────────────────────────────────
 const NAV_ITEMS = [
@@ -95,10 +118,12 @@ function onNavClick() {
       </router-link>
     </nav>
 
-    <!-- External link: OpenWebUI -->
-    <div class="sidebar-footer-links" v-if="open">
+    <!-- External link: OpenWebUI. Href is resolved from /api/config/urls -->
+    <!-- so the link points at the host the dashboard was loaded from,    -->
+    <!-- not a hardcoded localhost. Hidden when the unit isn't active.    -->
+    <div class="sidebar-footer-links" v-if="open && chatEnabled && chatUrl">
       <a
-        href="http://localhost:3001"
+        :href="chatUrl"
         target="_blank"
         rel="noopener noreferrer"
         class="nav-item external"

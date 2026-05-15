@@ -114,6 +114,7 @@ mkdir -p \
     "${VAR_DIR}/models" \
     "${VAR_DIR}/registry" \
     "${VAR_DIR}/slots" \
+    "${VAR_DIR}/openwebui" \
     "${VAR_DIR}/cache" \
     "${UNIT_DIR}"
 info "directories under ${PREFIX}, ${ETC_DIR}, ${VAR_DIR}"
@@ -186,6 +187,21 @@ EOF
     info "wrote ${UPSTREAMS_TOML}"
 fi
 
+# OpenWebUI prewire env. Rendered via the just-installed venv so the
+# defaults live in exactly one place (src/hal0/openwebui/env_writer.py).
+# In dev mode we point HAL0_HOME at the prefix so the file lands under
+# the dev tree alongside the rest of the config.
+HAL0_HOME_FOR_OWUI=""
+if [[ "${DEV_MODE}" -eq 1 ]]; then
+    HAL0_HOME_FOR_OWUI="${PREFIX}"
+fi
+if HAL0_HOME="${HAL0_HOME_FOR_OWUI}" "${VENV_DIR}/bin/python" -c \
+    'from hal0.openwebui.env_writer import main; main()'; then
+    info "wrote ${ETC_DIR}/openwebui.env"
+else
+    warn "failed to write openwebui.env — OpenWebUI may not start"
+fi
+
 step "Systemd units"
 
 API_UNIT="${UNIT_DIR}/hal0-api.service"
@@ -222,9 +238,28 @@ else
     warn "${SLOT_TEMPLATE_SRC} not found — slot template not installed"
 fi
 
+OPENWEBUI_UNIT_SRC="${REPO_ROOT}/packaging/systemd/hal0-openwebui.service"
+OPENWEBUI_UNIT_DST="${UNIT_DIR}/hal0-openwebui.service"
+if [[ -f "${OPENWEBUI_UNIT_SRC}" ]]; then
+    cp "${OPENWEBUI_UNIT_SRC}" "${OPENWEBUI_UNIT_DST}"
+    info "wrote ${OPENWEBUI_UNIT_DST}"
+else
+    warn "${OPENWEBUI_UNIT_SRC} not found — OpenWebUI unit not installed"
+fi
+
 if [[ "${DEV_MODE}" -eq 0 ]]; then
     systemctl daemon-reload
     info "systemctl daemon-reload"
+fi
+
+# Kick off a background pull of the OpenWebUI image so the unit start
+# below isn't blocked by a multi-hundred-MB download on first install.
+# The unit also has ExecStartPre=docker pull (idempotent), so a missed
+# background pull never breaks correctness — only first-boot latency.
+if [[ "${DEV_MODE}" -eq 0 && "${NO_START}" -eq 0 ]] && command -v docker >/dev/null && docker info >/dev/null 2>&1; then
+    info "pulling ghcr.io/open-webui/open-webui:main in the background"
+    (docker pull ghcr.io/open-webui/open-webui:main >/dev/null 2>&1 || true) &
+    disown
 fi
 
 step "Hardware probe"
@@ -259,6 +294,19 @@ else
     else
         warn "hal0-api failed to start; check 'journalctl -u hal0-api -n 40'"
     fi
+
+    if [[ -f "${OPENWEBUI_UNIT_DST}" ]]; then
+        systemctl enable --now hal0-openwebui
+        # OpenWebUI can take a moment to come up while it pulls the
+        # image / initialises its sqlite db. Don't fail the installer
+        # on a slow first boot; just surface the status.
+        sleep 2
+        if systemctl is-active --quiet hal0-openwebui; then
+            info "hal0-openwebui is running (chat at :3001)"
+        else
+            warn "hal0-openwebui not yet active; check 'journalctl -u hal0-openwebui -n 40'"
+        fi
+    fi
 fi
 
 HOST="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
@@ -270,6 +318,7 @@ printf '  Config:     %s%s%s\n' "${BLU}" "${ETC_DIR}" "${RST}"
 printf '  Data:       %s%s%s\n' "${BLU}" "${VAR_DIR}" "${RST}"
 if [[ "${DEV_MODE}" -eq 0 && "${NO_START}" -eq 0 ]]; then
     printf '  Dashboard:  %shttp://%s:%s%s\n' "${BLU}" "${HOST}" "${HAL0_PORT}" "${RST}"
+    printf '  Chat:       %shttp://%s:3001%s\n' "${BLU}" "${HOST}" "${RST}"
     printf '  Logs:       %sjournalctl -fu hal0-api%s\n' "${DIM}" "${RST}"
 fi
 printf '\n  Next steps:\n'
