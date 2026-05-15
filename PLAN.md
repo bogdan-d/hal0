@@ -626,7 +626,7 @@ These were intentionally not settled during the grilling and need their
 own decisions before relevant milestones:
 
 - ~~**Repo home**~~ — RESOLVED 2026-05-15: GitHub org is `hal0ai` for both `hal0ai/hal0` and `hal0ai/hal0.dev`
-- **License** (still open). Apache 2.0 recommended; confirm before tag-and-release
+- ~~**License**~~ — RESOLVED 2026-05-15: Apache 2.0 (LICENSE file at repo root)
 - **Hermes shutdown timing** on the haloai LXC. Decide at cutover (phase 7)
 - ~~**`hal0.dev` web property** scope~~ — RESOLVED 2026-05-15: marketing site + Starlight docs in a separate `hal0ai/hal0.dev` repo, Vercel-hosted
 - **Public launch story** — blog post? HN? home AI subreddit? Decide before phase 7
