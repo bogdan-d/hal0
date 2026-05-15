@@ -15,6 +15,18 @@ Prewired variables (PLAN.md §8):
     ENABLE_OLLAMA_API=False
     DATA_DIR=/app/backend/data
     DEFAULT_LOCALE=en
+
+When ``HAL0_AUTH_ENABLED=1`` is set in the calling environment, the
+defaults flip to single-sign-on through the Caddy reverse proxy:
+
+    WEBUI_AUTH=True
+    WEBUI_AUTH_TRUSTED_EMAIL_HEADER=X-Forwarded-Email
+
+OpenWebUI reads ``WEBUI_AUTH_TRUSTED_EMAIL_HEADER`` and auto-provisions a
+user from whatever email Caddy forwarded (basic_auth identity), skipping
+its own login page entirely. With ``HAL0_AUTH_ENABLED`` unset / falsy,
+the defaults stay as Team F set them so existing single-machine LAN
+installs continue to work without a second login prompt of their own.
 """
 
 from __future__ import annotations
@@ -93,13 +105,37 @@ def _default_path() -> Path:
     return Path("/etc/hal0/openwebui.env")
 
 
+def _auth_enabled() -> bool:
+    """True iff ``HAL0_AUTH_ENABLED`` is truthy in this process's env.
+
+    Inlined here (rather than importing :func:`hal0.auth.tokens.auth_enabled`)
+    so the env_writer keeps its no-hal0-imports invariant — the installer
+    invokes this module via ``python -m hal0.openwebui.env_writer`` from a
+    cold interpreter, and the auth module pulls in pydantic + the API
+    middleware graph that this entry point deliberately avoids.
+    """
+    val = os.environ.get("HAL0_AUTH_ENABLED", "").strip().lower()
+    return val in ("1", "true", "yes", "on")
+
+
 def default_openwebui_env() -> dict[str, str]:
     """Return a fresh copy of the prewired defaults.
 
     Returns a new dict each call so callers can mutate freely without
-    leaking state back into the module-level table.
+    leaking state back into the module-level table. When
+    ``HAL0_AUTH_ENABLED`` is set, the SSO-related keys are flipped on so
+    OpenWebUI trusts Caddy's forwarded identity instead of showing its
+    own login page.
     """
-    return dict(_DEFAULT_OPENWEBUI_ENV)
+    env = dict(_DEFAULT_OPENWEBUI_ENV)
+    if _auth_enabled():
+        env["WEBUI_AUTH"] = "True"
+        # OpenWebUI trusts this header verbatim — only safe because Caddy
+        # strips inbound copies before forwarding (see Caddyfile
+        # template). The header name is hardcoded in the Caddyfile so
+        # changing it here would break SSO; keep them in lock-step.
+        env["WEBUI_AUTH_TRUSTED_EMAIL_HEADER"] = "X-Forwarded-Email"
+    return env
 
 
 def write_openwebui_env(

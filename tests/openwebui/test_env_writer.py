@@ -109,3 +109,53 @@ def test_atomic_write_no_orphan_tmp(tmp_path: Path) -> None:
     write_openwebui_env(target)
     leftover = list(tmp_path.glob(".hal0-env-*"))
     assert leftover == [], f"unexpected tmp file leftovers: {leftover}"
+
+
+# ── Auth-aware defaults (Team J / v0.2 auth POC) ─────────────────────────────
+
+
+def test_auth_disabled_keeps_webui_auth_false(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without HAL0_AUTH_ENABLED, OpenWebUI keeps its no-login behaviour."""
+    monkeypatch.delenv("HAL0_AUTH_ENABLED", raising=False)
+    target = tmp_path / "openwebui.env"
+    write_openwebui_env(target)
+    env = _parse_env(target.read_text())
+    assert env["WEBUI_AUTH"] == "False"
+    assert "WEBUI_AUTH_TRUSTED_EMAIL_HEADER" not in env
+
+
+def test_auth_enabled_flips_webui_auth_true(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """HAL0_AUTH_ENABLED=1 turns on SSO via the trusted-email header."""
+    monkeypatch.setenv("HAL0_AUTH_ENABLED", "1")
+    target = tmp_path / "openwebui.env"
+    write_openwebui_env(target)
+    env = _parse_env(target.read_text())
+    assert env["WEBUI_AUTH"] == "True"
+    assert env["WEBUI_AUTH_TRUSTED_EMAIL_HEADER"] == "X-Forwarded-Email"
+
+
+@pytest.mark.parametrize("val", ["0", "false", "", "no"])
+def test_auth_falsy_values_keep_defaults(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, val: str
+) -> None:
+    monkeypatch.setenv("HAL0_AUTH_ENABLED", val)
+    target = tmp_path / "openwebui.env"
+    write_openwebui_env(target)
+    env = _parse_env(target.read_text())
+    assert env["WEBUI_AUTH"] == "False"
+
+
+def test_overrides_still_win_under_auth(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Explicit overrides survive the auth-driven defaults."""
+    monkeypatch.setenv("HAL0_AUTH_ENABLED", "1")
+    target = tmp_path / "openwebui.env"
+    write_openwebui_env(target, overrides={"WEBUI_AUTH": "False"})
+    env = _parse_env(target.read_text())
+    # Operator's override wins.
+    assert env["WEBUI_AUTH"] == "False"

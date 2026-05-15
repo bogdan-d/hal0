@@ -1,0 +1,220 @@
+"""Token store CRUD + verification tests.
+
+Covers:
+
+  - Round-trip create → list → verify → revoke.
+  - Argon2id hashing — secret never persisted in plaintext.
+  - Duplicate label rejection.
+  - Invalid scope rejection.
+  - Atomic write — corrupt mid-write doesn't lock the user out.
+  - last_used_at bump on successful verify.
+  - Wire-format parsing rejects malformed tokens (no prefix, no '.', etc.).
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from hal0.auth.tokens import (
+    DuplicateLabel,
+    InvalidScope,
+    SCHEMA_VERSION,
+    TokenNotFound,
+    TokenStore,
+    TokenStoreError,
+    auth_enabled,
+)
+
+
+@pytest.fixture
+def store(tmp_path: Path) -> TokenStore:
+    return TokenStore(tmp_path / "tokens.toml")
+
+
+def test_auth_enabled_default_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("HAL0_AUTH_ENABLED", raising=False)
+    assert auth_enabled() is False
+
+
+@pytest.mark.parametrize("val,expected", [
+    ("1", True),
+    ("true", True),
+    ("True", True),
+    ("yes", True),
+    ("on", True),
+    ("0", False),
+    ("false", False),
+    ("", False),
+    ("nope", False),
+])
+def test_auth_enabled_env_parse(
+    monkeypatch: pytest.MonkeyPatch, val: str, expected: bool
+) -> None:
+    monkeypatch.setenv("HAL0_AUTH_ENABLED", val)
+    assert auth_enabled() is expected
+
+
+def test_create_returns_raw_token_once(store: TokenStore) -> None:
+    tok, raw = store.create(label="openwebui", scope="all")
+    assert raw.startswith("hal0_")
+    assert "." in raw
+    assert tok.id in raw
+    assert tok.label == "openwebui"
+    assert tok.scope == "all"
+    # The hash is NOT the raw token — argon2id produces a $argon2id$ prefix.
+    assert tok.hash.startswith("$argon2id$")
+    assert raw not in tok.hash
+
+
+def test_persisted_file_has_no_plaintext_secret(store: TokenStore) -> None:
+    _, raw = store.create(label="openwebui", scope="all")
+    contents = store.path.read_text(encoding="utf-8")
+    assert raw not in contents, "raw token must NEVER appear in tokens.toml"
+    # The argon2 hash IS in there — that's by design.
+    assert "$argon2id$" in contents
+    # Schema version is recorded for future migrations.
+    assert f"schema_version = {SCHEMA_VERSION}" in contents
+
+
+def test_verify_round_trip(store: TokenStore) -> None:
+    tok, raw = store.create(label="bridge", scope="all")
+    matched = store.verify(raw)
+    assert matched is not None
+    assert matched.id == tok.id
+    assert matched.last_used_at is not None  # bumped on first use
+
+
+def test_verify_wrong_secret(store: TokenStore) -> None:
+    tok, raw = store.create(label="bridge", scope="all")
+    # Tamper with the secret half but keep the id half so we hit the
+    # right hash slot before failing argon2 verify.
+    prefix, _, _secret = raw.rpartition(".")
+    bogus = f"{prefix}.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    assert store.verify(bogus) is None
+
+
+def test_verify_unknown_id(store: TokenStore) -> None:
+    store.create(label="bridge", scope="all")
+    # Random unknown id — must NOT leak existence by timing or any other channel.
+    assert store.verify("hal0_deadbeef.somesecret") is None
+
+
+@pytest.mark.parametrize("malformed", [
+    "",
+    "no-prefix",
+    "Bearer hal0_abc.def",  # the strip happens in the middleware, not here
+    "hal0_",
+    "hal0_abc",
+    "hal0_abcde123",  # no '.'
+    "hal0_short.x",  # id too short
+])
+def test_verify_malformed(store: TokenStore, malformed: str) -> None:
+    store.create(label="bridge", scope="all")
+    assert store.verify(malformed) is None
+
+
+def test_duplicate_label_rejected(store: TokenStore) -> None:
+    store.create(label="dup", scope="all")
+    with pytest.raises(DuplicateLabel) as exc:
+        store.create(label="dup", scope="admin")
+    assert exc.value.code == "auth.duplicate_label"
+    assert exc.value.status == 409
+
+
+def test_invalid_scope_rejected(store: TokenStore) -> None:
+    with pytest.raises(InvalidScope) as exc:
+        store.create(label="bad", scope="superadmin")
+    assert exc.value.code == "auth.invalid_scope"
+    assert exc.value.status == 400
+
+
+def test_empty_label_rejected(store: TokenStore) -> None:
+    with pytest.raises(TokenStoreError):
+        store.create(label="", scope="all")
+    with pytest.raises(TokenStoreError):
+        store.create(label="   ", scope="all")
+
+
+def test_revoke_removes_token(store: TokenStore) -> None:
+    tok, raw = store.create(label="bridge", scope="all")
+    assert store.verify(raw) is not None
+    store.revoke(tok.id)
+    assert store.verify(raw) is None
+    assert store.get(tok.id) is None
+
+
+def test_revoke_unknown_id_raises(store: TokenStore) -> None:
+    with pytest.raises(TokenNotFound) as exc:
+        store.revoke("notarealid")
+    assert exc.value.code == "auth.token_not_found"
+    assert exc.value.status == 404
+
+
+def test_list_returns_metadata_without_hash(store: TokenStore) -> None:
+    tok, _ = store.create(label="bridge", scope="all")
+    rows = store.list()
+    assert len(rows) == 1
+    meta = rows[0].metadata()
+    assert meta["id"] == tok.id
+    assert meta["label"] == "bridge"
+    assert meta["scope"] == "all"
+    assert "hash" not in meta
+
+
+def test_reload_picks_up_external_edits(store: TokenStore) -> None:
+    store.create(label="initial", scope="all")
+    # Simulate an out-of-band write that adds a row.
+    contents = store.path.read_text(encoding="utf-8")
+    extra = '''
+[[tokens]]
+id = "deadbeef"
+label = "external"
+hash = "$argon2id$v=19$m=65536,t=3,p=4$AAAA$BBBB"
+scope = "v1-only"
+created_at = "2026-05-15T10:00:00Z"
+'''
+    store.path.write_text(contents + extra, encoding="utf-8")
+
+    # Without reload, the in-memory cache is stale.
+    assert any(t.label == "external" for t in store.list()) is False
+    store.reload()
+    assert any(t.label == "external" for t in store.list()) is True
+
+
+def test_create_persists_across_instances(tmp_path: Path) -> None:
+    """A new TokenStore reads the previous instance's writes from disk."""
+    path = tmp_path / "tokens.toml"
+    store_a = TokenStore(path)
+    _, raw = store_a.create(label="bridge", scope="all")
+
+    store_b = TokenStore(path)
+    matched = store_b.verify(raw)
+    assert matched is not None
+    assert matched.label == "bridge"
+
+
+def test_atomic_write_no_orphan_tmp(store: TokenStore) -> None:
+    store.create(label="a", scope="all")
+    store.create(label="b", scope="admin")
+    leftover = list(store.path.parent.glob(".tokens.toml.*"))
+    assert leftover == [], f"orphan tmp files: {leftover}"
+
+
+def test_last_used_at_persists(store: TokenStore) -> None:
+    _, raw = store.create(label="bridge", scope="all")
+    store.verify(raw)
+    # Re-read and confirm the bump survived the rewrite.
+    fresh = TokenStore(store.path)
+    rows = fresh.list()
+    assert rows[0].last_used_at is not None
+
+
+def test_corrupt_toml_raises_typed_error(tmp_path: Path) -> None:
+    path = tmp_path / "tokens.toml"
+    path.write_text("this is not valid TOML [[", encoding="utf-8")
+    store = TokenStore(path)
+    with pytest.raises(TokenStoreError) as exc:
+        store.list()
+    assert exc.value.code == "auth.store_error"

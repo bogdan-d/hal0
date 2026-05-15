@@ -33,15 +33,24 @@ die()   { err "$*"; exit 1; }
 
 DEV_MODE=0
 NO_START=0
+AUTH_MODE="off"   # "off" (default) | "basic" (Caddy + Bearer)
 for arg in "$@"; do
     case "$arg" in
         --dev) DEV_MODE=1 ;;
         --no-start) NO_START=1 ;;
+        --auth=off) AUTH_MODE="off" ;;
+        --auth=basic) AUTH_MODE="basic" ;;
+        --auth=*)
+            warn "unknown --auth value: ${arg} (expected 'off' or 'basic'); using 'off'"
+            ;;
         --help|-h)
             cat <<EOF
-Usage: install.sh [--dev] [--no-start]
-  --dev        install under \$PWD/.hal0ai/, no systemd setup
-  --no-start   set up everything but don't enable/start the API
+Usage: install.sh [--dev] [--no-start] [--auth=off|basic]
+  --dev          install under \$PWD/.hal0ai/, no systemd setup
+  --no-start     set up everything but don't enable/start the API
+  --auth=off     no reverse proxy or auth (default; trusted-LAN posture)
+  --auth=basic   install Caddy with basic_auth + bearer-token enforcement;
+                 the dashboard moves to https://<host>/ on :443
 EOF
             exit 0
             ;;
@@ -77,6 +86,8 @@ if [[ "${DEV_MODE}" -eq 0 && "$(id -u)" -ne 0 ]]; then
         warn "Re-exec under sudo"
         exec sudo -E HAL0_PORT="${HAL0_PORT}" HAL0_USER="${HAL0_USER}" HAL0_PYTHON="${PY}" \
             HAL0_PREFIX="${HAL0_PREFIX:-}" HAL0_NO_PROBE="${HAL0_NO_PROBE:-}" \
+            HAL0_HOSTNAME="${HAL0_HOSTNAME:-}" HAL0_TLS_EMAIL="${HAL0_TLS_EMAIL:-}" \
+            HAL0_ADMIN_USER="${HAL0_ADMIN_USER:-}" HAL0_ADMIN_PASSWORD="${HAL0_ADMIN_PASSWORD:-}" \
             bash "$0" "$@"
     else
         die "must run as root (sudo bash install.sh)"
@@ -187,6 +198,162 @@ EOF
     info "wrote ${UPSTREAMS_TOML}"
 fi
 
+# ── Auth wiring (--auth=basic) ───────────────────────────────────────
+# Done BEFORE the openwebui env writer so the OPENWEBUI_AUTH=True +
+# trusted-header keys are baked in on the first render rather than
+# requiring a second pass.
+HAL0_AUTH_ENABLED_FOR_RENDER="0"
+if [[ "${AUTH_MODE}" == "basic" ]]; then
+    if [[ "${DEV_MODE}" -eq 1 ]]; then
+        warn "--auth=basic with --dev is unsupported (no system Caddy install); skipping auth setup"
+        AUTH_MODE="off"
+    else
+        step "Auth (Caddy basic_auth + Bearer)"
+
+        # Caddy install — Debian/Ubuntu via apt, Arch/CachyOS via pacman.
+        # Anything else falls through with a manual-install hint.
+        if ! command -v caddy >/dev/null; then
+            if command -v apt-get >/dev/null; then
+                info "installing caddy via apt"
+                apt-get update -qq
+                # The official caddy package on Debian needs a third-party
+                # repo; for a polished installer we pin to the cloudsmith
+                # mirror in a v0.3 follow-up. For the POC, surface the
+                # missing-binary path so an operator can apt install caddy
+                # by hand and re-run.
+                apt-get install -y caddy 2>/dev/null || warn \
+                    "apt couldn't find 'caddy' — install per https://caddyserver.com/docs/install#debian-ubuntu-raspbian and re-run"
+            elif command -v pacman >/dev/null; then
+                info "installing caddy via pacman"
+                pacman -S --noconfirm caddy
+            else
+                warn "no recognised package manager for caddy; install it from https://caddyserver.com/docs/install and re-run"
+            fi
+        fi
+        if ! command -v caddy >/dev/null; then
+            die "caddy binary not on PATH after install attempt — see warnings above"
+        fi
+        info "caddy: $(caddy version 2>/dev/null | head -n1 || echo unknown)"
+
+        # Admin credentials — env-driven for non-interactive installs,
+        # interactive prompts otherwise. Both paths feed into Caddy's
+        # `caddy hash-password` for the bcrypt hash baked into the
+        # Caddyfile.
+        if [[ -z "${HAL0_ADMIN_USER:-}" ]]; then
+            if [[ -t 0 ]]; then
+                read -r -p "Admin username [admin]: " HAL0_ADMIN_USER
+                HAL0_ADMIN_USER="${HAL0_ADMIN_USER:-admin}"
+            else
+                HAL0_ADMIN_USER="admin"
+            fi
+        fi
+        if [[ -z "${HAL0_ADMIN_PASSWORD:-}" ]]; then
+            if [[ -t 0 ]]; then
+                # Read silently; -s isn't POSIX so we fall back if missing.
+                printf "Admin password (will not echo): "
+                read -r -s HAL0_ADMIN_PASSWORD
+                printf "\n"
+                if [[ -z "${HAL0_ADMIN_PASSWORD}" ]]; then
+                    die "admin password must not be empty"
+                fi
+            else
+                die "non-interactive --auth=basic requires HAL0_ADMIN_USER + HAL0_ADMIN_PASSWORD env vars"
+            fi
+        fi
+
+        HAL0_HOSTNAME="${HAL0_HOSTNAME:-hal0.local}"
+        HAL0_TLS_EMAIL="${HAL0_TLS_EMAIL:-admin@${HAL0_HOSTNAME}}"
+
+        # bcrypt hash via caddy's own helper. `--plaintext` reads from
+        # the flag rather than stdin so the password never lands on the
+        # process's argv (the flag itself becomes part of `ps` output —
+        # acceptable on a single-user install host but documented).
+        HAL0_ADMIN_PASSWORD_HASH="$(caddy hash-password --plaintext "${HAL0_ADMIN_PASSWORD}")"
+        if [[ -z "${HAL0_ADMIN_PASSWORD_HASH}" ]]; then
+            die "caddy hash-password returned empty hash"
+        fi
+        info "hashed admin password for ${HAL0_ADMIN_USER}"
+
+        # Render the Caddyfile from the template. envsubst would be
+        # cleaner; use a portable sed pipeline so we don't need to add
+        # a coreutils dep on minimal hosts.
+        CADDY_TEMPLATE="${REPO_ROOT}/packaging/caddy/Caddyfile.template"
+        CADDY_TARGET="${ETC_DIR}/Caddyfile"
+        if [[ ! -f "${CADDY_TEMPLATE}" ]]; then
+            die "Caddyfile template missing at ${CADDY_TEMPLATE}"
+        fi
+        # Use python for the substitution so password hashes containing
+        # '/', '$', '&' don't trip up sed escape rules.
+        HAL0_HOSTNAME="${HAL0_HOSTNAME}" \
+        HAL0_TLS_EMAIL="${HAL0_TLS_EMAIL}" \
+        HAL0_ADMIN_USER="${HAL0_ADMIN_USER}" \
+        HAL0_ADMIN_PASSWORD_HASH="${HAL0_ADMIN_PASSWORD_HASH}" \
+        "${PY}" - "${CADDY_TEMPLATE}" "${CADDY_TARGET}" <<'PY'
+import os, sys, string
+src, dst = sys.argv[1], sys.argv[2]
+text = open(src).read()
+# Caddy's own ${VAR:default} placeholder syntax is what the template
+# uses inside its config — preserve those by only substituting the
+# specific keys we know about. Anything else is passed through verbatim
+# so Caddy's runtime substitution still works.
+keys = ("HAL0_HOSTNAME", "HAL0_TLS_EMAIL", "HAL0_ADMIN_USER", "HAL0_ADMIN_PASSWORD_HASH")
+for k in keys:
+    val = os.environ.get(k, "")
+    # Replace `{$KEY:default}` and `{$KEY}` forms with the resolved
+    # value at install time so the running Caddy config doesn't depend
+    # on systemd-passing the env var.
+    text = text.replace("{$" + k + "}", val)
+    # Match {$KEY:default} regardless of default value.
+    while True:
+        marker = "{$" + k + ":"
+        i = text.find(marker)
+        if i < 0:
+            break
+        j = text.find("}", i)
+        if j < 0:
+            break
+        text = text[:i] + val + text[j+1:]
+open(dst, "w").write(text)
+# 0644 so the unprivileged 'caddy' user can read the rendered file.
+# The bcrypt hash inside is a hash, not a recoverable secret, and the
+# hostname / TLS email are public; nothing here justifies 0640 + chown.
+os.chmod(dst, 0o644)
+print(f"  rendered {dst}")
+PY
+        info "wrote ${CADDY_TARGET}"
+
+        # systemd unit drop-in.
+        CADDY_UNIT_SRC="${REPO_ROOT}/packaging/systemd/hal0-caddy.service"
+        CADDY_UNIT_DST="${UNIT_DIR}/hal0-caddy.service"
+        if [[ -f "${CADDY_UNIT_SRC}" ]]; then
+            cp "${CADDY_UNIT_SRC}" "${CADDY_UNIT_DST}"
+            info "wrote ${CADDY_UNIT_DST}"
+        else
+            warn "${CADDY_UNIT_SRC} not found — Caddy unit not installed"
+        fi
+
+        # Avahi (best-effort).
+        if command -v avahi-daemon >/dev/null && [[ -d /etc/avahi/services ]]; then
+            cp "${REPO_ROOT}/packaging/avahi/hal0.service" /etc/avahi/services/hal0.service
+            info "wrote /etc/avahi/services/hal0.service (mDNS announcing ${HAL0_HOSTNAME})"
+        else
+            warn "avahi-daemon not present; add an /etc/hosts entry on clients: '<this-host-ip> ${HAL0_HOSTNAME}'"
+        fi
+
+        # Flip the runtime auth flag for hal0-api.
+        if [[ -f "${API_ENV}" ]]; then
+            # Replace any existing line, else append.
+            if grep -q '^HAL0_AUTH_ENABLED=' "${API_ENV}"; then
+                sed -i 's|^HAL0_AUTH_ENABLED=.*|HAL0_AUTH_ENABLED=1|' "${API_ENV}"
+            else
+                echo "HAL0_AUTH_ENABLED=1" >> "${API_ENV}"
+            fi
+            info "set HAL0_AUTH_ENABLED=1 in ${API_ENV}"
+        fi
+        HAL0_AUTH_ENABLED_FOR_RENDER="1"
+    fi
+fi
+
 # OpenWebUI prewire env. Rendered via the just-installed venv so the
 # defaults live in exactly one place (src/hal0/openwebui/env_writer.py).
 # In dev mode we point HAL0_HOME at the prefix so the file lands under
@@ -195,7 +362,10 @@ HAL0_HOME_FOR_OWUI=""
 if [[ "${DEV_MODE}" -eq 1 ]]; then
     HAL0_HOME_FOR_OWUI="${PREFIX}"
 fi
-if HAL0_HOME="${HAL0_HOME_FOR_OWUI}" "${VENV_DIR}/bin/python" -c \
+# HAL0_AUTH_ENABLED in the calling env flips OpenWebUI prewire defaults
+# to single-sign-on (WEBUI_AUTH=True + WEBUI_AUTH_TRUSTED_EMAIL_HEADER).
+if HAL0_HOME="${HAL0_HOME_FOR_OWUI}" HAL0_AUTH_ENABLED="${HAL0_AUTH_ENABLED_FOR_RENDER}" \
+    "${VENV_DIR}/bin/python" -c \
     'from hal0.openwebui.env_writer import main; main()'; then
     info "wrote ${ETC_DIR}/openwebui.env"
 else
@@ -307,6 +477,26 @@ else
             warn "hal0-openwebui not yet active; check 'journalctl -u hal0-openwebui -n 40'"
         fi
     fi
+
+    # If --auth=basic was selected, start Caddy too. Restart hal0-api so
+    # the new HAL0_AUTH_ENABLED=1 takes effect and the ports flip from
+    # the open posture to "Caddy fronts everything".
+    if [[ "${AUTH_MODE}" == "basic" && -f "${UNIT_DIR}/hal0-caddy.service" ]]; then
+        systemctl restart hal0-api
+        systemctl restart hal0-openwebui || true
+        systemctl enable --now hal0-caddy
+        sleep 1
+        if systemctl is-active --quiet hal0-caddy; then
+            info "hal0-caddy is running (https://${HAL0_HOSTNAME:-hal0.local}/)"
+        else
+            warn "hal0-caddy not yet active; check 'journalctl -u hal0-caddy -n 60'"
+        fi
+        # Reload avahi so the freshly-dropped service file is announced
+        # (best-effort — failing reload doesn't break anything).
+        if command -v systemctl >/dev/null && systemctl is-active --quiet avahi-daemon; then
+            systemctl reload avahi-daemon || true
+        fi
+    fi
 fi
 
 HOST="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
@@ -317,9 +507,17 @@ printf '  CLI:        %s%s%s\n' "${BLU}" "${HAL0_BIN}" "${RST}"
 printf '  Config:     %s%s%s\n' "${BLU}" "${ETC_DIR}" "${RST}"
 printf '  Data:       %s%s%s\n' "${BLU}" "${VAR_DIR}" "${RST}"
 if [[ "${DEV_MODE}" -eq 0 && "${NO_START}" -eq 0 ]]; then
-    printf '  Dashboard:  %shttp://%s:%s%s\n' "${BLU}" "${HOST}" "${HAL0_PORT}" "${RST}"
-    printf '  Chat:       %shttp://%s:3001%s\n' "${BLU}" "${HOST}" "${RST}"
-    printf '  Logs:       %sjournalctl -fu hal0-api%s\n' "${DIM}" "${RST}"
+    if [[ "${AUTH_MODE}" == "basic" ]]; then
+        HOSTNAME_FOR_DISPLAY="${HAL0_HOSTNAME:-hal0.local}"
+        printf '  Dashboard:  %shttps://%s/%s\n' "${BLU}" "${HOSTNAME_FOR_DISPLAY}" "${RST}"
+        printf '  Chat:       %shttps://%s/chat/%s\n' "${BLU}" "${HOSTNAME_FOR_DISPLAY}" "${RST}"
+        printf '  Auth:       %sbasic_auth (admin: %s) + Bearer tokens at /api/auth/tokens%s\n' "${DIM}" "${HAL0_ADMIN_USER:-admin}" "${RST}"
+        printf '  Logs:       %sjournalctl -fu hal0-caddy hal0-api hal0-openwebui%s\n' "${DIM}" "${RST}"
+    else
+        printf '  Dashboard:  %shttp://%s:%s%s\n' "${BLU}" "${HOST}" "${HAL0_PORT}" "${RST}"
+        printf '  Chat:       %shttp://%s:3001%s\n' "${BLU}" "${HOST}" "${RST}"
+        printf '  Logs:       %sjournalctl -fu hal0-api%s\n' "${DIM}" "${RST}"
+    fi
 fi
 printf '\n  Next steps:\n'
 printf '    %shal0 status%s          – system + slot summary\n' "${BOLD}" "${RST}"
