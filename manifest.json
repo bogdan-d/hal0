@@ -6,12 +6,12 @@
   "toolbox_images": {
     "vulkan": {
       "tag": "ghcr.io/hal0ai/hal0-toolbox-vulkan:v1",
-      "digest": "sha256:67ba3dc059c7f93d874f0c086d966213f47caebdd3730efc3a94c2ab13815303",
+      "digest": "sha256:c67b61a896d2941f8cd46683b45a5fe9f9d9ae8edf777d5ba7538d7d5a1e78b0",
       "_notes": "llama.cpp Vulkan backend; default for Strix Halo iGPU"
     },
     "rocm": {
       "tag": "ghcr.io/hal0ai/hal0-toolbox-rocm:v1",
-      "digest": null,
+      "digest": "sha256:f715ea1d87e14de76575e136816afeb53f41d6e0cb358a49e6a110bfd3f18b5a",
       "_notes": "llama.cpp ROCm backend; multi-arch (gfx1030..gfx1151)"
     },
     "flm": {
@@ -21,12 +21,12 @@
     },
     "moonshine": {
       "tag": "ghcr.io/hal0ai/hal0-toolbox-moonshine:v1",
-      "digest": "sha256:850434a0d30b83d8ab2b214615201ae7106f941defc5b2a7dced3e83e52f160f",
+      "digest": "sha256:dda0b63bf116e8da0b0e6158356256ac4653f9ca203fe42d7e65706a39cfb99f",
       "_notes": "Moonshine STT (CPU/Vulkan); OpenAI-compat /v1/audio/transcriptions + WS"
     },
     "kokoro": {
       "tag": "ghcr.io/hal0ai/hal0-toolbox-kokoro:v1",
-      "digest": "sha256:e74a81d5032c5efbff9f4171108fa3ab98960cc367f47b159960e0d9c2b9b909",
+      "digest": "sha256:b1c57c7782993e2c007b3288772c69b3702cb8332576e9072cc6c3bdd093f6cc",
       "_notes": "Kokoro-82M TTS (CPU ONNX); OpenAI-compat /v1/audio/speech",
       "_upstream_reference": "https://github.com/thewh1teagle/kokoro-onnx"
     },
