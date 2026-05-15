@@ -1,0 +1,70 @@
+name: Playwright (γ)
+
+# Critical-path UI tests — PLAN §10.3, ~8 min budget.
+# Runs against the Vite dev server with all /api/* endpoints
+# mocked via page.route. Live-backend runs (HAL0_E2E_LIVE=1) are
+# release-gate only and live in release-test.yml, not here.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  e2e:
+    name: γ-suite (chromium)
+    runs-on: ubuntu-latest
+    timeout-minutes: 12  # PLAN §10.3 budget is 8 min; 12 leaves headroom
+    defaults:
+      run:
+        working-directory: ui
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Cache the Playwright browser binaries by package-lock hash so we
+      # avoid the ~250 MB Chromium download on every PR.
+      - name: Cache Playwright browsers
+        id: pw-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ hashFiles('ui/package-lock.json') }}
+
+      - name: Install Chromium (only on cache miss)
+        if: steps.pw-cache.outputs.cache-hit != 'true'
+        run: npx playwright install --with-deps chromium
+
+      - name: Install system deps (always — needed even when browser is cached)
+        if: steps.pw-cache.outputs.cache-hit == 'true'
+        run: npx playwright install-deps chromium
+
+      - name: Run γ tests
+        run: npm run test:e2e
+        env:
+          CI: "true"
+
+      - name: Upload Playwright report (failures only)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: ui/playwright-report/
+          retention-days: 7
+
+      - name: Upload test-results (failures only)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: ui/test-results/
+          retention-days: 7

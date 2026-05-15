@@ -51,6 +51,9 @@ coverage.xml
 ui/node_modules/
 ui/dist/
 ui/.vite/
+ui/test-results/
+ui/playwright-report/
+ui/playwright/.cache/
 *.log
 npm-debug.log*
 yarn-debug.log*
