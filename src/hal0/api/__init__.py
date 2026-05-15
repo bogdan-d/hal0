@@ -29,12 +29,51 @@ from hal0.api.routes import (
     updater,
     v1,
 )
+from hal0.config.loader import ConfigParseError, load_upstreams_config
 from hal0.dispatcher.router import Dispatcher
 from hal0.hardware.probe import HardwareProbe
 from hal0.registry.store import ModelRegistry
-from hal0.upstreams.registry import UpstreamRegistry
+from hal0.upstreams.registry import Upstream, UpstreamRegistry
 
 log = structlog.get_logger(__name__)
+
+
+def _hydrate_upstreams(registry: UpstreamRegistry) -> None:
+    """Populate the upstream registry from /etc/hal0/upstreams.toml.
+
+    Missing file is fine — fresh installs have an empty registry until
+    the user adds an upstream via the UI or `hal0 upstream add`.  Malformed
+    files surface a typed ConfigParseError that propagates to the lifespan;
+    we log+continue rather than crashing the API so the UI can still load
+    and show the config error to the user.
+    """
+    try:
+        cfg = load_upstreams_config()
+    except ConfigParseError as exc:
+        log.warning("upstreams.config_parse_failed", error=str(exc))
+        return
+    for entry in cfg.upstream:
+        try:
+            registry.upsert(
+                Upstream(
+                    name=entry.name,
+                    kind=entry.kind,
+                    url=entry.url,
+                    auth_style=entry.auth_style,
+                    auth_value_env=entry.auth_value_env,
+                    timeout_seconds=entry.timeout_seconds,
+                    slot_name=entry.slot_name,
+                    warmup_strategy=entry.warmup_strategy,
+                    advertise_models=entry.advertise_models,
+                )
+            )
+        except Exception as exc:
+            log.warning(
+                "upstreams.entry_skipped",
+                name=entry.name,
+                error=str(exc),
+                error_type=type(exc).__name__,
+            )
 
 
 @asynccontextmanager
@@ -42,21 +81,42 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     log.info("hal0.api.startup", version=__version__)
 
     upstreams = UpstreamRegistry()
+    _hydrate_upstreams(upstreams)
     model_registry = ModelRegistry()
     hardware_probe = HardwareProbe()
+
+    # Shared in-process /v1/models cache.  The dispatcher's cold-cache
+    # prefetch path needs cached_models() and fetch_models() to share
+    # state — without this, prefetch fans out then re-checks the cache
+    # and finds it empty, and every request 404s.
+    # NOTE: no TTL yet; cache persists for the life of the process.
+    # A TTL / invalidation strategy lands when the dispatcher gets its
+    # own cache layer.
+    model_cache: dict[str, list[str]] = {}
+
+    async def _fetch_and_cache(u: Upstream) -> list[str]:
+        models = await upstreams.fetch_models(u.name)
+        model_cache[u.name] = models
+        return models
 
     dispatcher = Dispatcher(
         upstream_registry=upstreams,
         model_registry=model_registry,
-        # Adapt UpstreamRegistry.fetch_models(name) to the Dispatcher's
-        # FetchModelsFn signature (takes an Upstream object).
-        fetch_models=lambda u: upstreams.fetch_models(u.name),
+        cached_models=lambda name: model_cache.get(name, []),
+        fetch_models=_fetch_and_cache,
     )
 
     app.state.upstreams = upstreams
     app.state.model_registry = model_registry
     app.state.hardware_probe = hardware_probe
     app.state.dispatcher = dispatcher
+    app.state.model_cache = model_cache
+
+    log.info(
+        "hal0.api.upstreams_loaded",
+        count=len(upstreams.list()),
+        names=[u.name for u in upstreams.list()],
+    )
 
     try:
         yield

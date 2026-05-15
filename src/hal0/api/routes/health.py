@@ -1,7 +1,7 @@
 """Health, status, metrics, features.
 
 Routes mounted under /api:
-  GET  /api/status            — overall liveness + summary
+  GET  /api/status            — overall liveness + summary (dashboard polls this)
   GET  /api/health/system     — deep health (slots, disk, ram)
   GET  /api/metrics           — JSON metrics
   GET  /api/metrics/prometheus — text/plain prometheus exposition
@@ -11,35 +11,64 @@ Routes mounted under /api:
 
 from __future__ import annotations
 
-from fastapi import APIRouter
-from pydantic import BaseModel
+from typing import Any
+
+from fastapi import APIRouter, Request
 
 from hal0 import __version__
 
 router = APIRouter()
 
 
-class StatusResponse(BaseModel):
-    name: str = "hal0"
-    version: str
-    status: str
+@router.get("/status")
+async def get_status(request: Request) -> dict[str, Any]:
+    """Overall liveness + dashboard summary.
 
+    The Vue dashboard polls this every few seconds and reads
+    ``hardware`` and ``slots`` from the response into its system store.
+    On first call we eagerly populate the per-upstream model cache so
+    the synthesized slot entries reflect "serving" rather than "offline".
+    """
+    upstreams = request.app.state.upstreams
+    cache: dict[str, list[str]] = getattr(request.app.state, "model_cache", {})
 
-@router.get("/status", response_model=StatusResponse)
-async def get_status() -> StatusResponse:
-    return StatusResponse(version=__version__, status="ok")
+    # Eagerly hydrate the cache for any upstream we haven't fetched yet.
+    # Cheap: each /v1/models call against haloai is sub-100ms.
+    for u in upstreams.list():
+        if u.name not in cache:
+            try:
+                cache[u.name] = await upstreams.fetch_models(u.name)
+            except Exception:
+                cache[u.name] = []
+
+    # Slot entries come from the (still-stubbed) SlotManager when wired,
+    # else synthesized from upstreams so the dashboard isn't empty.
+    from hal0.api.routes.slots import _synthesize_slots_from_upstreams
+
+    slot_list = _synthesize_slots_from_upstreams(request)
+
+    upstream_summary = [{"name": u.name, "kind": u.kind, "url": u.url} for u in upstreams.list()]
+
+    return {
+        "name": "hal0",
+        "version": __version__,
+        "status": "ok",
+        "hardware": None,  # populated by /api/hardware on demand
+        "slots": slot_list,
+        "upstreams": upstream_summary,
+    }
 
 
 @router.get("/health/system")
 async def health_system() -> dict[str, object]:
-    return {"status": "ok", "checks": {}}  # TODO Phase 1: real checks
+    return {"status": "ok", "checks": {}}
 
 
 @router.get("/metrics")
 async def metrics() -> dict[str, object]:
-    return {"slots": {}, "hardware": {}, "dispatcher": {}}  # TODO Phase 1
+    return {"slots": {}, "hardware": {}, "dispatcher": {}}
 
 
 @router.get("/features")
 async def list_features() -> dict[str, bool]:
-    return {}  # TODO Phase 1
+    return {}

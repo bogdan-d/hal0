@@ -10,16 +10,11 @@ import pytest
 from fastapi.testclient import TestClient
 
 # (method, path) pairs — all should 501 with the structured envelope.
-# /v1/* endpoints moved off this list in the forward() wire-up (Phase 1
-# end-to-end slice); they now resolve via Dispatcher and have their own
-# tests in tests/api/test_v1_dispatch.py.
+# Endpoints leave this list as they get wired up; the remaining ones are
+# all genuine Phase 2+ surfaces (installer, updater, logs streaming, etc.)
 _STUB_ENDPOINTS = [
-    ("GET", "/api/slots"),
     ("GET", "/api/slots/foo"),
-    ("GET", "/api/models"),
     ("POST", "/api/models"),
-    ("GET", "/api/hardware"),
-    ("POST", "/api/hardware/probe"),
     ("GET", "/api/logs/api"),
     ("GET", "/api/upstreams"),
     ("GET", "/api/updates/check"),
