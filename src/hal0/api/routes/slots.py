@@ -27,17 +27,26 @@ def _synthesize_slots_from_upstreams(request: Request) -> list[dict[str, Any]]:
     otherwise the user sees nothing despite real inference flowing through.
     Each upstream surfaces as a read-only slot entry: status="serving"
     when its model cache is populated, "offline" otherwise.
+
+    The slot's ``model`` reflects the most recently dispatched model id
+    for this upstream (tracked in ``app.state.last_used_model``); falls
+    back to the first non-alias from the catalog before any inference
+    has happened.
     """
     upstreams = request.app.state.upstreams
     cache = getattr(request.app.state, "model_cache", {})
+    last_used = getattr(request.app.state, "last_used_model", {})
     out: list[dict[str, Any]] = []
     for u in upstreams.list():
         models = cache.get(u.name, [])
-        # Pick a representative model — prefer non-alias ids.
         from hal0.api.routes.models import _is_alias  # local to avoid cycle
 
         real_models = [m for m in models if not _is_alias(m)]
-        primary_model = real_models[0] if real_models else (models[0] if models else "")
+        primary_model = (
+            last_used.get(u.name)
+            or (real_models[0] if real_models else "")
+            or (models[0] if models else "")
+        )
         out.append(
             {
                 "name": u.name,
@@ -48,6 +57,7 @@ def _synthesize_slots_from_upstreams(request: Request) -> list[dict[str, Any]]:
                 "provider": "remote-upstream" if u.kind == "remote" else "llama-server",
                 "url": u.url,
                 "advertised_models": len(models),
+                "last_used_model": last_used.get(u.name) or None,
                 "_synthetic": True,
                 "_synthetic_reason": (
                     "Backed by remote upstream; full slot lifecycle lands with the Phase 2 installer."

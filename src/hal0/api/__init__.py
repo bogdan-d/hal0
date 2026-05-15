@@ -111,6 +111,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.hardware_probe = hardware_probe
     app.state.dispatcher = dispatcher
     app.state.model_cache = model_cache
+    # Tracks the most recent model id sent to each upstream so the
+    # dashboard's synthetic slot reflects current usage instead of the
+    # first-non-alias from the catalog. Populated by v1 routes after
+    # dispatch resolves.
+    app.state.last_used_model = {}
 
     log.info(
         "hal0.api.upstreams_loaded",

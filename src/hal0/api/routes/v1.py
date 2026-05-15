@@ -52,6 +52,12 @@ async def _dispatch_and_forward(
 ) -> Response:
     body = await _read_json_body(request)
     call = await dispatcher.dispatch(request, body=body)
+    # Remember the most recent model we sent to this upstream so the
+    # dashboard's synthetic slot reflects what's actually being used,
+    # not the first-non-alias from the catalog.
+    last_used = getattr(request.app.state, "last_used_model", None)
+    if last_used is not None and call.upstream_name and call.resolved_model:
+        last_used[call.upstream_name] = call.resolved_model
     return await dispatcher.forward(call)
 
 
