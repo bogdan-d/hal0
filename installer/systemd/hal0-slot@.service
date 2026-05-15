@@ -1,0 +1,55 @@
+[Unit]
+Description=hal0 inference slot — %i
+Documentation=https://github.com/hal0-dev/hal0
+# Slots are independent of one another. They do need Docker to run the
+# toolbox container, and they need hal0-api reachable so the launcher
+# can emit slot-state events (Phase 1+).
+After=docker.service
+Requires=docker.service
+After=hal0-api.service
+Wants=hal0-api.service
+
+# Do NOT auto-start slots at install time. Slots are started by hal0-api
+# after a model has been assigned (via the FirstRun wizard or CLI).
+# Remove the following line if you want a slot to start on boot once
+# it has been configured with a model.
+# [Install] WantedBy= is intentionally omitted from the template; each
+# enabled instance will carry its own WantedBy via a drop-in.
+
+[Service]
+# Phase 0: root for bootstrapping. Phase 1: hal0 user (same as hal0-api).
+User=root
+
+Type=simple
+
+# The launcher reads /etc/hal0/slots/%i.toml for backend/model config
+# and /var/lib/hal0/slots/%i/env for runtime overrides, then execs
+# docker run with the appropriate toolbox image.
+# %i is the slot name (primary, embed, stt, tts, or any custom name).
+ExecStart=/usr/lib/hal0/current/bin/hal0-slot-launch %i
+
+# 5s back-off gives the GPU/NPU driver time to release resources
+# between restarts (cold-boot is expensive on the NPU path).
+Restart=on-failure
+RestartSec=5
+
+# Required for GPU/NPU drivers that map large fixed buffers into process
+# address space. Without this, the kernel may refuse to lock model
+# weights in RAM.
+LimitMEMLOCK=infinity
+
+StandardOutput=journal+console
+StandardError=journal+console
+
+# Tag with slot name for easy filtering:
+#   journalctl -t hal0-slot-primary --since "5 min ago"
+SyslogIdentifier=hal0-slot-%i
+
+# Per-slot working directory. Created by install.sh (and hal0-api at
+# slot-create time). Runtime files (state.json, pid, port) live here.
+WorkingDirectory=/var/lib/hal0/slots/%i
+
+[Install]
+# Enabled instances declare themselves multi-user.target dependents via:
+#   systemctl enable hal0-slot@primary
+WantedBy=multi-user.target

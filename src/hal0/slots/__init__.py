@@ -1,0 +1,26 @@
+"""hal0.slots — Inference slot lifecycle management.
+
+Owns the full lifecycle of hal0-slot@<name>.service instances:
+spawn, terminate, load, unload, restart, and swap.  Exposes a state
+machine (SlotState) whose transitions are atomic, persisted to
+/var/lib/hal0/slots/<name>/state.json, and streamable via SSE.
+
+Port target: haloai lib/slots.py (1082 lines), refactored for the Tier 3
+state machine.  See PLAN.md §3 and §5 Tier 3.
+
+Key exports:
+    SlotManager  — primary entry point for all slot operations.
+    SlotState    — enum of lifecycle states (offline, ready, serving, …).
+    Slot         — runtime snapshot handle returned by SlotManager methods.
+"""
+
+from __future__ import annotations
+
+from hal0.slots.manager import Slot, SlotManager
+from hal0.slots.state import SlotState
+
+__all__ = [
+    "Slot",
+    "SlotManager",
+    "SlotState",
+]

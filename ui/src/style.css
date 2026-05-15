@@ -1,0 +1,95 @@
+@import "tailwindcss";
+
+/* Google Fonts are loaded in index.html to avoid FOUC */
+
+@theme {
+  /* ── Backgrounds ──────────────────────────────────────────────── */
+  --color-bg:       oklch(12% 0.01 250);   /* near-black, slight blue cast */
+  --color-surface:  oklch(16% 0.012 250);  /* card / panel surface */
+  --color-surface-2: oklch(19% 0.014 250); /* raised elements */
+  --color-surface-3: oklch(22% 0.015 250); /* hover states */
+
+  /* ── Borders ──────────────────────────────────────────────────── */
+  --color-border:   oklch(28% 0.015 250);  /* default separator */
+  --color-border-hi: oklch(36% 0.018 250); /* focus / hover */
+
+  /* ── Accent — cyan/teal ───────────────────────────────────────── */
+  /* Rationale: cyan reads as "data flow" and "inference throughput" —
+     it complements the dark neutral shell without competing with status
+     colors (green/yellow/red). Distinctly different from purple/violet
+     used in the haloai predecessor, giving hal0 its own identity. */
+  --color-accent:   oklch(72% 0.18 195);   /* cyan-400 equivalent */
+  --color-accent-hi: oklch(80% 0.16 195);  /* hover / active */
+  --color-accent-bg: oklch(20% 0.04 195);  /* tinted surface */
+
+  /* ── Text ─────────────────────────────────────────────────────── */
+  --color-fg:       oklch(94% 0.01 250);   /* primary text, near-white */
+  --color-fg-muted: oklch(65% 0.012 250);  /* secondary / labels */
+  --color-fg-faint: oklch(42% 0.01 250);   /* placeholder / disabled */
+
+  /* ── Status ───────────────────────────────────────────────────── */
+  --color-success:  oklch(70% 0.18 145);   /* green */
+  --color-warning:  oklch(78% 0.18 85);    /* amber */
+  --color-danger:   oklch(65% 0.22 25);    /* red */
+  --color-info:     oklch(72% 0.18 230);   /* blue */
+
+  /* ── Fonts ────────────────────────────────────────────────────── */
+  --font-sans: 'Inter', system-ui, -apple-system, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, 'Cascadia Code', monospace;
+
+  /* ── Radii ────────────────────────────────────────────────────── */
+  --radius-sm: 4px;
+  --radius:    6px;
+  --radius-lg: 10px;
+  --radius-xl: 14px;
+}
+
+/* ── Global reset + base ────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: var(--color-bg);
+  color: var(--color-fg);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+#app {
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* ── Scrollbar (dark, thin) ─────────────────────────────────────── */
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--color-border); border-radius: 10px; }
+::-webkit-scrollbar-thumb:hover { background: var(--color-border-hi); }
+
+/* ── Focus ring ─────────────────────────────────────────────────── */
+:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+/* ── Transitions ────────────────────────────────────────────────── */
+.fade-enter-active, .fade-leave-active { transition: opacity 0.12s ease; }
+.fade-enter-from, .fade-leave-to { opacity: 0; }
+
+.slide-up-enter-active { transition: all 0.2s ease; }
+.slide-up-leave-active { transition: all 0.15s ease; }
+.slide-up-enter-from { opacity: 0; transform: translateY(8px); }
+.slide-up-leave-to { opacity: 0; transform: translateY(-4px); }
+
+/* Toast slide-in */
+.toast-enter-active { transition: all 0.2s ease; }
+.toast-leave-active { transition: all 0.18s ease; }
+.toast-enter-from { opacity: 0; transform: translateX(16px); }
+.toast-leave-to { opacity: 0; transform: translateX(16px); }

@@ -1,0 +1,81 @@
+[build-system]
+requires = ["hatchling>=1.21"]
+build-backend = "hatchling.build"
+
+[project]
+name = "hal0"
+version = "0.0.0"
+description = "Open-source home AI inference platform"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "TBD" }
+authors = [{ name = "hal0 contributors" }]
+keywords = ["ai", "llm", "inference", "openai-compatible", "homeai"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: End Users/Desktop",
+  "Intended Audience :: System Administrators",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+dependencies = [
+  "fastapi>=0.115",
+  "uvicorn[standard]>=0.32",
+  "httpx>=0.28",
+  "pydantic>=2.10",
+  "pydantic-settings>=2.6",
+  "typer>=0.15",
+  "structlog>=24.4",
+  "sse-starlette>=2.1",
+  "tomli-w>=1.0",
+  "rich>=13.9",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.3",
+  "pytest-asyncio>=0.24",
+  "pytest-cov>=6.0",
+  "ruff>=0.8",
+  "mypy>=1.13",
+  "httpx>=0.28",
+]
+
+[project.scripts]
+hal0 = "hal0.cli.main:app"
+
+[project.urls]
+Homepage = "https://hal0.dev"
+Repository = "https://github.com/hal0-dev/hal0"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/hal0"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM", "RUF"]
+ignore = [
+  "E501",  # line length (handled by formatter)
+  "B008",  # function calls in argument defaults — Typer's documented API for Option/Argument
+]
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = "-ra --strict-markers"
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_return_any = true
+warn_unused_configs = true

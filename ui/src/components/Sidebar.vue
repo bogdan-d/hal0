@@ -1,0 +1,285 @@
+<script setup>
+import { computed, ref, watch } from 'vue'
+import { useRoute } from 'vue-router'
+import { useSystemStore } from '../stores/system.js'
+
+const props = defineProps({
+  open: Boolean,
+  isMobile: Boolean,
+})
+const emit = defineEmits(['toggle', 'navigate'])
+
+const route  = useRoute()
+const system = useSystemStore()
+
+const running = computed(() => system.slots.filter((s) => s.status === 'running').length)
+const total   = computed(() => system.slots.length)
+
+// ── Nav definition ─────────────────────────────────────────────────
+const NAV_ITEMS = [
+  {
+    to: '/',
+    label: 'Dashboard',
+    icon: 'M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6',
+  },
+  {
+    to: '/slots',
+    label: 'Slots',
+    icon: 'M5 12h14M12 5l7 7-7 7',
+  },
+  {
+    to: '/models',
+    label: 'Models',
+    icon: 'M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4',
+  },
+  {
+    to: '/hardware',
+    label: 'Hardware',
+    icon: 'M9 3H5a2 2 0 00-2 2v4m6-6h10a2 2 0 012 2v4M9 3v18m0 0h10a2 2 0 002-2V9M9 21H5a2 2 0 01-2-2V9m0 0h18',
+  },
+  {
+    to: '/logs',
+    label: 'Logs',
+    icon: 'M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z',
+  },
+  {
+    to: '/providers',
+    label: 'Providers',
+    icon: 'M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9a9 9 0 019-9',
+  },
+  {
+    to: '/settings',
+    label: 'Settings',
+    icon: 'M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065zM15 12a3 3 0 11-6 0 3 3 0 016 0z',
+  },
+]
+
+function isActive(item) {
+  if (item.to === '/') return route.path === '/'
+  return route.path.startsWith(item.to)
+}
+
+function onNavClick() {
+  emit('navigate')
+}
+</script>
+
+<template>
+  <aside
+    class="sidebar"
+    :class="{ collapsed: !open }"
+    role="navigation"
+    aria-label="Main navigation"
+  >
+    <nav class="nav" aria-label="Primary">
+      <router-link
+        v-for="item in NAV_ITEMS"
+        :key="item.to"
+        :to="item.to"
+        class="nav-item"
+        :class="{ active: isActive(item) }"
+        :aria-current="isActive(item) ? 'page' : undefined"
+        @click="onNavClick"
+      >
+        <svg
+          class="nav-icon"
+          fill="none"
+          stroke="currentColor"
+          viewBox="0 0 24 24"
+          stroke-width="1.6"
+          aria-hidden="true"
+        >
+          <path stroke-linecap="round" stroke-linejoin="round" :d="item.icon" />
+        </svg>
+        <span v-if="open" class="nav-label">{{ item.label }}</span>
+      </router-link>
+    </nav>
+
+    <!-- External link: OpenWebUI -->
+    <div class="sidebar-footer-links" v-if="open">
+      <a
+        href="http://localhost:3001"
+        target="_blank"
+        rel="noopener noreferrer"
+        class="nav-item external"
+        title="Open OpenWebUI chat interface"
+      >
+        <svg class="nav-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.6" aria-hidden="true">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"/>
+        </svg>
+        <span class="nav-label">Open Chat</span>
+        <svg class="ext-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" aria-hidden="true">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"/>
+        </svg>
+      </a>
+    </div>
+
+    <!-- Slot count badge (footer) -->
+    <div class="sidebar-status" :class="{ 'sidebar-status-collapsed': !open }">
+      <span class="status-dot" :class="running > 0 ? 'live' : 'idle'" aria-hidden="true" />
+      <span v-if="open" class="status-text">
+        {{ running }}/{{ total }} slot{{ total !== 1 ? 's' : '' }} running
+      </span>
+    </div>
+  </aside>
+</template>
+
+<style scoped>
+.sidebar {
+  grid-column: 1;
+  grid-row: 2;
+  display: flex;
+  flex-direction: column;
+  background: var(--color-surface);
+  border-right: 1px solid var(--color-border);
+  overflow: hidden;
+  transition: transform 0.2s ease;
+}
+
+/* Mobile off-canvas */
+:global(.app-shell.is-mobile .sidebar) {
+  position: fixed;
+  top: 44px;
+  left: 0;
+  bottom: 0;
+  width: min(260px, 85vw);
+  z-index: 50;
+  box-shadow: 8px 0 32px -8px rgba(0, 0, 0, 0.7);
+  transform: translateX(-100%);
+}
+:global(.app-shell.is-mobile.mobile-nav-open .sidebar) {
+  transform: translateX(0);
+}
+:global(.app-shell.is-mobile .sidebar.collapsed) {
+  width: min(260px, 85vw);
+}
+
+/* ── Nav ──────────────────────────────────────────────────────── */
+.nav {
+  flex: 1;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  overflow-y: auto;
+}
+
+.nav-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: var(--radius);
+  color: var(--color-fg-muted);
+  text-decoration: none;
+  font-size: 13px;
+  font-weight: 500;
+  position: relative;
+  user-select: none;
+  transition: background 0.1s, color 0.1s;
+  white-space: nowrap;
+}
+
+.nav-item:hover {
+  background: var(--color-surface-2);
+  color: var(--color-fg);
+}
+
+.nav-item.active {
+  background: var(--color-accent-bg);
+  color: var(--color-accent);
+}
+
+.nav-item.active::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 6px;
+  bottom: 6px;
+  width: 2px;
+  border-radius: 0 2px 2px 0;
+  background: var(--color-accent);
+}
+
+.nav-item.external {
+  color: var(--color-fg-faint);
+  font-size: 12px;
+}
+
+.nav-icon {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+}
+
+.nav-label {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ext-icon {
+  width: 11px;
+  height: 11px;
+  opacity: 0.4;
+  flex-shrink: 0;
+}
+
+/* Collapsed rail: icon only */
+.sidebar.collapsed .nav-item {
+  justify-content: center;
+  padding: 8px;
+}
+.sidebar.collapsed .nav-label,
+.sidebar.collapsed .ext-icon {
+  display: none;
+}
+.sidebar.collapsed .nav-item.active::before {
+  display: none;
+}
+
+/* ── Footer links ─────────────────────────────────────────────── */
+.sidebar-footer-links {
+  padding: 4px 8px;
+  border-top: 1px solid var(--color-border);
+}
+
+/* ── Status ───────────────────────────────────────────────────── */
+.sidebar-status {
+  padding: 10px 14px;
+  border-top: 1px solid var(--color-border);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.sidebar-status-collapsed {
+  justify-content: center;
+  padding: 10px 8px;
+}
+
+.status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  transition: background 0.3s;
+}
+
+.status-dot.live {
+  background: var(--color-success);
+  box-shadow: 0 0 8px -1px var(--color-success);
+}
+
+.status-dot.idle {
+  background: var(--color-fg-faint);
+}
+
+.status-text {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--color-fg-faint);
+  white-space: nowrap;
+}
+</style>
