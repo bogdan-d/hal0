@@ -95,7 +95,7 @@ const sparkSvg = computed(() => {
 </script>
 
 <template>
-  <div class="slot-card" :class="{ 'is-running': running, 'is-busy': busy, [`state-${dotState}`]: true }">
+  <div class="slot-card" :class="{ 'is-running': running, 'is-busy': busy, [`sc-state-${dotState}`]: true }">
     <!-- Header -->
     <div class="sc-head">
       <span class="sc-dot" />
@@ -204,11 +204,11 @@ const sparkSvg = computed(() => {
   background: var(--color-fg-faint);
   flex-shrink: 0;
 }
-.state-live .sc-dot   { background: var(--color-success); box-shadow: 0 0 0 4px color-mix(in oklch, var(--color-success), transparent 80%); animation: dot-pulse 1.4s ease-in-out infinite; }
-.state-idle .sc-dot   { background: var(--color-accent); }
-.state-loading .sc-dot { background: var(--color-warning); animation: dot-pulse 1.4s ease-in-out infinite; }
-.state-error .sc-dot  { background: var(--color-danger); }
-.state-offline .sc-dot { background: var(--color-fg-faint); }
+.sc-state-live .sc-dot   { background: var(--color-success); box-shadow: 0 0 0 4px color-mix(in oklch, var(--color-success), transparent 80%); animation: dot-pulse 1.4s ease-in-out infinite; }
+.sc-state-idle .sc-dot   { background: var(--color-accent); }
+.sc-state-loading .sc-dot { background: var(--color-warning); animation: dot-pulse 1.4s ease-in-out infinite; }
+.sc-state-error .sc-dot  { background: var(--color-danger); }
+.sc-state-offline .sc-dot { background: var(--color-fg-faint); }
 @keyframes dot-pulse {
   0%, 100% { box-shadow: 0 0 0 0 color-mix(in oklch, currentColor, transparent 70%); }
   50%      { box-shadow: 0 0 0 4px color-mix(in oklch, currentColor, transparent 90%); }

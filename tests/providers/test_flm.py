@@ -14,10 +14,12 @@ import httpx
 import pytest
 
 from hal0.providers.flm import (
-    _HAL0_FLM_IMAGE,
+    _DEFAULT_FLM_IMAGE,
     FLMInferError,
     FLMProvider,
 )
+
+_HAL0_FLM_IMAGE = _DEFAULT_FLM_IMAGE
 
 
 @pytest.fixture
@@ -94,9 +96,35 @@ def test_container_spec_passes_through_accel_device(
     provider: FLMProvider, slot_cfg: dict[str, Any], model_info: dict[str, Any]
 ) -> None:
     spec = provider.container_spec(slot_cfg, model_info)
-    # /dev/accel is the XDNA2 NPU device node.
-    assert "/dev/accel" in spec.devices
+    # /dev/accel/accel0 is the XDNA2 NPU device node.
+    assert "/dev/accel/accel0" in spec.devices
     assert spec.port == 8086
+
+
+def test_container_spec_bind_mounts_flm_tree_at_same_path(
+    provider: FLMProvider, slot_cfg: dict[str, Any], model_info: dict[str, Any]
+) -> None:
+    """The bin/xclbins absolute symlink only resolves when host = container path."""
+    spec = provider.container_spec(slot_cfg, model_info)
+    mount_pairs = list(spec.mounts)
+    assert any(host == container for host, container in mount_pairs), (
+        "FLM tree must be bind-mounted at the SAME path inside the container "
+        "so its internal absolute symlinks resolve."
+    )
+
+
+def test_container_spec_passes_multiplex_flags_in_command(
+    provider: FLMProvider, model_info: dict[str, Any]
+) -> None:
+    cfg = {
+        "port": 8086,
+        "defaults": {"load_embed": True, "load_asr": True, "context_size": 2048},
+        "_paths": {},
+    }
+    spec = provider.container_spec(cfg, model_info)
+    cmd = spec.command
+    assert "--embed" in cmd and "1" in cmd
+    assert "--asr" in cmd
 
 
 # ─── health (TIER1 inference round-trip) ──────────────────────────────────────

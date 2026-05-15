@@ -767,30 +767,35 @@ class SlotManager:
         """
         if not model_id:
             return {}
+
+        # Stamp _model_key / flm_tag onto every model_info, registry-hit or
+        # miss. Providers that look at these (currently FLM, where the
+        # "model_id" is a FastFlowLM tag like ``qwen3.5:4b`` rather than a
+        # local-file model) use them as the canonical lookup key. Mirrors
+        # haloai's haloai-launch behaviour.
+        info: dict[str, Any] = {"_model_key": model_id, "flm_tag": model_id}
+
         try:
             from hal0.registry.store import ModelNotFound, ModelRegistry
         except ImportError:
-            # registry subtree not landed yet — graceful degrade.
             log.warning("slot.registry_unavailable", extra={"model_id": model_id})
-            return {}
+            return info
         try:
             reg = ModelRegistry()
             model = reg.get(model_id)
         except ModelNotFound:
-            # NOTE: deliberately non-fatal.  The slot manager is not the
-            # authoritative gate on "is this model installed" — that's the
-            # registry/models route's job.  We log so the dashboard sees
-            # the orphan and let the toolbox image surface its own
-            # ModelLoadError when the path doesn't exist.
-            log.warning(
-                "slot.model_not_in_registry",
-                extra={"model_id": model_id},
-            )
-            return {}
+            # Not fatal — the slot manager is not the authoritative gate
+            # on "is this model installed"; the toolbox will surface its
+            # own load error if the path is wrong.
+            log.warning("slot.model_not_in_registry", extra={"model_id": model_id})
+            return info
         except NotImplementedError:
             log.warning("slot.registry_stub", extra={"model_id": model_id})
-            return {}
-        return model.model_dump() if hasattr(model, "model_dump") else dict(model)
+            return info
+
+        registry_dump = model.model_dump() if hasattr(model, "model_dump") else dict(model)
+        info.update(registry_dump)
+        return info
 
     # ── health probe (TIER1 tightened) ───────────────────────────────────────
 

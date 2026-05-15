@@ -1,27 +1,37 @@
 """FLMProvider — AMD NPU (XDNA2) inference backend.
 
-FLM (Flexible Language Model) targets the AMD Strix Halo NPU.  Optional —
+FLM (Flexible Language Model) targets the AMD Strix Halo NPU. Optional —
 only loaded on hardware where the NPU driver is present and the FLM
-toolbox image is available.
+binary tree + toolbox image are available.
 
-Capabilities: chat, embed, ASR multiplexed on one NPU (see PLAN.md §1).
-Toolbox image: ghcr.io/hal0-dev/hal0-toolbox-flm:v1 (PLAN.md §12).
+Capabilities: chat, embed, ASR multiplexed on one NPU. A single
+``flm serve <chat-tag> --embed 1 --asr 1`` process serves
+``/v1/chat/completions`` + ``/v1/embeddings`` + ``/v1/audio/transcriptions``
+against three different models simultaneously (embed-gemma + whisper-v3
++ the chat tag). The NPU serializes execution, so multiprocess FLM
+provides no parallelism gain — port the single-multiplex design from
+haloai's lib/providers/flm.py.
 
-Port target: haloai lib/providers/flm.py (106 lines).
-See PLAN.md §5 Tier 1 — health probe must verify a real inference
-round-trip, not just a non-empty /v1/models list (that's the bug at
-haloai lib/slots.py:899-920).
-
-# NOTE: haloai's FLM multiplexes ASR + embed on the same NPU device
-# via flags `load_asr` / `load_embed` in slot defaults. The runtime
-# serializes execution (single shared compute), but multiplexing avoids
-# duplicating model RAM on the NPU. Empirical test 2026-05-07 confirmed
-# multi-process FLM coexists but provides no parallelism gain — so the
-# single-multiplexed-process design wins on RAM and is what we port.
+# Hybrid container packaging:
+#   - Image: hal0-toolbox-flm carries Ubuntu 24.04 + ffmpeg + libxrt-npu2
+#     + libboost-program-options. Freely redistributable, ~250 MB.
+#   - Host: FLM binary tree (bin/, lib/, share/, deps/) bind-mounted in
+#     at the SAME absolute path inside the container so that
+#     ``bin/xclbins -> /mnt/ai-models/flm-ubuntu/share/flm/xclbins``
+#     (an absolute symlink) still resolves. Discovered while
+#     containerising on haloai 2026-05-15.
+#   - Models: FLM's own cache dir (``~/.config/flm/models/``) bind-mounted
+#     to a hal0-managed dir so model downloads persist across container
+#     restarts.
+# See docs/handoff-2026-05-15-autonomous.md for the test that proved
+# this layout (Validate / serve / embed all succeeded; chat is blocked
+# only by whoever currently holds the NPU's hardware context, not by
+# anything container-side).
 """
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 import httpx
@@ -29,8 +39,19 @@ import httpx
 from hal0.api.middleware.error_codes import Hal0Error
 from hal0.providers.base import ContainerSpec, Provider
 
-# ── Toolbox image ──────────────────────────────────────────────────────────────
-_HAL0_FLM_IMAGE = "ghcr.io/hal0-dev/hal0-toolbox-flm:v1"
+# ── Toolbox image ─────────────────────────────────────────────────────────────
+# Default tag. Override via HAL0_TOOLBOX_IMAGE_FLM in api.env when running
+# on hal0-test before the GHCR org is provisioned (PLAN §17).
+_DEFAULT_FLM_IMAGE = "ghcr.io/hal0-dev/hal0-toolbox-flm:v1"
+
+# ── On-disk layout ────────────────────────────────────────────────────────────
+# The FLM binary tree lives at this path on the *host*. The same path is
+# mirrored into the container via a read-only bind so internal absolute
+# symlinks (notably bin/xclbins → share/flm/xclbins) keep resolving.
+_DEFAULT_FLM_ROOT = "/opt/hal0/flm-ubuntu"
+# FLM's per-user model cache. Bind-mounted writable so `flm pull` downloads
+# survive container restarts.
+_DEFAULT_FLM_MODELS_DIR = "/var/lib/hal0/flm-models"
 
 # ── Timeouts ───────────────────────────────────────────────────────────────────
 # TIER1: separate health budget from infer budget.
@@ -55,12 +76,24 @@ class FLMInferError(Hal0Error):
     status = 502
 
 
-def _load_flm_backend_meta() -> dict[str, Any]:
-    """Return FLM backend profile [backend] dict, or {}.
+def _resolve_render_gid() -> int | None:
+    """Look up the ``render`` group's numeric gid on the host.
 
-    # NOTE: see llama_server._load_backend_meta — Phase 5 hook.
+    Slot containers need this group to read /dev/accel/accel0 and
+    /dev/dri/renderD128. The gid varies between hosts (993 on Strix Halo
+    LXCs, 109 on some bare-metal Debian, etc.) so we resolve once at
+    container-spec build time rather than baking it into the image.
+
+    Returns ``None`` if the group can't be resolved — the slot will still
+    launch but device reads may fail; the slot's health probe will catch
+    it.
     """
-    return {}
+    try:
+        import grp
+
+        return grp.getgrnam("render").gr_gid
+    except (KeyError, ImportError, OSError):
+        return None
 
 
 class FLMProvider(Provider):
@@ -82,16 +115,15 @@ class FLMProvider(Provider):
     ) -> dict[str, str]:
         """Build HAL0_* env vars for an FLM slot.
 
-        Ported from haloai lib/providers/flm.py. Renames HALOAI_* → HAL0_*.
+        Returned vars are stamped into the slot's EnvironmentFile so the
+        rendered docker command can refer to them via ``${HAL0_*}``. Kept
+        separate from container_spec so non-container callers (tests,
+        debug shells, native systemd fallback) can use them too.
         """
         port = slot_cfg.get("port") or slot_cfg.get("slot", {}).get("port", 8086)
-        ctx = slot_cfg.get("ctx_size") or slot_cfg.get("defaults", {}).get("context_size", 65536)
-        flm_tag = model_info.get("flm_tag") or model_info.get("_model_key") or "qwen3.5:0.8b"
+        ctx = slot_cfg.get("ctx_size") or slot_cfg.get("defaults", {}).get("context_size", 8192)
+        flm_tag = model_info.get("flm_tag") or model_info.get("_model_key") or "qwen3:0.6b"
 
-        meta = _load_flm_backend_meta()
-        binary = meta.get("binary", "/usr/local/bin/flm")
-
-        # FLM single-process multiplex flags.
         defaults = slot_cfg.get("defaults", {})
         load_asr = "1" if defaults.get("load_asr") else "0"
         load_embed = "1" if defaults.get("load_embed") else "0"
@@ -100,31 +132,43 @@ class FLMProvider(Provider):
             "HAL0_FLM_TAG": str(flm_tag),
             "HAL0_PORT": str(port),
             "HAL0_FLM_CTX": str(ctx),
-            "HAL0_FLM_BINARY": binary,
             "HAL0_FLM_LOAD_ASR": load_asr,
             "HAL0_FLM_LOAD_EMBED": load_embed,
         }
 
     def start_cmd(self, env: dict[str, str]) -> list[str]:
-        """Return argv for `flm serve`."""
-        binary = env.get("HAL0_FLM_BINARY", "/usr/local/bin/flm")
-        return [
+        """Return argv for the native ``flm serve`` invocation.
+
+        Used by tests and the fallback systemd-without-Docker path. The
+        primary deployment path is ``container_spec``.
+        """
+        binary = os.environ.get("HAL0_FLM_BINARY", f"{_DEFAULT_FLM_ROOT}/bin/flm")
+        argv = [
             binary,
             "serve",
             env["HAL0_FLM_TAG"],
-            "--port",
-            env["HAL0_PORT"],
             "--host",
             "0.0.0.0",
+            "--port",
+            env["HAL0_PORT"],
             "--ctx-len",
             env["HAL0_FLM_CTX"],
         ]
+        if env.get("HAL0_FLM_LOAD_EMBED") == "1":
+            argv += ["--embed", "1"]
+        if env.get("HAL0_FLM_LOAD_ASR") == "1":
+            argv += ["--asr", "1"]
+        return argv
 
     # ── Image / container spec ─────────────────────────────────────────────────
 
     def image_ref(self, _slot_cfg: dict[str, Any]) -> str:
-        """Return the FLM toolbox image reference (single backend, no variants)."""
-        return _HAL0_FLM_IMAGE
+        """Return the FLM toolbox image reference.
+
+        Allows pre-GHCR-org deploys to override via env var (matches the
+        Vulkan/ROCm toolbox pattern).
+        """
+        return os.environ.get("HAL0_TOOLBOX_IMAGE_FLM", _DEFAULT_FLM_IMAGE)
 
     def container_spec(
         self,
@@ -133,43 +177,90 @@ class FLMProvider(Provider):
     ) -> ContainerSpec:
         """Build a ContainerSpec for FLM in the toolbox image.
 
-        FLM needs /dev/accel for the AMD XDNA2 NPU. /dev/dri is included
-        for completeness (some FLM builds expose iGPU helpers).
+        Layout:
+          - Image carries Ubuntu base + libxrt-npu2 + ffmpeg.
+          - Host bind-mount of the FLM binary tree at the SAME absolute
+            path inside the container (default ``/opt/hal0/flm-ubuntu``)
+            so its internal absolute symlinks (notably bin/xclbins →
+            share/flm/xclbins) keep resolving.
+          - Host bind-mount of the FLM model cache to a hal0-managed
+            directory so ``flm pull`` downloads survive container
+            restarts.
+
+        FLM needs ``/dev/accel/accel0`` for the AMD XDNA2 NPU. ``/dev/dri``
+        is included because some FLM model loaders hit iGPU helpers
+        during init.
         """
         env = self.build_env(slot_cfg, model_info)
         port = int(env["HAL0_PORT"])
 
+        paths = slot_cfg.get("_paths", {}) or {}
+        flm_root = paths.get("flm_root") or os.environ.get("HAL0_FLM_ROOT") or _DEFAULT_FLM_ROOT
+        flm_models = (
+            paths.get("flm_models")
+            or os.environ.get("HAL0_FLM_MODELS_DIR")
+            or _DEFAULT_FLM_MODELS_DIR
+        )
+
+        # Mount the binary tree at the same path inside the container so the
+        # bin/xclbins absolute symlink resolves. The model cache is mounted
+        # at FLM's default location (~/.config/flm/models) since FLM hardcodes
+        # that path internally.
+        mounts: list[tuple[str, str]] = [
+            (flm_root, flm_root),
+            (flm_models, "/root/.config/flm/models"),
+        ]
+
+        # Build the argv the container's entrypoint receives. The image's
+        # ENTRYPOINT points at <flm_root>/bin/flm via PATH, but we pass the
+        # absolute path so an image-side PATH change can't break us.
         command: list[str] = [
+            f"{flm_root}/bin/flm",
             "serve",
             env["HAL0_FLM_TAG"],
-            "--port",
-            str(port),
             "--host",
             "0.0.0.0",
+            "--port",
+            str(port),
             "--ctx-len",
             env["HAL0_FLM_CTX"],
         ]
+        if env["HAL0_FLM_LOAD_EMBED"] == "1":
+            command += ["--embed", "1"]
+        if env["HAL0_FLM_LOAD_ASR"] == "1":
+            command += ["--asr", "1"]
 
-        # Bind-mount the FLM model cache if configured on the slot.
-        paths = slot_cfg.get("_paths", {}) or {}
-        mounts: list[tuple[str, str]] = []
-        flm_cache = paths.get("flm_cache")
-        if flm_cache:
-            mounts.append((flm_cache, flm_cache))
+        # render group resolves dynamically at run-time; use the numeric gid
+        # so the spec doesn't depend on /etc/group in the container.
+        render_gid = _resolve_render_gid()
 
         return ContainerSpec(
             image=self.image_ref(slot_cfg),
             command=command,
-            env={},
+            env={
+                "FLM_CONFIG_PATH": f"{flm_root}/share/flm/model_list.json",
+                "LD_LIBRARY_PATH": f"{flm_root}/lib:/usr/lib/x86_64-linux-gnu",
+            },
             mounts=mounts,
-            # /dev/accel: XDNA2 NPU device node. /dev/dri: iGPU companion.
-            devices=["/dev/accel", "/dev/dri"],
+            # /dev/accel/accel0: XDNA2 NPU. /dev/dri/renderD128: iGPU companion.
+            devices=["/dev/accel/accel0", "/dev/dri/renderD128"],
             cap_add=[],
-            security_opt=["seccomp=unconfined", "apparmor=unconfined"],
-            group_add=["video", "render"],
+            # apparmor=unconfined is required in LXC; on bare metal a
+            # tailored profile would be tighter but Strix Halo deployments
+            # under Proxmox LXC are the primary target.
+            security_opt=["apparmor=unconfined"],
+            group_add=[str(render_gid)] if render_gid is not None else [],
             port=port,
-            network_mode="host",
-            extra_args=[],
+            # FLM's /v1/* server needs to be reachable from the dispatcher
+            # at 127.0.0.1:<port>. Use port-mapping rather than network=host
+            # so multiple slots can coexist with overlapping internal ports.
+            network_mode="",
+            extra_args=[
+                f"-p 127.0.0.1:{port}:{port}",
+                # NPU model weights are pinned in DMA-locked memory; this
+                # is the same flag haloai's systemd unit sets.
+                "--ulimit memlock=-1",
+            ],
         )
 
     # ── Health / infer ─────────────────────────────────────────────────────────
