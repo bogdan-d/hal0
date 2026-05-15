@@ -3,11 +3,37 @@ import { useToastsStore } from '../stores/toasts.js'
 const BASE = ''  // dev server proxies /api and /v1 to :8080
 
 /**
+ * Hal0Error — thrown from `api()` on non-2xx responses.
+ *
+ * Carries the structured error envelope shape ({code, message, details})
+ * the backend defines in `hal0.api.middleware.error_codes`. UI code that
+ * needs to branch on the code (e.g. RestartBanner showing rollback only on
+ * `system.update_failed`) can do `if (err.code === '...')` instead of
+ * regex-matching the message.
+ *
+ * `status` mirrors the HTTP status so callers can treat 501 (stub) and 4xx
+ * (user-actionable) differently without parsing the body twice.
+ */
+export class Hal0Error extends Error {
+  constructor(message, { code = 'system.unknown', status = 0, details = null } = {}) {
+    super(message)
+    this.name = 'Hal0Error'
+    this.code = code
+    this.status = status
+    this.details = details ?? {}
+  }
+}
+
+/**
  * Minimal fetch wrapper.
  *
  * Usage:
  *   const data = await api('/api/slots')
  *   await api('/api/slots/primary/restart', { method: 'POST' })
+ *
+ * On a non-2xx response, throws `Hal0Error` with `code` + `details`
+ * lifted out of the structured envelope; falls back to a generic
+ * `system.unknown` code if the body isn't parseable.
  */
 export async function api(path, options = {}) {
   const url = BASE + path
@@ -18,23 +44,22 @@ export async function api(path, options = {}) {
 
   if (!res.ok) {
     let message = `API error ${res.status}`
-    let body = null
+    let code = 'system.unknown'
+    let details = null
     try {
-      body = await res.json()
-      message = body?.error?.message || body?.detail || message
+      const body = await res.json()
+      const env = body?.error
+      if (env && typeof env === 'object') {
+        message = env.message || message
+        code = env.code || code
+        details = env.details || null
+      } else if (body?.detail) {
+        message = body.detail
+      }
     } catch {
       // ignore parse failure
     }
-    // Surface the full envelope (code + details map) on the Error
-    // instance so callers like Settings.vue can render per-field
-    // validation reasons inline next to the offending input. The
-    // ``message`` stays the human-readable string for toasts.
-    const err = new Error(message)
-    err.status  = res.status
-    err.code    = body?.error?.code ?? null
-    err.details = body?.error?.details ?? null
-    err.body    = body
-    throw err
+    throw new Hal0Error(message, { code, status: res.status, details })
   }
 
   if (res.status === 204) return null

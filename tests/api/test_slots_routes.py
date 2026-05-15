@@ -332,6 +332,149 @@ def test_state_endpoint_returns_lifecycle_snapshot(
     assert body["port"] == 8081
 
 
+async def test_state_stream_404_on_unknown_slot(
+    slot_root: Path,
+    systemctl_stub: dict[str, Any],
+    isolated_client: TestClient,
+) -> None:
+    """The SSE endpoint must 404 on an unknown slot (Team I gap #2).
+
+    Per the gap brief: "404 if slot doesn't exist." The handler calls
+    sm.status() before opening the long-lived stream so the failure is
+    fast + synchronous and surfaces the typed envelope.
+    """
+    r = isolated_client.get("/api/slots/nope/state/stream")
+    assert r.status_code == 404, r.text
+    assert r.json()["error"]["code"] == "slot.not_found"
+
+
+async def test_state_stream_emits_transition_event(
+    slot_root: Path,
+    systemctl_stub: dict[str, Any],
+    stub_await_ready: None,
+    isolated_app: FastAPI,
+) -> None:
+    """Driving a state change through the manager pushes a frame to the stream.
+
+    Subscribes to /api/slots/primary/state/stream after the slot is
+    READY, then drives an unload transition and asserts the SSE consumer
+    sees the OFFLINE frame. Mirrors the wire shape the dashboard's
+    useSlotState composable consumes (Team I gap #2).
+
+    Timing note: the SSE generator yields the initial snapshot eagerly,
+    then awaits sm.state_stream() — which only registers a subscriber
+    queue when it's first iterated. So we have to nudge the async
+    scheduler past the `async for` setup before driving the transition,
+    otherwise the unload broadcasts to zero subscribers and the test
+    hangs on the second __anext__.
+    """
+    with TestClient(isolated_app):
+        sm: SlotManager = isolated_app.state.slot_manager
+        # Drive into READY first so we've got a concrete starting state.
+        await sm.load("primary")
+
+        from hal0.api.routes.slots import slot_state_stream
+
+        class _ReqShim:
+            class _AppShim:
+                state = isolated_app.state
+            app = _AppShim()
+
+        response = await slot_state_stream("primary", _ReqShim())  # type: ignore[arg-type]
+        agen = response.body_iterator
+        # Drain the initial snapshot frame.
+        first = await asyncio.wait_for(agen.__anext__(), timeout=1.0)
+        if isinstance(first, bytes):
+            first = first.decode("utf-8")
+        assert 'data: ' in first, f"missing data line in initial frame: {first!r}"
+
+        # Kick off the next __anext__ — this enters the `async for rec in
+        # sm.state_stream()` loop, registers the subscriber queue, and
+        # parks on queue.get(). We then drive the transition.
+        next_frame_task = asyncio.create_task(agen.__anext__())
+        # Yield until the subscriber registration has happened. Polling on
+        # the subscriber count beats a fixed sleep — robust to slow CI.
+        for _ in range(50):
+            if len(sm._subscribers) > 0:
+                break
+            await asyncio.sleep(0.01)
+        assert len(sm._subscribers) > 0, "subscriber never registered"
+
+        await sm.unload("primary")
+
+        next_frame = await asyncio.wait_for(next_frame_task, timeout=2.0)
+        if isinstance(next_frame, bytes):
+            next_frame = next_frame.decode("utf-8")
+        await agen.aclose()
+
+        assert next_frame.startswith("event: state\n"), f"bad SSE prefix: {next_frame!r}"
+        data_line = next(
+            line for line in next_frame.splitlines() if line.startswith("data: ")
+        )
+        payload = json.loads(data_line[len("data: ") :])
+        assert payload["name"] == "primary"
+        # Unload runs READY → UNLOADING → OFFLINE; either intermediate
+        # frame is a valid first observation depending on scheduler order.
+        # What we're really asserting is "a transition fired and the
+        # subscriber saw it" — the SSE wire shape carries the full
+        # lifecycle metadata the UI surfaces in the slot card.
+        assert payload["state"] in ("unloading", "offline"), payload
+        assert "port" in payload
+        assert "model_id" in payload
+        assert "updated_at" in payload
+
+
+async def test_state_stream_subscriber_cleaned_up_on_close(
+    slot_root: Path,
+    systemctl_stub: dict[str, Any],
+    stub_await_ready: None,
+    isolated_app: FastAPI,
+) -> None:
+    """Closing the SSE generator deregisters the SlotManager subscriber.
+
+    The state machine fans transitions out to a list of asyncio.Queues —
+    if an aborted SSE consumer doesn't clean up, the queue leaks and a
+    QueueFull eventually starves transitions for everyone (Tier-3 risk).
+    """
+    with TestClient(isolated_app):
+        sm: SlotManager = isolated_app.state.slot_manager
+        await sm.load("primary")
+        from hal0.api.routes.slots import slot_state_stream
+
+        class _ReqShim:
+            class _AppShim:
+                state = isolated_app.state
+            app = _AppShim()
+
+        before = len(sm._subscribers)
+        response = await slot_state_stream("primary", _ReqShim())  # type: ignore[arg-type]
+        agen = response.body_iterator
+        # The generator yields the initial snapshot eagerly; the subscriber
+        # only registers on the next __anext__ when the inner `async for`
+        # runs. Schedule that, wait until the queue appears in the list,
+        # then close cleanly.
+        await asyncio.wait_for(agen.__anext__(), timeout=1.0)  # initial snapshot
+        next_task = asyncio.create_task(agen.__anext__())
+        for _ in range(50):
+            if len(sm._subscribers) == before + 1:
+                break
+            await asyncio.sleep(0.01)
+        assert len(sm._subscribers) == before + 1, (
+            f"subscriber not registered: {len(sm._subscribers)} (was {before})"
+        )
+        # Cancel the pending __anext__ so closing the generator doesn't
+        # raise from a still-awaiting queue.get().
+        next_task.cancel()
+        try:
+            await next_task
+        except (asyncio.CancelledError, StopAsyncIteration):
+            pass
+        await agen.aclose()
+        assert len(sm._subscribers) == before, (
+            f"subscriber leaked: {len(sm._subscribers)} (was {before})"
+        )
+
+
 async def test_state_stream_emits_sse_event_shape(
     slot_root: Path,
     systemctl_stub: dict[str, Any],

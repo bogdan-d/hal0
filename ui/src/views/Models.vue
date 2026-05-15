@@ -14,10 +14,11 @@
  *   quick "Assign to" dropdown — no page navigation required.
  * - `n` to open Pull form, `/` to focus search.
  */
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted, reactive } from 'vue'
 import { useSystemStore } from '../stores/system.js'
 import { useToastsStore } from '../stores/toasts.js'
 import { api } from '../composables/useApi.js'
+import { usePullJob, fmtBytes, fmtSpeed, fmtEta } from '../composables/usePullJob.js'
 import PageHeader from '../components/PageHeader.vue'
 import Card from '../components/Card.vue'
 import LoadingSkeleton from '../components/LoadingSkeleton.vue'
@@ -40,7 +41,23 @@ const pullTab    = ref('curated')   // 'curated' | 'hf' | 'manual'
 const pullForm   = ref({ hf_url: '', name: '', quant: 'Q4_K_M' })
 const pullErrors = ref({})
 const pulling    = ref(false)
-const pullProgress = ref({})  // { [modelId]: { pct, status } }
+
+// Per-model active pull jobs. Each row that goes into a "downloading"
+// substate gets its own usePullJob instance so multiple pulls can run
+// in parallel and the inline progress bars are independent (Team I
+// gap #3).
+const pullJobs = reactive({})  // { [modelId]: usePullJob() }
+
+function ensureJob(modelId) {
+  if (!pullJobs[modelId]) {
+    pullJobs[modelId] = usePullJob()
+  }
+  return pullJobs[modelId]
+}
+
+function jobFor(modelId) {
+  return pullJobs[modelId] ?? null
+}
 
 // Curated presets (shown in pull modal)
 const CURATED = [
@@ -90,19 +107,24 @@ function slotsForModel(modelId) {
 // ── Pull model ─────────────────────────────────────────────────────────
 async function pullCurated(preset) {
   pulling.value = true
-  pullProgress.value[preset.id] = { pct: 0, status: 'starting' }
+  const job = ensureJob(preset.id)
   try {
-    await api('/api/models/pull', {
-      method: 'POST',
-      body: JSON.stringify({ model_id: preset.id }),
-    })
-    toasts.success(`Pulling "${preset.name}" — check progress in Models`)
-    await loadModels()
+    await job.start(preset.id)
+    toasts.success(`Pulling "${preset.name}" — progress shown inline`)
+    showPull.value = false
+    // Make sure the row exists so the user can watch progress. The
+    // backend will register the model in its registry; until then we
+    // optimistically insert a placeholder row.
+    if (!models.value.some((m) => m.id === preset.id)) {
+      models.value = [
+        ...models.value,
+        { id: preset.id, name: preset.name, size_gb: preset.size_gb, _pending: true },
+      ]
+    }
   } catch (e) {
     toasts.error(e.message)
   } finally {
     pulling.value = false
-    delete pullProgress.value[preset.id]
   }
 }
 
@@ -117,19 +139,53 @@ function validatePullHF() {
 async function submitPullHF() {
   if (!validatePullHF()) return
   pulling.value = true
+  const id = pullForm.value.hf_url
+  const job = ensureJob(id)
   try {
-    await api('/api/models/pull', {
-      method: 'POST',
-      body: JSON.stringify({ hf_url: pullForm.value.hf_url, quant: pullForm.value.quant }),
-    })
+    await job.start(id, { hf_url: pullForm.value.hf_url, quant: pullForm.value.quant })
     toasts.success('Download started')
     showPull.value = false
+    if (!models.value.some((m) => m.id === id)) {
+      models.value = [
+        ...models.value,
+        { id, name: id, _pending: true },
+      ]
+    }
     pullForm.value = { hf_url: '', name: '', quant: 'Q4_K_M' }
-    await loadModels()
   } catch (e) {
     toasts.error(e.message)
   } finally {
     pulling.value = false
+  }
+}
+
+async function cancelPull(modelId) {
+  const job = jobFor(modelId)
+  if (!job) return
+  try {
+    await job.cancel()
+    toasts.success(`Cancelled download for "${modelId}"`)
+  } catch (e) {
+    toasts.error(e.message)
+  }
+}
+
+/**
+ * On mount, ask the backend whether any of the rows we just loaded
+ * have an in-flight pull job. If so, reattach so the SSE progress bar
+ * picks up where the user left off when they navigated away. Soft-
+ * fails per model so a 404 on one doesn't block the rest.
+ */
+async function reattachInFlightPulls() {
+  for (const m of models.value) {
+    if (!m?.id) continue
+    const job = ensureJob(m.id)
+    await job.reattach(m.id)
+    // If the reattach didn't find an in-flight job, drop the entry so we
+    // don't leak empty job state into the row template.
+    if (!job.inFlight.value && !job.terminal.value) {
+      delete pullJobs[m.id]
+    }
   }
 }
 
@@ -208,8 +264,14 @@ function handleKey(e) {
 onMounted(async () => {
   window.addEventListener('keydown', handleKey)
   await loadModels()
+  // Reattach any in-flight pull jobs so the user sees live progress
+  // even if they navigated away mid-download (Team I gap #3).
+  await reattachInFlightPulls()
 })
-onUnmounted(() => window.removeEventListener('keydown', handleKey))
+onUnmounted(() => {
+  window.removeEventListener('keydown', handleKey)
+  // Active EventSource cleanup is handled by each usePullJob's onUnmounted.
+})
 
 // ── Formatting ─────────────────────────────────────────────────────────
 function fmtSize(model) {
@@ -297,6 +359,40 @@ const QUANTS = ['Q4_K_M', 'Q5_K_M', 'Q8_0', 'F16', 'BF16']
                     <div class="model-name-cell">
                       <span class="model-name">{{ model.name ?? model.id }}</span>
                       <span v-if="model.name && model.id !== model.name" class="model-id">{{ model.id }}</span>
+                      <!-- Inline pull progress: rendered when a row has an
+                           active or recently-terminated pull job. SSE-driven;
+                           updates instantly as bytes land. -->
+                      <div
+                        v-if="jobFor(model.id) && (jobFor(model.id).inFlight.value || jobFor(model.id).state.value === 'failed')"
+                        class="row-pull"
+                        role="status"
+                        :aria-label="`Downloading ${model.name ?? model.id}`"
+                      >
+                        <div class="row-pull-bar" :aria-valuenow="jobFor(model.id).pct.value ?? 0" aria-valuemin="0" aria-valuemax="100" role="progressbar">
+                          <div class="row-pull-fill" :style="{ width: (jobFor(model.id).pct.value ?? 0) + '%' }" />
+                        </div>
+                        <div class="row-pull-meta mono">
+                          <span v-if="jobFor(model.id).state.value === 'failed'" class="row-pull-err">
+                            <strong>{{ jobFor(model.id).error.value?.code }}</strong>:
+                            {{ jobFor(model.id).error.value?.message }}
+                          </span>
+                          <template v-else>
+                            <span>{{ jobFor(model.id).pct.value ?? 0 }}%</span>
+                            <span v-if="jobFor(model.id).total.value">
+                              · {{ fmtBytes(jobFor(model.id).downloaded.value) }} / {{ fmtBytes(jobFor(model.id).total.value) }}
+                            </span>
+                            <span v-if="jobFor(model.id).speedBps.value">· {{ fmtSpeed(jobFor(model.id).speedBps.value) }}</span>
+                            <span v-if="jobFor(model.id).etaS.value">· {{ fmtEta(jobFor(model.id).etaS.value) }}</span>
+                            <button
+                              v-if="jobFor(model.id).inFlight.value"
+                              type="button"
+                              class="row-pull-cancel"
+                              @click="cancelPull(model.id)"
+                              :aria-label="`Cancel download for ${model.name ?? model.id}`"
+                            >Cancel</button>
+                          </template>
+                        </div>
+                      </div>
                     </div>
                   </td>
                   <td class="mono-cell">{{ fmtSize(model) }}</td>
@@ -559,6 +655,46 @@ const QUANTS = ['Q4_K_M', 'Q5_K_M', 'Q8_0', 'F16', 'BF16']
 .model-name { font-weight: 500; color: var(--color-fg); }
 .model-id   { font-family: var(--font-mono); font-size: 10.5px; color: var(--color-fg-faint); }
 .mono-cell  { font-family: var(--font-mono); font-size: 11.5px; }
+
+/* Inline pull progress (Team I gap #3) */
+.row-pull { display: flex; flex-direction: column; gap: 4px; margin-top: 4px; }
+.row-pull-bar {
+  position: relative;
+  width: 100%;
+  max-width: 320px;
+  height: 4px;
+  background: var(--color-surface-3);
+  border-radius: 4px;
+  overflow: hidden;
+}
+.row-pull-fill {
+  height: 100%;
+  background: var(--color-accent);
+  border-radius: 4px;
+  transition: width 0.3s ease;
+}
+.row-pull-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10.5px;
+  color: var(--color-fg-faint);
+  flex-wrap: wrap;
+}
+.row-pull-cancel {
+  margin-left: auto;
+  padding: 1px 8px;
+  border-radius: 4px;
+  border: 1px solid color-mix(in oklch, var(--color-danger) 30%, transparent);
+  background: transparent;
+  color: var(--color-danger);
+  font-size: 10.5px;
+  cursor: pointer;
+  font-family: inherit;
+}
+.row-pull-cancel:hover { background: color-mix(in oklch, var(--color-danger) 10%, transparent); }
+.row-pull-err { color: var(--color-danger); }
+.row-pull-err strong { font-family: var(--font-mono); }
 
 /* Slots cell */
 .slots-cell { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }

@@ -7,7 +7,7 @@
  * with hal0's CSS-variable design tokens — no Tailwind utility soup so the
  * component reads cleanly and respects the global theme.
  */
-import { computed } from 'vue'
+import { computed, ref, watch } from 'vue'
 
 const props = defineProps({
   slot: { type: Object, required: true },
@@ -25,6 +25,24 @@ defineEmits(['action', 'select-model', 'logs', 'edit', 'delete'])
 // but never deleted — SlotManager.delete() raises on them and the UI
 // shouldn't offer the affordance.
 const BUILTIN_SLOTS = new Set(['primary', 'embed', 'stt', 'tts'])
+
+// Brief flash on lifecycle state transition. Driven by SSE updates from
+// Slots.vue's per-slot state stream — the parent updates `slot.status`
+// on every transition, so we just watch that field. Respects
+// prefers-reduced-motion.
+const transitionFlash = ref(false)
+let flashTimer = null
+const reducedMotion = typeof window !== 'undefined'
+  && window.matchMedia
+  && window.matchMedia('(prefers-reduced-motion: reduce)').matches
+
+watch(() => props.slot.status, (next, prev) => {
+  if (!next || next === prev) return
+  if (reducedMotion) return
+  transitionFlash.value = true
+  if (flashTimer) clearTimeout(flashTimer)
+  flashTimer = setTimeout(() => { transitionFlash.value = false }, 700)
+})
 
 const m = computed(() => props.metrics || {})
 const isBuiltin = computed(() => BUILTIN_SLOTS.has(props.slot.name))
@@ -137,7 +155,7 @@ const sparkSvg = computed(() => {
 </script>
 
 <template>
-  <div class="slot-card" :class="{ 'is-running': running, 'is-busy': busy, [`sc-state-${dotState}`]: true }">
+  <div class="slot-card" :class="{ 'is-running': running, 'is-busy': busy, 'sc-flash': transitionFlash, [`sc-state-${dotState}`]: true }">
     <!-- Header -->
     <div class="sc-head">
       <span class="sc-dot" />
@@ -272,6 +290,23 @@ const sparkSvg = computed(() => {
   flex-shrink: 0;
 }
 .sc-state-live .sc-dot   { background: var(--color-success); box-shadow: 0 0 0 4px color-mix(in oklch, var(--color-success), transparent 80%); animation: dot-pulse 1.4s ease-in-out infinite; }
+
+/* SSE-driven state-transition flash. Brief border highlight + dot pop so
+   the user sees instant feedback on a transition without the noise of a
+   full re-render. Reduced-motion users get nothing (gated in script). */
+.slot-card.sc-flash { animation: sc-flash 0.7s ease-out; }
+.slot-card.sc-flash .sc-dot { animation: sc-flash-dot 0.7s ease-out; }
+@keyframes sc-flash {
+  0%   { box-shadow: 0 0 0 2px color-mix(in oklch, var(--color-accent), transparent 60%); }
+  100% { box-shadow: 0 0 0 0 transparent; }
+}
+@keyframes sc-flash-dot {
+  0%   { transform: scale(1.6); }
+  100% { transform: scale(1); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .slot-card.sc-flash, .slot-card.sc-flash .sc-dot { animation: none; }
+}
 .sc-state-idle .sc-dot   { background: var(--color-accent); }
 .sc-state-loading .sc-dot { background: var(--color-warning); animation: dot-pulse 1.4s ease-in-out infinite; }
 .sc-state-error .sc-dot  { background: var(--color-danger); }

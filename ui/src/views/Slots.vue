@@ -296,9 +296,83 @@ function handleKey(e) {
   }
 }
 
+// ── Per-slot SSE state subscription ──────────────────────────────────
+//
+// Wires /api/slots/{name}/state/stream so lifecycle transitions surface
+// in <1s instead of waiting for the next 5s /api/status poll. The poll
+// stays as a safety net — a missed event during reconnect still gets
+// reconciled on the next tick.
+//
+// `liveStates` is a name → latest-payload map; the augmented `slots`
+// computed prefers it over the polled snapshot's `status` field. Stream
+// teardown happens on unmount and when a slot disappears from the
+// configured list (e.g. delete).
+const liveStates = ref({})  // { [slotName]: { state, port, model_id, updated_at } }
+const liveStreams = new Map()  // name → EventSource
+
+function openSlotStream(name) {
+  if (liveStreams.has(name)) return
+  let es
+  try {
+    es = new EventSource(`/api/slots/${encodeURIComponent(name)}/state/stream`)
+  } catch {
+    return
+  }
+  const onFrame = (evt) => {
+    try {
+      const payload = JSON.parse(evt.data)
+      liveStates.value = { ...liveStates.value, [name]: payload }
+    } catch { /* ignore malformed frame */ }
+  }
+  es.addEventListener('state', onFrame)
+  es.onmessage = onFrame  // proxies/middleware that strip event names
+  es.onerror = () => {
+    // EventSource auto-reconnects; the 5s poll covers the gap. We don't
+    // close here — closing on every transient error breaks the reconnect.
+  }
+  liveStreams.set(name, es)
+}
+
+function closeSlotStream(name) {
+  const es = liveStreams.get(name)
+  if (es) {
+    es.close()
+    liveStreams.delete(name)
+  }
+  // Drop the stale live state so the polled snapshot wins on reattach.
+  if (liveStates.value[name]) {
+    const next = { ...liveStates.value }
+    delete next[name]
+    liveStates.value = next
+  }
+}
+
+function reconcileSlotStreams() {
+  const wanted = new Set(system.slots
+    .filter((s) => s._synthetic !== true)  // synthetic upstreams have no SSE
+    .map((s) => s.name))
+  // Open new
+  for (const name of wanted) openSlotStream(name)
+  // Close removed
+  for (const name of Array.from(liveStreams.keys())) {
+    if (!wanted.has(name)) closeSlotStream(name)
+  }
+}
+
+watch(() => system.slots.map((s) => s.name).join(','), reconcileSlotStreams, { immediate: false })
+
 // ── Augmented slots list (adds _selectedModel for load UI) ────────────
+//
+// Overlays the SSE-driven `liveStates[name].state` onto the polled
+// snapshot's `status` field. Without this, transitions only appear on
+// the next 5s poll tick; with it, the SlotCard re-renders within ~1
+// network RTT of a state machine transition.
 const slots = computed(() =>
-  system.slots.map((s) => ({ ...s, _selectedModel: s._selectedModel ?? '' }))
+  system.slots.map((s) => {
+    const live = liveStates.value[s.name]
+    const status = live?.state ?? s.status
+    return { ...s, status, _selectedModel: s._selectedModel ?? '' }
+  })
 )
 
 // Open detail panel if navigated to /slots/:name
@@ -312,11 +386,15 @@ watch(() => route.params.name, (name) => {
 onMounted(async () => {
   window.addEventListener('keydown', handleKey)
   await Promise.all([loadModels(), loadHardware()])
+  // Open per-slot SSE streams for whatever the polled snapshot already
+  // shows. The watcher takes over for subsequent slot list deltas.
+  reconcileSlotStreams()
 })
 
 onUnmounted(() => {
   window.removeEventListener('keydown', handleKey)
   if (logEs) logEs.close()
+  for (const name of Array.from(liveStreams.keys())) closeSlotStream(name)
 })
 
 // ── Display helpers ────────────────────────────────────────────────────
