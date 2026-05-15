@@ -1,0 +1,23 @@
+# hal0 image-generation slot — ComfyUI + Stable Diffusion family
+#
+# Lazy-load policy: this slot is NOT enabled or auto-started by the
+# installer. It activates the first time:
+#   1. The FirstRun wizard's "Add image gen?" optional step kicks off
+#      ``POST /api/install/pick-default {model_id, slot:"img"}``, which
+#      drops a model_id into ``[model].default`` here and requests a
+#      slot start, OR
+#   2. The Settings UI flips the "Enable image gen" toggle, OR
+#   3. An operator manually runs ``hal0 slot load img --model sdxl-turbo``.
+#
+# Rationale: image-gen models are 6+ GB (SDXL Turbo) to 24 GB
+# (Flux Schnell). Booting a slot for them on every fresh install would
+# waste VRAM/RAM on hosts that never want image gen. The lazy-load
+# trigger keeps the v1 default install lean.
+
+name = "img"
+provider = "comfyui"
+port = 8186
+backend = "rocm"
+
+[model]
+default = "sdxl-turbo"

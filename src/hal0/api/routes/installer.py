@@ -255,22 +255,36 @@ def _ensure_registry_entry(registry: Any, model_id: str) -> Model:
     # Provisional path: the pull will overwrite this on success. We need
     # *some* string here because ``Model.path`` is required and TOML
     # can't hold None.
-    provisional = paths.models_dir() / curated.id / curated.hf_file
+    if curated.comfyui_subdir:
+        # ComfyUI assets land in the ComfyUI models tree (matches what
+        # registry.pull writes on completion). Mirror that layout here so
+        # the provisional path is correct from the very first state-poll.
+        provisional = (
+            paths.var_lib() / "comfyui" / "models" / curated.comfyui_subdir / curated.hf_file
+        )
+    else:
+        provisional = paths.models_dir() / curated.id / curated.hf_file
+    capabilities = [curated.capability] if curated.capability else ["chat"]
+    extra_meta: dict[str, Any] = {
+        "license_url": curated.license_url,
+        "context_length": curated.context_length,
+        "family": curated.family,
+    }
+    if curated.model_class:
+        extra_meta["model_class"] = curated.model_class
+    if curated.comfyui_subdir:
+        extra_meta["comfyui_subdir"] = curated.comfyui_subdir
     entry = Model(
         id=curated.id,
         name=curated.display_name,
         path=str(provisional),
         size_bytes=0,
         license=curated.license,
-        capabilities=["chat"],
+        capabilities=capabilities,
         hf_repo=curated.hf_repo,
         hf_filename=curated.hf_file,
         tags=["curated", *curated.tags],
-        metadata={
-            "license_url": curated.license_url,
-            "context_length": curated.context_length,
-            "family": curated.family,
-        },
+        metadata=extra_meta,
     )
     try:
         registry.add(entry)
@@ -309,9 +323,17 @@ def _assign_to_slot(slot: str, model_id: str) -> Path:
             ) from exc
 
     data.setdefault("name", slot)
-    data.setdefault("port", 8081 if slot == "primary" else 8080 + abs(hash(slot)) % 100)
-    data.setdefault("backend", "vulkan")
-    data.setdefault("provider", "llama-server")
+    # Built-in slot port + provider defaults. The 'img' slot is the
+    # image-generation lane (ComfyUI, ROCm-first); everything else
+    # remains llama-server / Vulkan.
+    if slot == "img":
+        data.setdefault("port", 8186)
+        data.setdefault("backend", "rocm")
+        data.setdefault("provider", "comfyui")
+    else:
+        data.setdefault("port", 8081 if slot == "primary" else 8080 + abs(hash(slot)) % 100)
+        data.setdefault("backend", "vulkan")
+        data.setdefault("provider", "llama-server")
     model_section = data.get("model")
     if not isinstance(model_section, dict):
         model_section = {}
@@ -396,6 +418,7 @@ async def pick_default(
             hf_file=curated.hf_file,
             registry=registry,
             hf_token=hf_token,
+            comfyui_subdir=curated.comfyui_subdir or None,
         )
 
     return {

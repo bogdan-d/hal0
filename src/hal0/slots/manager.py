@@ -132,7 +132,7 @@ class SlotManager:
       3. Pushed onto in-memory async queues for any state_stream() subscribers.
     """
 
-    BUILTIN_SLOTS: tuple[str, ...] = ("primary", "embed", "stt", "tts")
+    BUILTIN_SLOTS: tuple[str, ...] = ("primary", "embed", "stt", "tts", "img")
 
     def __init__(self) -> None:
         # Per-slot locks to prevent concurrent load/unload/restart races.
@@ -986,7 +986,10 @@ def _provider_health_strategy(provider: str) -> str:
         and vLLM, both of which advertise models before inference works.
     """
     p = provider.lower()
-    if p in ("llama-server", "llama_server", "llamacpp", "kokoro"):
+    if p in ("llama-server", "llama_server", "llamacpp", "kokoro", "comfyui"):
+        # comfyui's /system_stats is the health surface; the provider
+        # health() method already validates it. No chat sentinel applies
+        # (image-gen models are too expensive to probe per readiness).
         return "health"
     if p in ("moonshine",):
         return "health_with_model_loaded"

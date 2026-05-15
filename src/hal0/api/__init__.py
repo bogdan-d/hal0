@@ -26,6 +26,7 @@ from hal0.api.routes import (
 from hal0.api.routes import (
     hardware,
     health,
+    images,
     installer,
     logs,
     models,
@@ -344,6 +345,13 @@ def create_app() -> FastAPI:
     # bypass to its narrow allowlist.
     app.include_router(health.router, prefix="/api", tags=["health"])
     app.include_router(config_routes.router, prefix="/api/config", tags=["config"])
+
+    # Image cache — generated PNGs from /v1/images/generations.  Admin
+    # auth gate: cached PNGs live at predictable /api/images/cache/<uuid>
+    # URLs and could leak prompts via filename if exposed publicly.
+    app.include_router(
+        images.router, prefix="/api/images", tags=["images"], dependencies=_admin_auth
+    )
 
     _mount_dashboard(app)
 

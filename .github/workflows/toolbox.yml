@@ -59,6 +59,12 @@ jobs:
             # source. Slow build (~20-30 min). Marked optional — failure
             # does not fail the workflow when triggered with the default
             # input set (continue-on-error below).
+          - image: comfyui
+            dockerfile: packaging/toolbox/comfyui.Dockerfile
+            # ComfyUI on ROCm: ~22GB rocm/dev base + ~3-4GB pip install
+            # for PyTorch ROCm + ComfyUI requirements. Heavy build; the
+            # 60-min budget below covers it. NOT optional — image gen
+            # is a v1 first-class feature.
 
     steps:
       - name: Filter images
@@ -79,9 +85,11 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Free up runner disk
-        if: steps.filter.outputs.build == 'true' && matrix.image == 'rocm'
+        if: steps.filter.outputs.build == 'true' && (matrix.image == 'rocm' || matrix.image == 'comfyui')
         run: |
           # ROCm base + build artefacts blow past the default 14GB free.
+          # ComfyUI shares the same rocm/dev base + adds a ~4GB pip install,
+          # so it gets the same disk-cleanup treatment.
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
                       /opt/hostedtoolcache/CodeQL || true
           docker image prune -af || true
@@ -117,7 +125,7 @@ jobs:
         if: steps.filter.outputs.build == 'true'
         id: build
         continue-on-error: ${{ matrix.optional == 'true' }}
-        timeout-minutes: ${{ matrix.image == 'flm' && 60 || (matrix.image == 'rocm' && 120 || 30) }}
+        timeout-minutes: ${{ matrix.image == 'flm' && 60 || (matrix.image == 'rocm' && 120 || (matrix.image == 'comfyui' && 60 || 30)) }}
         uses: docker/build-push-action@v6
         with:
           context: .

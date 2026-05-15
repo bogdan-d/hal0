@@ -1,0 +1,81 @@
+{
+  "_meta": {
+    "model_class": "sdxl-turbo",
+    "description": "SDXL Turbo (1-4 steps), Euler ancestral + sgm_uniform, single positive prompt, no negative. Tuned for ~1 image / 3-30s on Strix Halo (ROCm Vulkan path).",
+    "params": {
+      "ckpt_name": "node:4.inputs.ckpt_name",
+      "positive_prompt": "node:6.inputs.text",
+      "width": "node:5.inputs.width",
+      "height": "node:5.inputs.height",
+      "batch_size": "node:5.inputs.batch_size",
+      "seed": "node:3.inputs.seed",
+      "steps": "node:3.inputs.steps",
+      "cfg": "node:3.inputs.cfg",
+      "filename_prefix": "node:9.inputs.filename_prefix"
+    },
+    "defaults": {
+      "steps": 4,
+      "cfg": 1.0,
+      "sampler_name": "euler_ancestral",
+      "scheduler": "sgm_uniform",
+      "denoise": 1.0
+    }
+  },
+  "3": {
+    "class_type": "KSampler",
+    "inputs": {
+      "seed": 0,
+      "steps": 4,
+      "cfg": 1.0,
+      "sampler_name": "euler_ancestral",
+      "scheduler": "sgm_uniform",
+      "denoise": 1.0,
+      "model": ["4", 0],
+      "positive": ["6", 0],
+      "negative": ["7", 0],
+      "latent_image": ["5", 0]
+    }
+  },
+  "4": {
+    "class_type": "CheckpointLoaderSimple",
+    "inputs": {
+      "ckpt_name": "sd_xl_turbo_1.0_fp16.safetensors"
+    }
+  },
+  "5": {
+    "class_type": "EmptyLatentImage",
+    "inputs": {
+      "width": 1024,
+      "height": 1024,
+      "batch_size": 1
+    }
+  },
+  "6": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "text": "a placeholder prompt",
+      "clip": ["4", 1]
+    }
+  },
+  "7": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "text": "",
+      "clip": ["4", 1]
+    }
+  },
+  "8": {
+    "class_type": "VAEDecode",
+    "inputs": {
+      "samples": ["3", 0],
+      "vae": ["4", 2]
+    }
+  },
+  "9": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "filename_prefix": "hal0",
+      "images": ["8", 0]
+    }
+  }
+}
