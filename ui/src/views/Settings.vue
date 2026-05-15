@@ -1,351 +1,346 @@
 <script setup>
 /**
- * Settings.vue
+ * Settings.vue — typed config editor backed by /api/settings.
  *
- * Design decisions:
- * - Structured form fields grouped by config section, NOT raw TOML.
- *   Raw text editing is error-prone; structured fields give inline validation.
- * - Diff view before save: shows changed fields so the user sees the impact.
- * - Fields that need a restart show a "restart required" badge inline.
- * - Dangerous actions at the bottom, each requiring a confirm dialog.
- * - Config path visible at the top so the user knows where the file lives.
- * - Phase 0: mock response shape. Phase 1: wire to GET/PUT /api/settings/*.
+ * Backend contract (Team C):
+ *   GET  /api/settings          → { meta, slots, dispatcher, telemetry }
+ *   PUT  /api/settings (partial, deep-merged) → updated config
+ *   POST /api/settings/reload   → re-read hal0.toml into the running process
+ *   GET  /api/settings/schema   → pydantic JSON schema (used to populate
+ *                                 type / description / constraints below)
+ *
+ * The schema lives in src/hal0/config/schema.py — sections:
+ *   - meta.schema_version          int >= 1  (restart on bump)
+ *   - slots.max_slots              int >= 0 (0 = unlimited)
+ *   - slots.port_range_start/end   1024–65535
+ *   - dispatcher.prefetch_timeout_s float > 0
+ *   - dispatcher.prefetch_parallel_cap int >= 1
+ *   - telemetry.enabled            bool
+ *   - telemetry.channel            'stable' | 'nightly'  (restart-required)
+ *
+ * Validation failures from PUT come back as { error: { code:
+ * "config.invalid", details: { "field.path": "msg" }}}. useApi.js's
+ * fetch wrapper surfaces those on the Error.details map so we can render
+ * inline per-field reasons.
  */
 import { ref, computed, reactive, onMounted } from 'vue'
 import { useToastsStore } from '../stores/toasts.js'
-import { useSystemStore } from '../stores/system.js'
 import { api } from '../composables/useApi.js'
 import PageHeader from '../components/PageHeader.vue'
 import Card from '../components/Card.vue'
 import LoadingSkeleton from '../components/LoadingSkeleton.vue'
-import ConfirmDialog from '../components/ConfirmDialog.vue'
 
 const toasts = useToastsStore()
-const system = useSystemStore()
 
-// ── Remote config (loaded from API) ───────────────────────────────────
-const loading  = ref(true)
-const saving   = ref(false)
-const error    = ref(null)
+const loading = ref(true)
+const saving  = ref(false)
+const error   = ref(null)
 
-// Original values (for diff)
+// Original snapshot (for diff + revert) and live form values.
 const orig = ref({})
-
-// Current form values
 const form = reactive({
-  // [general]
-  instance_name:  '',
-  log_level:      'info',
-
-  // [api]
-  port:           8080,
-  cors_origins:   '',
-
-  // [dispatcher]
-  cold_boot_grace_s:    180,
-  prefetch_timeout_s:   8,
-  cache_ttl_s:          300,
-  parallel_prefetch_cap: 4,
-
-  // [update]
-  channel: 'stable',
-
-  // [telemetry]
-  telemetry_enabled: false,
-
-  // [toolbox]
-  toolbox_vulkan_tag: 'v1',
-  toolbox_rocm_tag:   'v1',
-  toolbox_flm_tag:    'v1',
+  meta:       { schema_version: 1 },
+  slots:      { max_slots: 0, port_range_start: 8081, port_range_end: 8099 },
+  dispatcher: { prefetch_timeout_s: 8.0, prefetch_parallel_cap: 4 },
+  telemetry:  { enabled: false, channel: 'stable' },
 })
 
-const configPath = ref('/etc/hal0/hal0.toml')
-const hal0HomeOverride = ref(null)
+// Per-field error map keyed by pydantic field path (e.g.
+// "dispatcher.prefetch_timeout_s"). Populated when PUT returns
+// code: "config.invalid".
+const fieldErrors = ref({})
 
-// ── Diff ──────────────────────────────────────────────────────────────
-const changedFields = computed(() => {
-  const changed = []
-  for (const key of Object.keys(form)) {
-    if (String(form[key]) !== String(orig.value[key] ?? '')) {
-      changed.push({ key, from: orig.value[key], to: form[key] })
-    }
-  }
-  return changed
-})
+// Keys (as dot-paths) whose change requires an API restart to take effect.
+const RESTART_REQUIRED = new Set([
+  'telemetry.channel',
+  'meta.schema_version',
+])
 
-const restartRequiredFields = new Set(['port', 'cors_origins', 'log_level', 'channel'])
+// Show a local "restart required" banner after a successful save when
+// any restart-required key actually changed. Resets on next save.
+const pendingRestart = ref(false)
+const restartedKeys  = ref([])
 
-function needsRestart(key) {
-  return restartRequiredFields.has(key)
-}
-
-// ── Field metadata ────────────────────────────────────────────────────
-const SECTIONS = [
-  {
-    title: 'General',
-    fields: [
-      { key: 'instance_name',  label: 'Instance name', type: 'text',   hint: 'Shown in dashboard and OpenWebUI.' },
-      { key: 'log_level',      label: 'Log level',     type: 'select', options: ['debug', 'info', 'warn', 'error'], restart: true },
-    ],
-  },
-  {
-    title: 'API',
-    fields: [
-      { key: 'port',         label: 'Listen port',   type: 'number', hint: 'Default: 8080. Requires restart.', restart: true },
-      { key: 'cors_origins', label: 'CORS origins',  type: 'text',   hint: 'Comma-separated. * for all. Requires restart.', restart: true },
-    ],
-  },
-  {
-    title: 'Dispatcher',
-    fields: [
-      { key: 'cold_boot_grace_s',     label: 'Cold-boot grace (s)',      type: 'number', hint: 'Max time to wait for slot to become ready. Default: 180.' },
-      { key: 'prefetch_timeout_s',    label: 'Prefetch timeout (s)',      type: 'number', hint: 'Default: 8.' },
-      { key: 'cache_ttl_s',           label: 'Cache TTL (s)',             type: 'number', hint: 'Default: 300.' },
-      { key: 'parallel_prefetch_cap', label: 'Parallel prefetch cap',     type: 'number', hint: 'Default: 4.' },
-    ],
-  },
-  {
-    title: 'Update channel',
-    fields: [
-      { key: 'channel', label: 'Channel', type: 'select', options: ['stable', 'nightly'], restart: true,
-        hint: 'stable = tagged releases; nightly = every main push. Change takes effect on next update check.' },
-    ],
-  },
-  {
-    title: 'Toolbox images',
-    fields: [
-      { key: 'toolbox_vulkan_tag', label: 'Vulkan tag', type: 'text', hint: 'Default: v1. Override pinned toolbox image tag.' },
-      { key: 'toolbox_rocm_tag',   label: 'ROCm tag',   type: 'text' },
-      { key: 'toolbox_flm_tag',    label: 'FLM tag',    type: 'text' },
-    ],
-  },
-  {
-    title: 'Telemetry',
-    fields: [
-      { key: 'telemetry_enabled', label: 'Enable telemetry', type: 'checkbox',
-        hint: 'Off by default. Sends anonymous ping (hardware class, version, slot count). No model names or config content.' },
-    ],
-  },
-]
-
-// ── Loaders ────────────────────────────────────────────────────────────
-async function loadSettings() {
+// ── load + apply ─────────────────────────────────────────────────────
+async function load() {
   loading.value = true
   error.value = null
   try {
     const data = await api('/api/settings')
-    // Flatten the nested config into form fields
-    applyData(data)
-    orig.value = { ...form }
-    configPath.value = data._meta?.config_path ?? '/etc/hal0/hal0.toml'
-    hal0HomeOverride.value = data._meta?.hal0_home ?? null
+    applyServerData(data)
+    snapshotOrig()
   } catch (e) {
-    // Phase 0: use defaults if API isn't wired yet
-    orig.value = { ...form }
-    if (e.message.includes('501') || e.message.includes('404')) {
-      // Expected in Phase 0 — silently use defaults
-    } else {
-      error.value = e.message
-    }
+    error.value = e.message
   } finally {
     loading.value = false
   }
 }
 
-function applyData(data) {
-  const g = data.general ?? {}
-  const a = data.api ?? {}
-  const d = data.dispatcher ?? {}
-  const u = data.update ?? {}
-  const t = data.telemetry ?? {}
-  const tb = data.toolbox ?? {}
-
-  if (g.instance_name  != null) form.instance_name  = g.instance_name
-  if (g.log_level      != null) form.log_level      = g.log_level
-  if (a.port           != null) form.port           = a.port
-  if (a.cors_origins   != null) form.cors_origins   = a.cors_origins
-  if (d.cold_boot_grace_s     != null) form.cold_boot_grace_s     = d.cold_boot_grace_s
-  if (d.prefetch_timeout_s    != null) form.prefetch_timeout_s    = d.prefetch_timeout_s
-  if (d.cache_ttl_s           != null) form.cache_ttl_s           = d.cache_ttl_s
-  if (d.parallel_prefetch_cap != null) form.parallel_prefetch_cap = d.parallel_prefetch_cap
-  if (u.channel        != null) form.channel        = u.channel
-  if (t.enabled        != null) form.telemetry_enabled = t.enabled
-  if (tb.vulkan_tag    != null) form.toolbox_vulkan_tag = tb.vulkan_tag
-  if (tb.rocm_tag      != null) form.toolbox_rocm_tag   = tb.rocm_tag
-  if (tb.flm_tag       != null) form.toolbox_flm_tag    = tb.flm_tag
+function applyServerData(data) {
+  // Deep-copy the four known sections; preserve unknown keys via
+  // `extra="allow"` round-trip by stashing them on the section objects.
+  const sections = ['meta', 'slots', 'dispatcher', 'telemetry']
+  for (const key of sections) {
+    const src = data?.[key] ?? {}
+    form[key] = { ...form[key], ...src }
+  }
 }
 
-// ── Validation ────────────────────────────────────────────────────────
-const fieldErrors = ref({})
-
-function validate() {
-  const errs = {}
-  if (form.port < 1024 || form.port > 65535) errs.port = 'Must be 1024–65535'
-  if (form.cold_boot_grace_s < 10)           errs.cold_boot_grace_s = 'Must be ≥ 10'
-  if (form.prefetch_timeout_s < 1)           errs.prefetch_timeout_s = 'Must be ≥ 1'
-  if (form.cache_ttl_s < 0)                  errs.cache_ttl_s = 'Must be ≥ 0'
-  if (form.parallel_prefetch_cap < 1)        errs.parallel_prefetch_cap = 'Must be ≥ 1'
-  fieldErrors.value = errs
-  return Object.keys(errs).length === 0
+function snapshotOrig() {
+  orig.value = JSON.parse(JSON.stringify({
+    meta: form.meta,
+    slots: form.slots,
+    dispatcher: form.dispatcher,
+    telemetry: form.telemetry,
+  }))
 }
 
-// ── Save ──────────────────────────────────────────────────────────────
-const showDiff = ref(false)
+// ── diff helpers ─────────────────────────────────────────────────────
+function valueChanged(section, key) {
+  return String(form[section][key]) !== String(orig.value?.[section]?.[key] ?? '')
+}
+
+const changedFields = computed(() => {
+  const out = []
+  for (const section of ['meta', 'slots', 'dispatcher', 'telemetry']) {
+    const before = orig.value?.[section] ?? {}
+    const after  = form[section] ?? {}
+    for (const key of Object.keys(after)) {
+      const a = before[key]
+      const b = after[key]
+      if (String(a ?? '') !== String(b ?? '')) {
+        out.push({ path: `${section}.${key}`, from: a, to: b })
+      }
+    }
+  }
+  return out
+})
+
+// ── save ─────────────────────────────────────────────────────────────
+function buildPatch() {
+  // Send only the dotted paths that actually changed, deep-merge-safe.
+  const patch = {}
+  for (const ch of changedFields.value) {
+    const [section, key] = ch.path.split('.')
+    if (!patch[section]) patch[section] = {}
+    patch[section][key] = ch.to
+  }
+  return patch
+}
 
 async function save() {
-  if (!validate()) return
-  showDiff.value = false
+  if (changedFields.value.length === 0) return
+  fieldErrors.value = {}
   saving.value = true
   try {
-    await api('/api/settings', {
-      method: 'PUT',
-      body: JSON.stringify({
-        general:    { instance_name: form.instance_name, log_level: form.log_level },
-        api:        { port: form.port, cors_origins: form.cors_origins },
-        dispatcher: {
-          cold_boot_grace_s:     form.cold_boot_grace_s,
-          prefetch_timeout_s:    form.prefetch_timeout_s,
-          cache_ttl_s:           form.cache_ttl_s,
-          parallel_prefetch_cap: form.parallel_prefetch_cap,
-        },
-        update:    { channel: form.channel },
-        telemetry: { enabled: form.telemetry_enabled },
-        toolbox:   { vulkan_tag: form.toolbox_vulkan_tag, rocm_tag: form.toolbox_rocm_tag, flm_tag: form.toolbox_flm_tag },
-      }),
-    })
-    orig.value = { ...form }
+    const body = JSON.stringify(buildPatch())
+    const updated = await api('/api/settings', { method: 'PUT', body })
+    const changedRestartKeys = changedFields.value
+      .map((c) => c.path)
+      .filter((p) => RESTART_REQUIRED.has(p))
+    applyServerData(updated)
+    snapshotOrig()
     toasts.success('Settings saved')
-    if (changedFields.value.some((f) => restartRequiredFields.has(f.key))) {
-      toasts.info('Some changes require an API restart to take effect.')
+    if (changedRestartKeys.length > 0) {
+      pendingRestart.value = true
+      restartedKeys.value  = changedRestartKeys
     }
-    await system.fetchStatus()
   } catch (e) {
-    toasts.error(e.message)
+    if (e.code === 'config.invalid' && e.details && typeof e.details === 'object') {
+      // Render per-field inline error messages exactly where the form
+      // says "field-err" today. Pydantic returns paths like
+      // "dispatcher.prefetch_timeout_s" — match those verbatim.
+      fieldErrors.value = e.details
+      toasts.error('Settings did not validate — see inline errors')
+    } else {
+      toasts.error(e.message)
+    }
   } finally {
     saving.value = false
   }
 }
 
-function revert() {
-  Object.assign(form, orig.value)
-  fieldErrors.value = {}
-  showDiff.value = false
-}
-
-// ── Dangerous actions ─────────────────────────────────────────────────
-const confirmAction  = ref(null)  // 'reset-defaults' | 're-probe' | 'clear-cache'
-const actionLoading  = ref(false)
-
-const DANGER_ACTIONS = [
-  { id: 'reset-defaults', label: 'Reset to defaults', desc: 'Overwrites /etc/hal0/hal0.toml with default values. Current config is lost.', danger: true },
-  { id: 're-probe',       label: 'Re-run hardware probe', desc: 'Runs hal0 probe and updates hardware.json. Safe to re-run.', danger: false },
-  { id: 'clear-cache',    label: 'Clear dispatcher cache', desc: 'Clears cold-start model cache and SSE state. In-flight requests complete.', danger: false },
-]
-
-async function runDangerAction() {
-  const id = confirmAction.value
-  confirmAction.value = null
-  actionLoading.value = true
+async function reload() {
+  // POST /api/settings/reload re-reads hal0.toml from disk into the
+  // running process — useful after an out-of-band editor change.
   try {
-    const endpoints = {
-      'reset-defaults': ['/api/settings/reset', 'POST'],
-      're-probe':        ['/api/hardware/probe', 'POST'],
-      'clear-cache':     ['/api/dispatcher/cache', 'DELETE'],
-    }
-    const [path, method] = endpoints[id]
-    await api(path, { method })
-    toasts.success(`${DANGER_ACTIONS.find((a) => a.id === id)?.label} done`)
-    if (id === 'reset-defaults') await loadSettings()
-    if (id === 're-probe') await system.fetchStatus()
+    const data = await api('/api/settings/reload', { method: 'POST' })
+    applyServerData(data)
+    snapshotOrig()
+    fieldErrors.value = {}
+    toasts.success('Settings reloaded from disk')
   } catch (e) {
     toasts.error(e.message)
-  } finally {
-    actionLoading.value = false
   }
 }
 
-onMounted(loadSettings)
+function revert() {
+  applyServerData(orig.value)
+  fieldErrors.value = {}
+}
+
+function dismissRestart() {
+  pendingRestart.value = false
+  restartedKeys.value  = []
+}
+
+// ── field declarations (used by the template) ───────────────────────
+// Built off the pydantic schema in src/hal0/config/schema.py. The
+// schema endpoint /api/settings/schema is available if we want to be
+// fully data-driven later; keeping these explicit keeps the form
+// human-readable and lets us write per-field hints. extra keys
+// preserved server-side via `extra="allow"` will still round-trip even
+// though they don't render here.
+const SECTIONS = [
+  {
+    id: 'meta',
+    title: 'Meta',
+    fields: [
+      {
+        key: 'schema_version',
+        label: 'Schema version',
+        type: 'number',
+        hint: 'Bumped by config migrations. Restart required when manually edited.',
+      },
+    ],
+  },
+  {
+    id: 'slots',
+    title: 'Slots',
+    fields: [
+      { key: 'max_slots', label: 'Max concurrent slots', type: 'number',
+        hint: '0 means unlimited.' },
+      { key: 'port_range_start', label: 'Port range start', type: 'number',
+        hint: 'First port available to slots (default 8081).' },
+      { key: 'port_range_end', label: 'Port range end', type: 'number',
+        hint: 'Last port (inclusive, default 8099).' },
+    ],
+  },
+  {
+    id: 'dispatcher',
+    title: 'Dispatcher',
+    fields: [
+      { key: 'prefetch_timeout_s', label: 'Prefetch timeout (s)', type: 'number', step: '0.5',
+        hint: 'Cold-cache prefetch deadline. Default 8s (PLAN §5 Tier 2).' },
+      { key: 'prefetch_parallel_cap', label: 'Prefetch parallel cap', type: 'number',
+        hint: 'Max concurrent upstream prefetches. Default 4.' },
+    ],
+  },
+  {
+    id: 'telemetry',
+    title: 'Telemetry',
+    fields: [
+      { key: 'enabled', label: 'Telemetry enabled', type: 'checkbox',
+        hint: 'Off by default — anonymous opt-in ping (PLAN §14).' },
+      { key: 'channel', label: 'Update channel', type: 'select',
+        options: ['stable', 'nightly'],
+        hint: 'Stable = tagged releases; nightly = every main push. Restart-required.' },
+    ],
+  },
+]
+
+onMounted(load)
 </script>
 
 <template>
   <div class="settings-page">
-    <PageHeader title="Settings" subtitle="Configure hal0 runtime behaviour">
+    <PageHeader title="Settings" subtitle="hal0.toml runtime configuration">
       <template #actions>
-        <span v-if="changedFields.length > 0" class="change-count">{{ changedFields.length }} unsaved change{{ changedFields.length !== 1 ? 's' : '' }}</span>
-        <button class="btn-ghost" type="button" @click="revert" :disabled="saving || changedFields.length === 0">Revert</button>
-        <button class="btn-primary" type="button" @click="showDiff = true" :disabled="saving || changedFields.length === 0">
+        <span v-if="changedFields.length > 0" class="change-count">
+          {{ changedFields.length }} unsaved change{{ changedFields.length !== 1 ? 's' : '' }}
+        </span>
+        <button class="btn-ghost" type="button" @click="reload" :disabled="saving" title="Re-read /etc/hal0/hal0.toml from disk">
+          Reload from disk
+        </button>
+        <button class="btn-ghost" type="button" @click="revert" :disabled="saving || changedFields.length === 0">
+          Revert
+        </button>
+        <button class="btn-primary" type="button" @click="save" :disabled="saving || changedFields.length === 0">
           <span v-if="saving" class="spinner" aria-hidden="true" />
           {{ saving ? 'Saving…' : 'Save changes' }}
         </button>
       </template>
     </PageHeader>
 
-    <div class="page-body">
-      <!-- Config path -->
-      <div class="config-path-row">
-        <svg width="13" height="13" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" aria-hidden="true">
-          <path stroke-linecap="round" stroke-linejoin="round" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
+    <!-- Restart-required banner (rendered after a successful save when
+         a restart-required key actually changed). Matches the styling
+         of components/RestartBanner.vue so the visual language is
+         consistent — that component is wired to system store updates
+         and stays our home for update-available banners. -->
+    <Transition name="slide-up">
+      <div v-if="pendingRestart" class="restart-banner" role="alert">
+        <svg width="15" height="15" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" aria-hidden="true">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
         </svg>
-        <code class="config-path">{{ configPath }}</code>
-        <span v-if="hal0HomeOverride" class="hal0-home-note">HAL0_HOME={{ hal0HomeOverride }}</span>
+        <span>
+          Restart required for: <strong class="mono">{{ restartedKeys.join(', ') }}</strong>. Slots will keep running across an API restart.
+        </span>
+        <button type="button" class="banner-btn" @click="dismissRestart">Dismiss</button>
       </div>
+    </Transition>
 
+    <div class="page-body">
       <div v-if="error" class="error-banner" role="alert">{{ error }}</div>
 
-      <!-- Form sections -->
       <template v-if="loading">
         <Card v-for="i in 3" :key="i"><LoadingSkeleton :lines="3" /></Card>
       </template>
+
       <template v-else>
-        <Card v-for="section in SECTIONS" :key="section.title">
+        <Card v-for="section in SECTIONS" :key="section.id">
           <h3 class="section-title">{{ section.title }}</h3>
           <div class="fields">
-            <div
-              v-for="field in section.fields"
-              :key="field.key"
-              class="field-row"
-            >
+            <div v-for="field in section.fields" :key="field.key" class="field-row">
               <div class="field-meta">
-                <label :for="'f-' + field.key" class="field-label">
+                <label :for="`f-${section.id}-${field.key}`" class="field-label">
                   {{ field.label }}
-                  <span v-if="field.restart" class="restart-badge" title="Requires API restart">restart</span>
+                  <span v-if="RESTART_REQUIRED.has(`${section.id}.${field.key}`)"
+                        class="restart-badge"
+                        title="Requires API restart">restart</span>
                 </label>
                 <p v-if="field.hint" class="field-hint">{{ field.hint }}</p>
-                <p v-if="fieldErrors[field.key]" class="field-err" role="alert">{{ fieldErrors[field.key] }}</p>
+                <p v-if="fieldErrors[`${section.id}.${field.key}`]" class="field-err" role="alert">
+                  {{ fieldErrors[`${section.id}.${field.key}`] }}
+                </p>
               </div>
               <div class="field-input-wrap">
                 <template v-if="field.type === 'checkbox'">
                   <label class="toggle-label">
                     <input
+                      :id="`f-${section.id}-${field.key}`"
                       type="checkbox"
                       class="toggle-checkbox"
-                      v-model="form[field.key]"
+                      v-model="form[section.id][field.key]"
                     />
                     <span class="toggle-track">
                       <span class="toggle-thumb" />
                     </span>
-                    <span class="toggle-text">{{ form[field.key] ? 'Enabled' : 'Disabled' }}</span>
+                    <span class="toggle-text">{{ form[section.id][field.key] ? 'Enabled' : 'Disabled' }}</span>
                   </label>
                 </template>
                 <template v-else-if="field.type === 'select'">
                   <select
-                    :id="'f-' + field.key"
-                    v-model="form[field.key]"
+                    :id="`f-${section.id}-${field.key}`"
+                    v-model="form[section.id][field.key]"
                     class="field-input"
-                    :class="{ 'field-changed': String(form[field.key]) !== String(orig[field.key] ?? '') }"
+                    :class="{
+                      'field-changed': valueChanged(section.id, field.key),
+                      'field-error':   !!fieldErrors[`${section.id}.${field.key}`],
+                    }"
                   >
                     <option v-for="opt in field.options" :key="opt" :value="opt">{{ opt }}</option>
                   </select>
                 </template>
                 <template v-else>
                   <input
-                    :id="'f-' + field.key"
-                    v-model="form[field.key]"
+                    :id="`f-${section.id}-${field.key}`"
+                    v-model="form[section.id][field.key]"
                     :type="field.type"
+                    :step="field.step"
                     class="field-input"
                     :class="{
-                      'field-changed': String(form[field.key]) !== String(orig[field.key] ?? ''),
-                      'field-error':   !!fieldErrors[field.key],
+                      'field-changed': valueChanged(section.id, field.key),
+                      'field-error':   !!fieldErrors[`${section.id}.${field.key}`],
                     }"
                   />
                 </template>
@@ -353,86 +348,8 @@ onMounted(loadSettings)
             </div>
           </div>
         </Card>
-
-        <!-- Dangerous actions -->
-        <Card>
-          <h3 class="section-title section-title-danger">Dangerous actions</h3>
-          <div class="danger-list">
-            <div v-for="action in DANGER_ACTIONS" :key="action.id" class="danger-row">
-              <div class="danger-info">
-                <span class="danger-label">{{ action.label }}</span>
-                <span class="danger-desc">{{ action.desc }}</span>
-              </div>
-              <button
-                class="btn-action"
-                :class="action.danger ? 'btn-danger' : 'btn-secondary'"
-                type="button"
-                :disabled="actionLoading"
-                @click="confirmAction = action.id"
-              >
-                {{ action.label }}
-              </button>
-            </div>
-          </div>
-        </Card>
       </template>
     </div>
-
-    <!-- Diff modal -->
-    <Teleport to="body">
-      <Transition name="fade">
-        <div v-if="showDiff" class="modal-overlay" @click.self="showDiff = false">
-          <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="diff-title">
-            <div class="modal-header">
-              <h2 id="diff-title" class="modal-title">Review changes ({{ changedFields.length }})</h2>
-              <button class="modal-close" type="button" @click="showDiff = false" aria-label="Close">
-                <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>
-              </button>
-            </div>
-            <div class="modal-body">
-              <table class="diff-table">
-                <thead>
-                  <tr><th>Field</th><th>From</th><th>To</th><th></th></tr>
-                </thead>
-                <tbody>
-                  <tr v-for="ch in changedFields" :key="ch.key">
-                    <td class="mono">{{ ch.key }}</td>
-                    <td class="mono text-muted">{{ String(ch.from ?? '') || '(empty)' }}</td>
-                    <td class="mono text-accent">{{ String(ch.to) }}</td>
-                    <td>
-                      <span v-if="needsRestart(ch.key)" class="restart-badge">restart</span>
-                    </td>
-                  </tr>
-                </tbody>
-              </table>
-              <p v-if="changedFields.some((f) => needsRestart(f.key))" class="restart-notice" role="alert">
-                Some changes require an API restart. Slots will keep running.
-              </p>
-            </div>
-            <div class="modal-footer">
-              <button class="btn-ghost" type="button" @click="showDiff = false" :disabled="saving">Cancel</button>
-              <button class="btn-primary" type="button" @click="save" :disabled="saving">
-                <span v-if="saving" class="spinner" aria-hidden="true" />
-                {{ saving ? 'Saving…' : 'Apply changes' }}
-              </button>
-            </div>
-          </div>
-        </div>
-      </Transition>
-    </Teleport>
-
-    <!-- Danger confirm -->
-    <ConfirmDialog
-      :open="!!confirmAction"
-      :title="DANGER_ACTIONS.find((a) => a.id === confirmAction)?.label ?? ''"
-      :message="DANGER_ACTIONS.find((a) => a.id === confirmAction)?.desc ?? ''"
-      :danger="DANGER_ACTIONS.find((a) => a.id === confirmAction)?.danger ?? false"
-      :confirm-label="DANGER_ACTIONS.find((a) => a.id === confirmAction)?.label ?? 'Confirm'"
-      :loading="actionLoading"
-      @update:open="(v) => { if (!v) confirmAction = null }"
-      @confirm="runDangerAction"
-      @cancel="confirmAction = null"
-    />
   </div>
 </template>
 
@@ -440,14 +357,37 @@ onMounted(loadSettings)
 .settings-page { display: flex; flex-direction: column; min-height: 100%; }
 .page-body     { padding: 20px 24px; display: flex; flex-direction: column; gap: 16px; }
 
-.config-path-row { display: flex; align-items: center; gap: 8px; padding: 8px 0; }
-.config-path { font-family: var(--font-mono); font-size: 12px; color: var(--color-fg-muted); }
-.hal0-home-note { font-family: var(--font-mono); font-size: 11px; color: var(--color-warning); background: color-mix(in oklch, var(--color-warning) 12%, transparent); padding: 2px 6px; border-radius: 4px; }
+.restart-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 24px;
+  background: color-mix(in oklch, var(--color-warning) 14%, var(--color-surface));
+  border-bottom: 1px solid color-mix(in oklch, var(--color-warning) 30%, transparent);
+  color: var(--color-warning);
+  font-size: 13px;
+}
+.banner-btn {
+  margin-left: auto;
+  padding: 4px 12px;
+  border-radius: var(--radius);
+  background: var(--color-warning);
+  color: var(--color-bg);
+  font-size: 12px;
+  font-weight: 600;
+  border: none;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.banner-btn:hover { opacity: 0.9; }
+.slide-up-enter-active { transition: all 0.2s ease; }
+.slide-up-leave-active { transition: all 0.15s ease; }
+.slide-up-enter-from   { opacity: 0; transform: translateY(-100%); }
+.slide-up-leave-to     { opacity: 0; transform: translateY(-100%); }
 
 .error-banner { padding: 10px 16px; border-radius: var(--radius-lg); background: color-mix(in oklch, var(--color-danger) 10%, var(--color-surface)); border: 1px solid color-mix(in oklch, var(--color-danger) 30%, transparent); color: var(--color-danger); font-size: 13px; }
 
 .section-title { font-size: 13px; font-weight: 600; color: var(--color-fg-muted); margin: 0 0 14px; letter-spacing: 0.02em; }
-.section-title-danger { color: var(--color-danger); }
 
 .fields { display: flex; flex-direction: column; gap: 14px; }
 .field-row { display: grid; grid-template-columns: 1fr 240px; align-items: start; gap: 16px; }
@@ -476,7 +416,6 @@ onMounted(loadSettings)
 .field-changed { border-color: color-mix(in oklch, var(--color-accent) 50%, var(--color-border)) !important; }
 .field-error   { border-color: var(--color-danger) !important; }
 
-/* Toggle */
 .toggle-label { display: flex; align-items: center; gap: 10px; cursor: pointer; }
 .toggle-checkbox { display: none; }
 .toggle-track {
@@ -493,35 +432,8 @@ onMounted(loadSettings)
 .toggle-checkbox:checked + .toggle-track .toggle-thumb { transform: translateX(16px); }
 .toggle-text { font-size: 13px; color: var(--color-fg-muted); }
 
-/* Dangerous actions */
-.danger-list { display: flex; flex-direction: column; gap: 10px; }
-.danger-row { display: flex; align-items: center; gap: 16px; padding: 10px 0; border-bottom: 1px solid var(--color-border); }
-.danger-row:last-child { border-bottom: none; padding-bottom: 0; }
-.danger-info { flex: 1; display: flex; flex-direction: column; gap: 2px; }
-.danger-label { font-size: 13px; font-weight: 500; color: var(--color-fg); }
-.danger-desc  { font-size: 12px; color: var(--color-fg-faint); }
-
 .change-count { font-family: var(--font-mono); font-size: 11.5px; color: var(--color-warning); }
-
-/* Diff modal */
-.diff-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
-.diff-table th { padding: 8px 10px; text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--color-fg-faint); font-family: var(--font-mono); border-bottom: 1px solid var(--color-border); }
-.diff-table td { padding: 8px 10px; border-bottom: 1px solid var(--color-border); }
-.diff-table tbody tr:last-child td { border-bottom: none; }
 .mono { font-family: var(--font-mono); }
-.text-muted  { color: var(--color-fg-faint); }
-.text-accent { color: var(--color-accent); }
-.restart-notice { margin-top: 12px; padding: 8px 12px; border-radius: var(--radius); background: color-mix(in oklch, var(--color-warning) 12%, transparent); color: var(--color-warning); font-size: 12.5px; }
-
-/* Shared */
-.modal-overlay { position: fixed; inset: 0; z-index: 200; background: rgba(0,0,0,0.6); backdrop-filter: blur(4px); display: flex; align-items: center; justify-content: center; padding: 16px; }
-.modal-box { background: var(--color-surface); border: 1px solid var(--color-border-hi); border-radius: var(--radius-xl); width: min(540px, 100%); max-height: 90vh; display: flex; flex-direction: column; box-shadow: 0 24px 64px rgba(0,0,0,0.6); overflow: hidden; }
-.modal-header { display: flex; align-items: center; justify-content: space-between; padding: 16px 20px; border-bottom: 1px solid var(--color-border); }
-.modal-title { font-size: 15px; font-weight: 600; color: var(--color-fg); margin: 0; }
-.modal-close { width: 28px; height: 28px; border-radius: var(--radius); background: transparent; border: 1px solid transparent; color: var(--color-fg-faint); cursor: pointer; display: grid; place-items: center; }
-.modal-close:hover { background: var(--color-surface-2); color: var(--color-fg); }
-.modal-body { padding: 20px; overflow-y: auto; display: flex; flex-direction: column; gap: 14px; flex: 1; }
-.modal-footer { padding: 16px 20px; border-top: 1px solid var(--color-border); display: flex; justify-content: flex-end; gap: 8px; }
 
 .btn-primary { display: flex; align-items: center; gap: 6px; padding: 7px 16px; border-radius: var(--radius); background: var(--color-accent); color: var(--color-bg); font-size: 13px; font-weight: 600; border: none; cursor: pointer; }
 .btn-primary:hover:not(:disabled) { opacity: 0.88; }
@@ -529,16 +441,7 @@ onMounted(loadSettings)
 .btn-ghost { padding: 7px 16px; border-radius: var(--radius); border: 1px solid var(--color-border); background: transparent; color: var(--color-fg-muted); font-size: 13px; cursor: pointer; }
 .btn-ghost:hover:not(:disabled) { background: var(--color-surface-2); color: var(--color-fg); }
 .btn-ghost:disabled { opacity: 0.5; cursor: not-allowed; }
-.btn-action { padding: 6px 14px; border-radius: var(--radius); font-size: 12.5px; cursor: pointer; border: 1px solid var(--color-border); white-space: nowrap; flex-shrink: 0; }
-.btn-secondary { background: transparent; color: var(--color-fg-muted); }
-.btn-secondary:hover:not(:disabled) { background: var(--color-surface-2); }
-.btn-danger  { background: color-mix(in oklch, var(--color-danger) 12%, transparent); border-color: color-mix(in oklch, var(--color-danger) 30%, transparent); color: var(--color-danger); }
-.btn-danger:hover:not(:disabled)  { background: color-mix(in oklch, var(--color-danger) 20%, transparent); }
-.btn-action:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .spinner { width: 11px; height: 11px; border: 2px solid rgba(255,255,255,0.3); border-top-color: white; border-radius: 50%; animation: spin 0.7s linear infinite; flex-shrink: 0; }
 @keyframes spin { to { transform: rotate(360deg); } }
-
-.fade-enter-active, .fade-leave-active { transition: opacity 0.12s; }
-.fade-enter-from, .fade-leave-to { opacity: 0; }
 </style>

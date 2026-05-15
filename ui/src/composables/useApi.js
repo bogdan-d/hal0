@@ -18,13 +18,23 @@ export async function api(path, options = {}) {
 
   if (!res.ok) {
     let message = `API error ${res.status}`
+    let body = null
     try {
-      const body = await res.json()
+      body = await res.json()
       message = body?.error?.message || body?.detail || message
     } catch {
       // ignore parse failure
     }
-    throw new Error(message)
+    // Surface the full envelope (code + details map) on the Error
+    // instance so callers like Settings.vue can render per-field
+    // validation reasons inline next to the offending input. The
+    // ``message`` stays the human-readable string for toasts.
+    const err = new Error(message)
+    err.status  = res.status
+    err.code    = body?.error?.code ?? null
+    err.details = body?.error?.details ?? null
+    err.body    = body
+    throw err
   }
 
   if (res.status === 204) return null
