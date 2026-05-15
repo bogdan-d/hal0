@@ -51,21 +51,6 @@ const memTotalGb = computed(() => {
 })
 const memLabel = computed(() => (hw.value.gtt_total_mb ? 'GTT' : 'VRAM'))
 
-const diskUsedGb = computed(() => hw.value.disk_used_gb?.toFixed(0) ?? null)
-const diskTotalGb = computed(() => hw.value.disk_total_gb?.toFixed(0) ?? null)
-const diskPct = computed(() => {
-  const u = hw.value.disk_used_gb || 0
-  const t = hw.value.disk_total_gb || 0
-  return t > 0 ? Math.min(100, (u / t) * 100) : 0
-})
-
-const ramUsedGb = computed(() => ((hw.value.ram_used_mb || 0) / 1024))
-const ramTotalGb = computed(() => ((hw.value.ram_total_mb || 0) / 1024))
-const ramPct = computed(() => {
-  const t = ramTotalGb.value
-  return t > 0 ? Math.min(100, (ramUsedGb.value / t) * 100) : 0
-})
-
 // ── Unified memory bar (Strix Halo: GTT + RAM + NPU + VRAM partitions) ──
 // Total pool is the larger of (ram_total + gtt_total) and ram_total, since
 // haloai exposes the partition explicitly. On non-UMA hardware we fall back
@@ -106,7 +91,6 @@ const unifiedSegments = computed(() => {
 })
 
 const npuOk = computed(() => !!hw.value.npu_status?.ok)
-const npuLabel = computed(() => hw.value.npu_status?.npu_device || (npuOk.value ? 'Ready' : 'Offline'))
 
 // ── Throughput ────────────────────────────────────────────────────────
 const totalTps = computed(() =>
@@ -293,19 +277,15 @@ loadChatModels()
           </div>
         </Card>
 
-        <Card class="stat-card">
-          <div class="stat-label">Model storage</div>
+        <Card class="stat-card stat-tput">
+          <div class="stat-label">Throughput</div>
           <div class="stat-value">
-            <template v-if="diskUsedGb && diskTotalGb">
-              {{ diskUsedGb }}<span class="stat-denom">/{{ diskTotalGb }} GB</span>
-            </template>
-            <template v-else>
-              <span class="text-muted">—</span>
-            </template>
+            {{ totalTps.toFixed(0) }}<span class="stat-denom">tok/s</span>
           </div>
-          <div class="stat-sub">
-            <button class="stat-link" type="button" @click="router.push('/models')">Browse models →</button>
-          </div>
+          <svg class="stat-spark" viewBox="0 0 320 36" preserveAspectRatio="none" aria-hidden="true">
+            <path :d="tputAreaPath" fill="currentColor" opacity="0.12" />
+            <path :d="tputSparkPath" fill="none" stroke="currentColor" stroke-width="1.4" />
+          </svg>
         </Card>
       </div>
 
@@ -336,38 +316,6 @@ loadChatModels()
           </span>
         </div>
       </Card>
-
-      <!-- ── Mini tiles row ───────────────────────────────────────── -->
-      <div class="mini-grid">
-        <Card class="mini-card">
-          <div class="mini-head"><span>RAM</span><span class="dim">system</span></div>
-          <div class="mini-value">{{ ramUsedGb.toFixed(1) }}<small>/{{ ramTotalGb.toFixed(0) }}G</small></div>
-          <div class="mini-bar success"><span :style="{ width: ramPct + '%' }"></span></div>
-        </Card>
-
-        <Card class="mini-card">
-          <div class="mini-head"><span>Disk</span><span class="dim">/mnt/ai-models</span></div>
-          <div class="mini-value">{{ (hw.disk_used_gb ?? 0).toFixed(0) }}<small>/{{ (hw.disk_total_gb ?? 0).toFixed(0) }}G</small></div>
-          <div class="mini-bar warning"><span :style="{ width: diskPct + '%' }"></span></div>
-        </Card>
-
-        <Card class="mini-card">
-          <div class="mini-head"><span>Throughput</span><span class="dim">tok/s now</span></div>
-          <div class="mini-value">{{ totalTps.toFixed(0) }}<small>tok/s</small></div>
-          <svg class="mini-spark" viewBox="0 0 320 44" preserveAspectRatio="none" aria-hidden="true">
-            <path :d="tputAreaPath" fill="currentColor" opacity="0.12" />
-            <path :d="tputSparkPath" fill="none" stroke="currentColor" stroke-width="1.4" />
-          </svg>
-        </Card>
-
-        <Card class="mini-card">
-          <div class="mini-head"><span>NPU</span><span class="dim">{{ npuOk ? 'XDNA' : '—' }}</span></div>
-          <div class="mini-value">
-            <span :class="npuOk ? 'text-success' : 'text-muted'">{{ npuOk ? 'Ready' : 'Offline' }}</span>
-          </div>
-          <div class="dim mini-label">{{ npuLabel }}</div>
-        </Card>
-      </div>
 
       <!-- ── Active slots ─────────────────────────────────────────── -->
       <section aria-labelledby="slots-heading">
@@ -475,6 +423,10 @@ loadChatModels()
 .stat-sub { font-size: 11.5px; color: var(--color-fg-faint); font-family: var(--font-mono); }
 .stat-link { background: transparent; border: none; color: var(--color-accent); font-family: var(--font-mono); font-size: 11px; cursor: pointer; padding: 0; }
 .stat-link:hover { text-decoration: underline; }
+.stat-tput { display: flex; flex-direction: column; }
+.stat-tput .stat-value { margin-bottom: 4px; }
+.stat-tput .stat-denom { margin-left: 4px; font-size: 13px; }
+.stat-spark { width: 100%; height: 30px; color: var(--color-accent); margin-top: auto; }
 
 /* ── Unified memory bar ─────────────────────────────────────────── */
 .um-card { padding: 16px 18px; }
@@ -494,20 +446,6 @@ loadChatModels()
 .lbl { color: var(--color-fg-muted); }
 .lg .dim { color: var(--color-fg-faint); }
 .lg small { color: var(--color-fg-faint); margin-left: 1px; }
-
-/* ── Mini tiles ─────────────────────────────────────────────────── */
-.mini-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
-@media (max-width: 900px) { .mini-grid { grid-template-columns: repeat(2, 1fr); } }
-.mini-card { padding: 12px 16px; min-height: 92px; }
-.mini-head { display: flex; justify-content: space-between; font-size: 11px; color: var(--color-fg-faint); font-family: var(--font-mono); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 6px; }
-.mini-value { font-size: 22px; font-weight: 600; color: var(--color-fg); line-height: 1; margin-bottom: 6px; }
-.mini-value small { font-size: 12px; color: var(--color-fg-muted); font-weight: 400; margin-left: 4px; }
-.mini-bar { height: 6px; border-radius: 3px; background: var(--color-surface-2); overflow: hidden; }
-.mini-bar span { display: block; height: 100%; background: var(--color-accent); transition: width 0.3s ease; }
-.mini-bar.success span { background: var(--color-success); }
-.mini-bar.warning span { background: var(--color-warning); }
-.mini-spark { width: 100%; height: 32px; color: var(--color-accent); }
-.mini-label { font-size: 10.5px; font-family: var(--font-mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 4px; }
 
 /* ── Sections ───────────────────────────────────────────────────── */
 .section-title { font-size: 13px; font-weight: 600; color: var(--color-fg-muted); letter-spacing: 0.03em; margin: 0 0 10px; display: flex; align-items: center; gap: 12px; }
