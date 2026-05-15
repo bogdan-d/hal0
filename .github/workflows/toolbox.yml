@@ -28,7 +28,11 @@ permissions:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_PREFIX: ${{ github.repository_owner }}/hal0-toolbox
+  # Hardcoded lowercase to satisfy OCI tag rules. github.repository_owner
+  # preserves the case of the org/repo as created (e.g. "Hal0ai"), which
+  # buildx rejects when used in a tag. The hal0ai org is decided
+  # (PLAN.md §16 / hal0ai-github-org memory) so pinning is safe.
+  IMAGE_PREFIX: hal0ai/hal0-toolbox
 
 jobs:
   build:
