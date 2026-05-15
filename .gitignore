@@ -71,3 +71,4 @@ auth.json
 
 # OS
 Thumbs.db
+.claude/worktrees/
