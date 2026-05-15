@@ -435,6 +435,126 @@ def save_hardware_info(info: HardwareInfo, path: Path | None = None) -> None:
                 tmp_path.unlink(missing_ok=True)
 
 
+# ── manifest.json (toolbox image digests) ─────────────────────────────────────
+
+
+def _find_manifest_path() -> Path | None:
+    """Locate the release manifest.
+
+    Resolution order:
+      1. ``paths.manifest_json()`` — /etc/hal0/manifest.json (installed).
+      2. Repo root sibling of /usr/lib/hal0/current — dev installs that
+         keep the manifest next to the source tree.  Only consulted when
+         ``HAL0_HOME`` is NOT set, so unit tests with isolated
+         tmp_hal0_home don't accidentally pick up the repo-root copy.
+
+    Returns the first existing path, or None if neither is found.  The
+    loader's callers fall back to ":v1" tag pulls in that case.
+    """
+    candidates: list[Path] = []
+    installed = paths.manifest_json()
+    candidates.append(installed)
+    # Repo-root candidate: src/hal0/config/loader.py → ../../../manifest.json
+    # Skip when HAL0_HOME is set — that env var means "isolated test home,
+    # don't fall back to the source tree".
+    if not os.environ.get("HAL0_HOME"):
+        here = Path(__file__).resolve()
+        candidates.append(here.parents[3] / "manifest.json")
+    for p in candidates:
+        if p.is_file():
+            return p
+    return None
+
+
+def load_manifest(path: Path | None = None) -> dict[str, Any]:
+    """Load the release manifest.
+
+    The GHA `toolbox.yml` workflow patches `toolbox_images.<name>.digest`
+    with the published image's content digest post-build.  Callers
+    (notably the providers when constructing ContainerSpec.image) use
+    the digest to pin pulls, falling back to the `tag` when digest is
+    null/missing (see PLAN.md §12 and §17 Risks).
+
+    Schema (see manifest.json at repo root for the canonical comment):
+      {
+        "_schema": "hal0.manifest.v1",
+        "version": "...",
+        "channel": "...",
+        "toolbox_images": {
+          "<name>": {"tag": "ghcr.io/.../:v1", "digest": "sha256:..." | null},
+          ...
+        }
+      }
+
+    Args:
+        path: Explicit manifest path. Defaults to the FHS-aware resolver.
+
+    Returns:
+        Parsed manifest as a dict. Empty dict if no manifest is present
+        (the runtime treats this as "pull by tag").
+
+    Raises:
+        ConfigParseError: The manifest file exists but is not valid JSON.
+    """
+    import json
+
+    resolved = path if path is not None else _find_manifest_path()
+    if resolved is None or not Path(resolved).is_file():
+        return {}
+    try:
+        with open(resolved, "rb") as f:
+            return json.load(f)
+    except json.JSONDecodeError as exc:
+        raise ConfigParseError(
+            f"failed to parse manifest at {resolved}: {exc}",
+            details={"path": str(resolved), "reason": str(exc)},
+        ) from exc
+
+
+def manifest_image_ref(
+    name: str,
+    *,
+    manifest: dict[str, Any] | None = None,
+) -> str | None:
+    """Return the pinned image reference for a toolbox image, if any.
+
+    Resolution:
+      - If `toolbox_images[name].digest` is a non-empty sha256:..., return
+        the registry-qualified ref ``<tag-without-:v1-suffix>@<digest>``.
+      - If only `tag` is present, return the tag as-is.
+      - Else None.
+
+    The runtime callers wire this into the existing
+    ``HAL0_TOOLBOX_IMAGE_<BACKEND>`` env-var override pattern (see
+    llama_server.py:image_ref) so no provider code needs to read the
+    manifest directly — the installer materialises env vars per slot.
+
+    Args:
+        name: Short image key (vulkan, rocm, flm, moonshine, kokoro).
+        manifest: Optional pre-loaded manifest dict. Loaded on demand
+                  if omitted.
+
+    Returns:
+        Pull-ready image reference, or None if the manifest doesn't list
+        this image.
+    """
+    if manifest is None:
+        manifest = load_manifest()
+    images = manifest.get("toolbox_images") or {}
+    entry = images.get(name)
+    if not isinstance(entry, dict):
+        return None
+    tag = entry.get("tag")
+    digest = entry.get("digest")
+    if digest and isinstance(digest, str) and digest.startswith("sha256:"):
+        if tag and "@" not in str(tag):
+            # Strip any :tag suffix from the registry ref before appending @digest.
+            ref_no_tag = str(tag).rsplit(":", 1)[0] if ":" in str(tag).split("/")[-1] else str(tag)
+            return f"{ref_no_tag}@{digest}"
+        return str(tag) if tag else None
+    return str(tag) if tag else None
+
+
 __all__ = [
     "CURRENT_SCHEMA_VERSION",
     "ConfigError",
@@ -443,9 +563,11 @@ __all__ = [
     "list_slots",
     "load_hal0_config",
     "load_hardware_info",
+    "load_manifest",
     "load_providers_config",
     "load_slot_config",
     "load_upstreams_config",
+    "manifest_image_ref",
     "save_hal0_config",
     "save_hardware_info",
     "save_providers_config",
