@@ -164,9 +164,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # names that already exist in the registry.
     await _autoregister_slot_upstreams(upstreams, slot_manager)
 
+    from hal0.hardware import HardwareStats
+
     app.state.upstreams = upstreams
     app.state.model_registry = model_registry
     app.state.hardware_probe = hardware_probe
+    app.state.hardware_stats = HardwareStats()
+    # /api/upstreams hands the dashboard the cached model list so the
+    # "models advertised" column reflects live state without an extra
+    # round trip per upstream.
+    app.state.upstream_models = model_cache
     app.state.dispatcher = dispatcher
     app.state.slot_manager = slot_manager
     app.state.model_cache = model_cache

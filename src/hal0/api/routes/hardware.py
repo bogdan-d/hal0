@@ -110,16 +110,65 @@ async def _proxy_upstream_endpoint(
     return out
 
 
+def _local_live_stats(request: Request) -> dict[str, Any]:
+    """Read live counters from this process's HardwareStats.
+
+    Maps the snapshot() fields onto the names the dashboard expects:
+    ``ram_used_mb``, ``ram_used_gb``, ``gtt_used_mb``, ``vram_used_mb``,
+    plus a ``gpu_util`` fraction. Returned values may be ``None`` when a
+    counter isn't available on this host (e.g. no AMD/NVIDIA GPU).
+    """
+    import asyncio
+
+    stats = getattr(request.app.state, "hardware_stats", None)
+    if stats is None:
+        return {}
+    # snapshot() is synchronous but hits subprocess + sysfs — kick to a
+    # thread so the API event loop stays responsive.
+    snap = {}
+    try:
+        snap = stats.snapshot()
+    except Exception:  # defensive — never let stats errors take out the page
+        return {}
+
+    # gpu_vram_used_mb is the *single* GPU memory counter the probe knows;
+    # on AMD UMA the probe picks max(vram_used, gtt_used) so it surfaces
+    # GTT (the real model bytes). Split it back out by re-reading the GTT
+    # vs VRAM totals from the existing detector helpers.
+    from hal0.hardware.probe import _amd_drm_device, _read_sysfs_mb
+
+    gtt_used: float | None = None
+    vram_used: float | None = None
+    drm = _amd_drm_device()
+    if drm is not None:
+        gtt_used = _read_sysfs_mb(drm / "mem_info_gtt_used")
+        vram_used = _read_sysfs_mb(drm / "mem_info_vram_used")
+
+    ram_used_gb = snap.get("ram_used_gb") or 0.0
+    return {
+        "ram_used_gb": ram_used_gb,
+        "ram_used_mb": int(ram_used_gb * 1024),
+        "ram_available_gb": snap.get("ram_available_gb"),
+        "gtt_used_mb": gtt_used,
+        "vram_used_mb": vram_used,
+        "gpu_util": snap.get("gpu_util"),
+        "gpu_vram_used_mb": snap.get("gpu_vram_used_mb"),
+        "gpu_vram_total_mb": snap.get("gpu_vram_total_mb"),
+    }
+
+
 @router.get("/stats/hardware")
 async def stats_hardware(request: Request) -> dict[str, Any]:
-    """Aggregate runtime hardware stats across upstreams.
+    """Aggregate runtime hardware stats across upstreams + local probe.
 
     Each remote upstream that exposes ``/api/stats/hardware`` contributes
     its snapshot; the response carries both a flattened "primary" view
     (first non-empty upstream wins, for the legacy single-host dashboard
     code) and a ``per_upstream`` map for multi-host visualisations.
 
-    Falls back to a fresh local probe when no upstream is reachable.
+    Always merges in this process's live counters so the dashboard's
+    unified-memory bar fills in even when no upstream answers /api/stats/
+    hardware (which is the single-LXC, slot-only deployment shape).
     """
     per_upstream = await _proxy_upstream_endpoint(request, "/api/stats/hardware")
     # Pydantic v2 flags repeated object ids as circular even when no real
@@ -133,6 +182,15 @@ async def stats_hardware(request: Request) -> dict[str, Any]:
 
     if not primary:
         primary = dict(await get_hardware(request))
+
+    # Live counters from this process — overwrite any zero/missing values
+    # in the upstream payload (which often has only the static probe shape).
+    local = _local_live_stats(request)
+    for key, val in local.items():
+        if val is None:
+            continue
+        if primary.get(key) in (None, 0, 0.0):
+            primary[key] = val
 
     primary["per_upstream"] = per_upstream
     primary["upstream_names"] = list(per_upstream.keys())

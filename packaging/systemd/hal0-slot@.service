@@ -52,10 +52,18 @@ TimeoutStopSec=30
 # lock model weights in RAM.
 LimitMEMLOCK=infinity
 
-# Slot ownership.  Phase 0 used root for bootstrap; Phase 1+ runs as
-# the same unprivileged hal0 user that owns hal0-api.
-User=hal0
-Group=hal0
+# Slot ownership.  Runs as root because:
+#   1. The real workload lives in a Docker/Podman container — the
+#      host-side unit just invokes ``docker run``; the sandbox boundary
+#      is the container, not the systemd user.
+#   2. Home-AI installer targets (LXC, bare metal, varied distros) make
+#      a dedicated ``hal0`` UID + Docker-group membership a brittle
+#      bootstrap step. Root sidesteps it for v1.
+#   3. The installer/Stage-2 hardening pass MAY emit a drop-in that
+#      flips this to ``User=hal0`` once /var/run/docker.sock ACLs and
+#      file ownership have been verified — see PLAN §17.
+User=root
+Group=root
 WorkingDirectory=/var/lib/hal0/slots/%i
 
 # Journal tagging — the drop-in overrides this with the concrete slot
