@@ -4,11 +4,12 @@
  * 3-step: pick model → license accept → download + assign → done.
  * Designed as a centered card with a step indicator, not a full-page form.
  */
-import { ref, computed } from 'vue'
+import { ref, computed, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useToastsStore } from '../stores/toasts.js'
 import { useSystemStore } from '../stores/system.js'
 import { api } from '../composables/useApi.js'
+import { usePullJob, fmtBytes, fmtSpeed, fmtEta } from '../composables/usePullJob.js'
 
 const router = useRouter()
 const toasts = useToastsStore()
@@ -27,9 +28,15 @@ const selectedModel = ref(null)
 const customUrl     = ref('')
 const customUrlErr  = ref('')
 const licenseAccepted = ref(false)
-const downloading   = ref(false)
-const downloadPct   = ref(0)
 const chatUrl       = ref('http://localhost:3001')
+
+// Shared pull-job composable — same plumbing Models.vue uses, so the
+// FirstRun progress bar and the Models inline progress bar drive off
+// one source of truth (Team I gap #3).
+const pull = usePullJob()
+const downloadPct = computed(() => pull.pct.value ?? 0)
+const downloading = computed(() => pull.inFlight.value)
+const pullError   = computed(() => pull.error.value)
 
 // Get chat URL from API (may differ from default if port is customized)
 async function fetchChatUrl() {
@@ -56,37 +63,39 @@ function goStep2() {
 
 async function download() {
   if (!licenseAccepted.value) { toasts.warning('Please accept the license first'); return }
-  downloading.value = true
-  downloadPct.value = 0
   step.value = 3
 
   try {
+    // Custom HF URLs go through usePullJob with the hf_url body so the
+    // backend resolves the repo at pull time. Curated picks pass the
+    // model id directly.
+    const id = selectedModel.value.id === 'custom'
+      ? customUrl.value
+      : selectedModel.value.id
     const body = selectedModel.value.id === 'custom'
       ? { hf_url: customUrl.value, slot: 'primary' }
-      : { model_id: selectedModel.value.id, slot: 'primary' }
-
-    await api('/api/install/start', { method: 'POST', body: JSON.stringify(body) })
-
-    // Poll progress (Phase 1: use SSE; Phase 0: fake progress)
-    await fakePollProgress()
-    await system.fetchStatus()
-    step.value = 4
-    await fetchChatUrl()
+      : { slot: 'primary' }
+    await pull.start(id, body)
   } catch (e) {
     toasts.error(e.message)
     step.value = 2
-    downloading.value = false
+    return
   }
 }
 
-async function fakePollProgress() {
-  // Phase 0 stub: simulate download progress for UI demo purposes.
-  // Phase 1: replace with SSE from /api/install/progress.
-  for (let i = 0; i <= 100; i += 5) {
-    await new Promise((r) => setTimeout(r, 80))
-    downloadPct.value = i
+// When the pull reaches a terminal state, advance the wizard.
+watch(() => pull.state.value, async (s) => {
+  if (s === 'completed') {
+    await system.fetchStatus()
+    await fetchChatUrl()
+    step.value = 4
+  } else if (s === 'failed') {
+    toasts.error(pull.error.value?.message ?? 'Download failed')
+    step.value = 2
+  } else if (s === 'cancelled') {
+    step.value = 2
   }
-}
+})
 
 function goToDashboard() { router.push('/') }
 function openChat()      { window.open(chatUrl.value, '_blank', 'noopener') }
@@ -220,7 +229,20 @@ const licenseLabel = computed(() => {
           <span class="progress-pct">{{ downloadPct }}%</span>
         </div>
 
-        <p class="step-hint">This may take a few minutes depending on your connection speed. Slot will start automatically when download completes.</p>
+        <p v-if="pull.total.value > 0" class="step-hint">
+          {{ fmtBytes(pull.downloaded.value) }} / {{ fmtBytes(pull.total.value) }}
+          <span v-if="pull.speedBps.value > 0">· {{ fmtSpeed(pull.speedBps.value) }}</span>
+          <span v-if="pull.etaS.value > 0">· {{ fmtEta(pull.etaS.value) }} left</span>
+        </p>
+        <p v-else class="step-hint">This may take a few minutes depending on your connection speed. Slot will start automatically when download completes.</p>
+
+        <div v-if="pullError" class="pull-error" role="alert">
+          <span><strong>{{ pullError.code }}</strong>: {{ pullError.message }}</span>
+        </div>
+
+        <button v-if="downloading" class="btn-ghost" type="button" @click="pull.cancel()">
+          Cancel download
+        </button>
       </div>
 
       <!-- ── Step 4: Done ───────────────────────────────────── -->
@@ -351,6 +373,16 @@ const licenseLabel = computed(() => {
 .progress-bar { flex: 1; height: 8px; background: var(--color-surface-3); border-radius: 4px; overflow: hidden; }
 .progress-fill { height: 100%; background: var(--color-accent); border-radius: 4px; transition: width 0.3s ease; }
 .progress-pct { font-family: var(--font-mono); font-size: 12px; color: var(--color-fg-muted); min-width: 36px; text-align: right; }
+
+.pull-error {
+  padding: 8px 12px;
+  border-radius: var(--radius);
+  background: color-mix(in oklch, var(--color-danger) 10%, transparent);
+  border: 1px solid color-mix(in oklch, var(--color-danger) 30%, transparent);
+  color: var(--color-danger);
+  font-size: 12px;
+}
+.pull-error strong { font-family: var(--font-mono); }
 
 /* Done */
 .wizard-done { align-items: center; text-align: center; padding: 32px; }
