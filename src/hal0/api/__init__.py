@@ -116,6 +116,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # first-non-alias from the catalog. Populated by v1 routes after
     # dispatch resolves.
     app.state.last_used_model = {}
+    # Rolling window of (monotonic_ts, tokens_in_chunk) tuples for the
+    # streaming forward path. Lets /api/slots/metrics surface a real
+    # current-throughput number even when the upstream's own metrics
+    # endpoint doesn't report tps (FLM/NPU slots in haloai).
+    import collections
+
+    app.state.tps_events = collections.deque(maxlen=4096)
 
     log.info(
         "hal0.api.upstreams_loaded",

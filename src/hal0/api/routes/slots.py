@@ -83,6 +83,33 @@ async def create_slot() -> dict[str, object]:
     raise NotImplementedYet("create_slot: Phase 1")
 
 
+def _local_throughput_tps(request: Request, window_s: float = 5.0) -> float:
+    """Compute current tokens/sec from the rolling tps_events window.
+
+    Rate is ``tokens / (last_event_ts − first_event_ts_in_window)`` rather
+    than ``tokens / window_s`` so short bursts read at their real rate
+    instead of being smeared across the full lookback. Decays to 0 once
+    all events age out.
+    """
+    import time
+
+    events = getattr(request.app.state, "tps_events", None)
+    if not events:
+        return 0.0
+    now = time.monotonic()
+    in_window = [(ts, tok) for ts, tok in events if now - ts <= window_s]
+    if len(in_window) < 2:
+        return 0.0
+    total_tokens = sum(tok for _, tok in in_window)
+    span = in_window[-1][0] - in_window[0][0]
+    # Bias slightly toward the window so a stale-but-recent burst still
+    # decays instead of pegging at peak forever.
+    effective_span = max(span, (now - in_window[-1][0]))
+    if effective_span <= 0:
+        return 0.0
+    return total_tokens / effective_span
+
+
 @router.get("/metrics")
 async def slot_metrics(request: Request) -> dict[str, Any]:
     """Per-slot runtime metrics keyed by slot name.
@@ -90,10 +117,22 @@ async def slot_metrics(request: Request) -> dict[str, Any]:
     Drives the dashboard's per-slot GTT bars + throughput sparkline.
     Proxies remote upstreams via /api/stats/slots; real local SlotManager
     metrics merge in once the manager is wired.
+
+    Adds a synthetic ``__hal0_local__`` entry carrying current TPS
+    measured from the streaming dispatcher path — covers the case where
+    the upstream (e.g. FLM/NPU on haloai) doesn't report tps itself.
     """
     from hal0.api.routes.hardware import stats_slots
 
-    return await stats_slots(request)
+    merged = await stats_slots(request)
+    tps = _local_throughput_tps(request)
+    if tps > 0 or "__hal0_local__" not in merged:
+        merged["__hal0_local__"] = {
+            "name": "__hal0_local__",
+            "tokens_per_sec": tps,
+            "_synthetic": True,
+        }
+    return merged
 
 
 @router.get("/capacity")
