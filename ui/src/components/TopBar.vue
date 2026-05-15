@@ -54,7 +54,6 @@ const totalSlots   = computed(() => system.slots.length)
         </svg>
       </button>
 
-      <div class="brand-logo" aria-hidden="true">h0</div>
       <span class="brand-name" aria-label="hal0">hal0</span>
       <span v-if="version" class="version-pill" :title="`Version ${version}`">v{{ version }}</span>
     </div>
@@ -138,21 +137,6 @@ const totalSlots   = computed(() => system.slots.length)
 .icon-btn:hover {
   background: var(--color-surface-2);
   color: var(--color-fg);
-}
-
-.brand-logo {
-  width: 26px;
-  height: 26px;
-  border-radius: 6px;
-  background: var(--color-accent);
-  color: var(--color-bg);
-  font-family: var(--font-mono);
-  font-weight: 500;
-  font-size: 12px;
-  display: grid;
-  place-items: center;
-  flex-shrink: 0;
-  letter-spacing: -0.5px;
 }
 
 .brand-name {
