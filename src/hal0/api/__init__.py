@@ -345,7 +345,64 @@ def create_app() -> FastAPI:
     app.include_router(health.router, prefix="/api", tags=["health"])
     app.include_router(config_routes.router, prefix="/api/config", tags=["config"])
 
+    _mount_dashboard(app)
+
     return app
+
+
+def _mount_dashboard(app: FastAPI) -> None:
+    """Serve the built Vue dashboard at ``/`` with SPA fallback.
+
+    Resolution order for ``ui/dist`` (the built Vue bundle):
+      1. ``HAL0_UI_DIST`` env override (used by tests + dev installs).
+      2. ``/usr/lib/hal0/ui/dist`` (FHS install path per PLAN §2).
+      3. ``<repo>/ui/dist`` (editable install — find by walking up from
+         this file).
+
+    If none exist (e.g. backend-only smoke tests), skip silently — the
+    api still serves ``/api/*`` and ``/v1/*`` as before.
+
+    SPA fallback: any GET that doesn't match a route, doesn't start with
+    ``/api`` or ``/v1``, and isn't a static asset returns ``index.html``
+    so client-side routing (``/slots``, ``/firstrun`` etc.) survives a
+    page reload.
+    """
+    import os
+    from pathlib import Path
+    from fastapi.responses import FileResponse, Response
+    from fastapi.staticfiles import StaticFiles
+
+    candidates: list[Path] = []
+    env_dir = os.environ.get("HAL0_UI_DIST", "").strip()
+    if env_dir:
+        candidates.append(Path(env_dir))
+    candidates.append(Path("/usr/lib/hal0/ui/dist"))
+    here = Path(__file__).resolve()
+    for parent in here.parents:
+        repo_dist = parent / "ui" / "dist"
+        if repo_dist.exists():
+            candidates.append(repo_dist)
+            break
+
+    dist = next((p for p in candidates if p.is_dir() and (p / "index.html").is_file()), None)
+    if dist is None:
+        log.info("dashboard.dist_not_found", searched=[str(c) for c in candidates])
+        return
+
+    log.info("dashboard.mounted", dist=str(dist))
+    index = dist / "index.html"
+    app.mount("/assets", StaticFiles(directory=dist / "assets"), name="assets")
+
+    @app.get("/favicon.svg", include_in_schema=False)
+    async def _favicon() -> Response:
+        return FileResponse(dist / "favicon.svg")
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    async def _spa(full_path: str) -> Response:
+        # Don't shadow API routes — those return 404 normally if missing.
+        if full_path.startswith("api/") or full_path.startswith("v1/"):
+            return Response(status_code=404)
+        return FileResponse(index)
 
 
 app = create_app()

@@ -149,6 +149,22 @@ if [[ ! -x "${HAL0_BIN}" ]]; then
 fi
 info "hal0 cli: ${HAL0_BIN}"
 
+step "Dashboard UI"
+
+UI_DIR="${REPO_DIR}/ui"
+UI_DIST="${UI_DIR}/dist"
+if [[ -f "${UI_DIST}/index.html" ]]; then
+    info "ui/dist already built — left alone"
+elif command -v npm >/dev/null 2>&1; then
+    info "building ui/dist (npm install + npm run build)"
+    (cd "${UI_DIR}" && npm install --no-audit --no-fund --silent && npm run build --silent) \
+        || die "ui build failed — check ${UI_DIR}/npm-debug.log"
+    info "wrote ${UI_DIST}"
+else
+    warn "npm not found — dashboard at :${HAL0_PORT}/ will return 404 until you build the UI"
+    warn "  install Node 20 LTS, then: cd ${UI_DIR} && npm install && npm run build"
+fi
+
 step "Configuration"
 
 HAL0_TOML="${ETC_DIR}/hal0.toml"
