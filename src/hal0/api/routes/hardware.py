@@ -68,21 +68,76 @@ async def reprobe_hardware(request: Request) -> dict[str, Any]:
     return _flatten_for_ui(info.model_dump(mode="python"))
 
 
+async def _proxy_upstream_endpoint(
+    request: Request, suffix: str, timeout_s: float = 3.0
+) -> dict[str, dict[str, Any]]:
+    """Fan out ``suffix`` (e.g. ``/api/stats/hardware``) to every upstream's
+    base host and return ``{upstream_name: payload}``.
+
+    Upstream base URLs end in ``/v1`` by convention; we strip that to hit
+    the upstream's internal API surface (haloai exposes its dashboard
+    endpoints at the bare ``/api/...`` path on the same host:port).
+    Failures are recorded as ``None`` so callers can render "offline" tiles.
+    """
+    import httpx
+
+    upstreams = request.app.state.upstreams
+    out: dict[str, dict[str, Any]] = {}
+    async with httpx.AsyncClient(timeout=timeout_s) as client:
+        for u in upstreams.list():
+            base = u.url.rstrip("/")
+            if base.endswith("/v1"):
+                base = base[: -len("/v1")]
+            try:
+                resp = await client.get(base + suffix)
+                if resp.status_code == 200:
+                    out[u.name] = resp.json()
+                else:
+                    out[u.name] = None  # type: ignore[assignment]
+            except Exception:
+                out[u.name] = None  # type: ignore[assignment]
+    return out
+
+
 @router.get("/stats/hardware")
 async def stats_hardware(request: Request) -> dict[str, Any]:
-    """Runtime hardware stats (RAM/VRAM/disk used, GPU util, etc.)."""
-    # NOTE: a real implementation reads /proc and GPU sysfs each call;
-    # for now we surface what /api/hardware already exposes.
-    return await get_hardware(request)
+    """Aggregate runtime hardware stats across upstreams.
+
+    Each remote upstream that exposes ``/api/stats/hardware`` contributes
+    its snapshot; the response carries both a flattened "primary" view
+    (first non-empty upstream wins, for the legacy single-host dashboard
+    code) and a ``per_upstream`` map for multi-host visualisations.
+
+    Falls back to a fresh local probe when no upstream is reachable.
+    """
+    per_upstream = await _proxy_upstream_endpoint(request, "/api/stats/hardware")
+    # Pydantic v2 flags repeated object ids as circular even when no real
+    # cycle exists — so we shallow-copy the chosen payload before stamping
+    # the per_upstream map onto it.
+    primary: dict[str, Any] = {}
+    for payload in per_upstream.values():
+        if payload:
+            primary = dict(payload)
+            break
+
+    if not primary:
+        primary = dict(await get_hardware(request))
+
+    primary["per_upstream"] = per_upstream
+    primary["upstream_names"] = list(per_upstream.keys())
+    return primary
 
 
 @router.get("/stats/slots")
 async def stats_slots(request: Request) -> dict[str, Any]:
-    slot_mgr = getattr(request.app.state, "slot_manager", None)
-    if slot_mgr is None:
-        return {"slots": []}
-    try:
-        slots = await slot_mgr.list() if hasattr(slot_mgr, "list") else []
-    except Exception:
-        slots = []
-    return {"slots": slots}
+    """Per-slot runtime metrics.  Aggregates ``/api/slots/metrics`` across
+    upstreams; merges into a single dict keyed by slot name (last upstream
+    wins on collision — fine for the single-host dev case)."""
+    per_upstream = await _proxy_upstream_endpoint(request, "/api/slots/metrics")
+    merged: dict[str, dict[str, Any]] = {}
+    for payload in per_upstream.values():
+        if isinstance(payload, dict):
+            for name, m in payload.items():
+                if isinstance(m, dict):
+                    merged[name] = m
+    return merged

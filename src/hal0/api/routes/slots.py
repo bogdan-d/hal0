@@ -74,8 +74,16 @@ async def create_slot() -> dict[str, object]:
 
 
 @router.get("/metrics")
-async def slot_metrics() -> dict[str, object]:
-    raise NotImplementedYet("slot_metrics: Phase 1")
+async def slot_metrics(request: Request) -> dict[str, Any]:
+    """Per-slot runtime metrics keyed by slot name.
+
+    Drives the dashboard's per-slot GTT bars + throughput sparkline.
+    Proxies remote upstreams via /api/stats/slots; real local SlotManager
+    metrics merge in once the manager is wired.
+    """
+    from hal0.api.routes.hardware import stats_slots
+
+    return await stats_slots(request)
 
 
 @router.get("/capacity")
