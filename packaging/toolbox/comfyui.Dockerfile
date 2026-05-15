@@ -110,10 +110,12 @@ RUN git clone --depth 1 --branch "${COMFYUI_REF}" \
 # image bumps. ROCm 6.2 wheels were the first to officially support
 # RDNA 3.5 (gfx1151, Strix Halo).
 #
-# torch-2.4 is the validated baseline for ComfyUI 0.3.x against ROCm 6.2.
+# torch-2.5.1 is the current stable ROCm 6.2 wheel set on
+# download.pytorch.org/whl/rocm6.2 (2.4.x was removed from the index
+# 2026-04). Compatible with ComfyUI 0.3.x.
 RUN pip install --index-url https://download.pytorch.org/whl/rocm6.2 \
-        torch==2.4.1+rocm6.2 \
-        torchvision==0.19.1+rocm6.2 \
+        torch==2.5.1+rocm6.2 \
+        torchvision==0.20.1+rocm6.2 \
     && pip install -r requirements.txt
 
 # Pre-create the persistent layout so the bind-mounted host directory
