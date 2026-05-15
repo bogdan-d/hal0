@@ -173,6 +173,30 @@ def test_image_ref_uses_hal0_dev_namespace(provider: LlamaServerProvider) -> Non
         assert ref.startswith("ghcr.io/hal0-dev/hal0-toolbox-"), ref
 
 
+def test_image_ref_slot_cfg_override_wins(provider: LlamaServerProvider) -> None:
+    """slot_cfg["image"] overrides the default map (local-build path)."""
+    ref = provider.image_ref({"backend": "vulkan", "image": "hal0-toolbox-vulkan:dev"})
+    assert ref == "hal0-toolbox-vulkan:dev"
+
+
+def test_image_ref_env_var_override(
+    provider: LlamaServerProvider, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """HAL0_TOOLBOX_IMAGE_<BACKEND> env var overrides the default map."""
+    monkeypatch.setenv("HAL0_TOOLBOX_IMAGE_VULKAN", "ghcr.io/example/hal0-toolbox-vulkan@sha256:abc")
+    ref = provider.image_ref({"backend": "vulkan"})
+    assert ref == "ghcr.io/example/hal0-toolbox-vulkan@sha256:abc"
+
+
+def test_image_ref_slot_cfg_wins_over_env(
+    provider: LlamaServerProvider, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Per-slot image override beats the env-var override."""
+    monkeypatch.setenv("HAL0_TOOLBOX_IMAGE_VULKAN", "ghcr.io/example/from-env:v1")
+    ref = provider.image_ref({"backend": "vulkan", "image": "from-slot:dev"})
+    assert ref == "from-slot:dev"
+
+
 # ─── container_spec ───────────────────────────────────────────────────────────
 
 
@@ -196,6 +220,91 @@ def test_container_spec_mounts_models_base(
     spec = provider.container_spec(slot_cfg, model_info)
     host_paths = [m[0] for m in spec.mounts]
     assert "/var/lib/hal0/models" in host_paths
+
+
+def test_container_spec_group_add_uses_numeric_gids(
+    provider: LlamaServerProvider, slot_cfg: dict[str, Any], model_info: dict[str, Any]
+) -> None:
+    """group_add must be numeric strings, not group names.
+
+    The toolbox image inherits ubuntu:24.04's /etc/group, which doesn't
+    define ``render``/``video``.  Passing names there fails fast with
+    "unable to find group render".  Numeric GIDs route around it.
+    """
+    spec = provider.container_spec(slot_cfg, model_info)
+    assert spec.group_add, "expected at least one GID in group_add"
+    for entry in spec.group_add:
+        assert entry.isdigit(), f"group_add entry {entry!r} must be a numeric GID, not a name"
+
+
+# ─── render_systemd_override ──────────────────────────────────────────────────
+
+
+def test_render_systemd_override_emits_full_docker_line(
+    provider: LlamaServerProvider, slot_cfg: dict[str, Any], model_info: dict[str, Any], tmp_path
+) -> None:
+    """The drop-in carries every ContainerSpec field that docker-run needs.
+
+    Failure mode this guards: a rendered override that's missing
+    ``--device``, ``--group-add``, or the trailing command args ships a
+    container with no GPU access (silent llvmpipe fallback) or one that
+    just exits with ``--help``.
+    """
+    env_file = tmp_path / "env"
+    out = provider.render_systemd_override(
+        "primary",
+        slot_cfg,
+        model_info,
+        env_file_path=env_file,
+    )
+    # systemd plumbing
+    assert "ExecStart=" in out
+    assert "ExecStop=" in out
+    assert f"EnvironmentFile={env_file}" in out
+    assert "SyslogIdentifier=hal0-slot-primary" in out
+    # docker run plumbing
+    assert "/usr/bin/docker run --rm" in out
+    assert "--name hal0-slot-primary" in out
+    assert f"--env-file {env_file}" in out
+    assert "--network host" in out
+    # iGPU passthrough — the whole point of switching to ContainerSpec.
+    assert "--device /dev/kfd" in out
+    assert "--device /dev/dri" in out
+    assert "--group-add" in out
+    assert "--security-opt apparmor=unconfined" in out
+    # bind-mount for the model file
+    assert "/var/lib/hal0/models:/var/lib/hal0/models" in out
+    # image + ENTRYPOINT args (llama-server flags)
+    assert "ghcr.io/hal0-dev/hal0-toolbox-vulkan:v1" in out
+    assert "--model" in out
+    assert "--port 8081" in out or "--port" in out
+    assert "-ngl" in out
+
+
+def test_render_systemd_override_quotes_var_refs_literally(
+    provider: LlamaServerProvider, slot_cfg: dict[str, Any], model_info: dict[str, Any], tmp_path
+) -> None:
+    """``${VAR}`` references must reach systemd unquoted for expansion.
+
+    If a ``${HAL0_MODEL_PATH}`` literal were shell-quoted, systemd would
+    not expand it and the container would receive the literal string
+    ``${HAL0_MODEL_PATH}`` as the model path argument.
+    """
+    # Spoof a command arg that references a systemd env var.
+    from dataclasses import replace
+
+    spec = provider.container_spec(slot_cfg, model_info)
+    spec_with_var = replace(spec, command=["--model", "${HAL0_MODEL_PATH}"])
+
+    # Bypass the public API and call the renderer directly to feed our
+    # mutated spec in.
+    from hal0.slots.unit_template import _render_from_spec
+
+    env_file = tmp_path / "env"
+    out = _render_from_spec("primary", spec_with_var, "llama-server", env_file_path=env_file)
+    assert "${HAL0_MODEL_PATH}" in out
+    # Must NOT be wrapped in single quotes (which suppresses expansion).
+    assert "'${HAL0_MODEL_PATH}'" not in out
 
 
 # ─── health ───────────────────────────────────────────────────────────────────

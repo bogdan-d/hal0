@@ -39,6 +39,50 @@ from hal0.upstreams.registry import Upstream, UpstreamRegistry
 log = structlog.get_logger(__name__)
 
 
+async def _autoregister_slot_upstreams(
+    registry: UpstreamRegistry,
+    slot_manager: SlotManager,
+) -> None:
+    """Register an Upstream for every locally-configured slot.
+
+    Without this, a fresh install with only a slot TOML on disk has no
+    way to route ``model: "primary"`` to the local llama-server: the
+    dispatcher resolves through the upstream registry, and SlotManager
+    doesn't auto-mirror its slots there.  This hook closes that gap so
+    users only need to write the slot TOML — no separate upstreams.toml
+    entry is required for the local-slot case.
+
+    Skips slot names that are already registered (so an explicit
+    upstreams.toml entry can override the auto-registered URL, e.g. for
+    a reverse-proxy in front of the slot or a different port).
+    """
+    try:
+        cfgs = await slot_manager.iter_configs()
+    except Exception as exc:  # pragma: no cover — defensive
+        log.warning("slots.autoregister_failed", error=str(exc))
+        return
+    for cfg in cfgs:
+        name = cfg.get("name", "")
+        port = cfg.get("port") or cfg.get("slot", {}).get("port")
+        if not name or not port:
+            continue
+        if registry.get(name) is not None:
+            log.info("slots.autoregister_skipped", slot=name, reason="already_registered")
+            continue
+        registry.upsert(
+            Upstream(
+                name=str(name),
+                kind="slot",
+                url=f"http://127.0.0.1:{int(port)}/v1",
+                slot_name=str(name),
+                auth_style="none",
+                warmup_strategy="lazy",
+                advertise_models=True,
+            )
+        )
+        log.info("slots.autoregistered", slot=name, port=int(port))
+
+
 def _hydrate_upstreams(registry: UpstreamRegistry) -> None:
     """Populate the upstream registry from /etc/hal0/upstreams.toml.
 
@@ -112,6 +156,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # systemctl subprocesses. Per-slot configs are discovered lazily by
     # paths.slots_config_dir(), so HAL0_HOME changes in tests are honoured.
     slot_manager = SlotManager()
+
+    # Auto-register local slots as upstreams so the dispatcher can route
+    # ``model: <slot_name>`` requests without requiring the user to write
+    # both a slot TOML AND a matching upstreams.toml entry.  Explicit
+    # upstreams.toml entries (hydrated above) win — autoregister skips
+    # names that already exist in the registry.
+    await _autoregister_slot_upstreams(upstreams, slot_manager)
 
     app.state.upstreams = upstreams
     app.state.model_registry = model_registry

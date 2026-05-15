@@ -21,6 +21,13 @@ every load() — the only file SlotManager rewrites per load is the env file
 override.conf is rendered once at slot-create time and only rewritten if
 the provider or backend changes.
 
+The docker-run line itself is built by ``Provider.render_systemd_override``
+from the provider's :class:`hal0.providers.ContainerSpec`.  This module is
+the orchestration seam: SlotManager calls ``render_override``, which
+looks up the provider and delegates.  Keeping the lookup here (rather
+than in SlotManager) preserves the architectural rule that SlotManager
+is *pure systemd* — it never imports providers directly.
+
 Port target: haloai lib/slot_unit_template.py.
 
 See PLAN.md §3 (module port plan) and §2 (deployment model).
@@ -28,7 +35,6 @@ See PLAN.md §3 (module port plan) and §2 (deployment model).
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -38,43 +44,6 @@ from hal0.slots.state import SlotConfigError
 
 if TYPE_CHECKING:
     from hal0.config.schema import SlotConfig
-
-
-# A bare systemd variable-expansion reference like ``${HF_TOKEN}``.  When a
-# provider sets a container_env value to exactly this shape, the intent is
-# "let systemd substitute from EnvironmentFile" — so we must NOT quote it.
-_SYSTEMD_VAR_REF = re.compile(r"\$\{[A-Za-z_][A-Za-z0-9_]*\}")
-
-
-# Default toolbox image per backend.  The installer materialises a concrete
-# digest into hal0.toml at install-time; this map is the fallback used by
-# render_override() when nothing more specific is supplied.
-_DEFAULT_IMAGES: dict[str, str] = {
-    "vulkan": "ghcr.io/hal0-dev/hal0-toolbox-vulkan:v1",
-    "rocm": "ghcr.io/hal0-dev/hal0-toolbox-rocm:v1",
-    "flm": "ghcr.io/hal0-dev/hal0-toolbox-flm:v1",
-    "moonshine": "ghcr.io/hal0-dev/hal0-toolbox-moonshine:v1",
-    "kokoro": "ghcr.io/hal0-dev/hal0-toolbox-kokoro:v1",
-    "cpu": "ghcr.io/hal0-dev/hal0-toolbox-vulkan:v1",  # vulkan image runs CPU too
-}
-
-
-def _quote_env_value(value: str) -> str:
-    """Quote a docker -e VALUE if it contains whitespace or $.
-
-    Mirrors haloai's lib/slot_unit_template._quote_env_value behaviour:
-    leaves a bare ``${VAR}`` reference alone so systemd expands it from the
-    EnvironmentFile.
-    """
-    if value == "":
-        return '""'
-    if _SYSTEMD_VAR_REF.fullmatch(value):
-        return value
-    if any(ch in value for ch in (" ", "\t", "$")):
-        if "'" in value:
-            return '"' + value.replace('"', '\\"') + '"'
-        return f"'{value}'"
-    return value
 
 
 def _coerce_cfg(slot_cfg: SlotConfig | dict[str, Any]) -> dict[str, Any]:
@@ -94,18 +63,6 @@ def _coerce_cfg(slot_cfg: SlotConfig | dict[str, Any]) -> dict[str, Any]:
     )
 
 
-def _resolve_image(backend: str, model_info: dict[str, Any]) -> str:
-    """Pick the docker image for the given backend.
-
-    Model metadata may override (model_info["image"]) — useful for pinned
-    benchmark slots.  Otherwise falls back to _DEFAULT_IMAGES.
-    """
-    override = model_info.get("image") or model_info.get("metadata", {}).get("image")
-    if override:
-        return str(override)
-    return _DEFAULT_IMAGES.get(backend, _DEFAULT_IMAGES["vulkan"])
-
-
 def render_override(
     slot_name: str,
     slot_cfg: SlotConfig | dict[str, Any],
@@ -116,28 +73,37 @@ def render_override(
 ) -> str:
     """Render the per-slot drop-in for hal0-slot@<slot_name>.service.
 
-    The drop-in overrides the template's ExecStart with the concrete docker
-    image and command line, and sets the SyslogIdentifier so journald
-    entries are tagged with the slot name rather than the generic
-    "hal0-slot@<name>".
+    Delegates to ``Provider.render_systemd_override`` so the rendered
+    docker line stays consistent with the Provider's :class:`ContainerSpec`
+    (devices, group_add, security_opt, mounts, command, image).  The
+    Provider base class owns the systemd quoting and drop-in layout;
+    concrete Providers contribute the spec via ``container_spec()``.
 
     Args:
         slot_name: Slot identifier — used in container name & SyslogIdentifier.
         slot_cfg:  SlotConfig pydantic model or raw dict from TOML load.
         model_info: Optional model metadata (id, path, size_bytes, image, ...).
-        image:     Optional docker image override (wins over model_info["image"]).
-        extra_env: Optional additional docker `-e KEY=VALUE` pairs to inject
-                   (used by providers that need static env beyond what the
-                   slot env file carries — e.g. HUGGINGFACE_HUB_CACHE).
+        image:     Optional docker image override (wins over slot_cfg["image"]
+                   and ``HAL0_TOOLBOX_IMAGE_<BACKEND>``).  Injected into
+                   slot_cfg so the Provider's ``image_ref()`` picks it up
+                   through its normal resolution path.
+        extra_env: Optional additional docker ``-e KEY=VALUE`` pairs to
+                   inject.  Merged into ContainerSpec.env so the rendered
+                   docker line includes them.
 
     Returns:
         Override.conf text ready to be written to
         /etc/systemd/system/hal0-slot@<slot_name>.service.d/override.conf.
     """
-    cfg = _coerce_cfg(slot_cfg)
-    model_info = model_info or {}
+    # Local import avoids a load-time cycle: providers/__init__.py
+    # eventually pulls hal0.api.middleware, which the SlotManager-side
+    # import graph also touches.  Keeping this lazy makes the renderer
+    # safe to import from anywhere.
+    from hal0.providers import get_provider
 
-    backend = cfg.get("backend", "vulkan")
+    cfg = _coerce_cfg(slot_cfg)
+    model_info = dict(model_info or {})
+
     port = cfg.get("port") or cfg.get("slot", {}).get("port")
     if not port:
         raise SlotConfigError(
@@ -145,42 +111,112 @@ def render_override(
             details={"slot": slot_name},
         )
 
-    resolved_image = image or _resolve_image(backend, model_info)
-    container_name = f"hal0-slot-{slot_name}"
+    # The legacy ``image=`` parameter is funnelled into the slot config
+    # so Provider.image_ref() picks it up through its normal resolution
+    # path (slot_cfg["image"] → env var → default map).
+    if image:
+        cfg = {**cfg, "image": image}
+
+    provider_name = cfg.get("provider", "llama-server")
+    try:
+        provider = get_provider(provider_name)
+    except KeyError as exc:
+        raise SlotConfigError(
+            f"slot {slot_name!r} references unknown provider {provider_name!r}",
+            details={"slot": slot_name, "provider": provider_name},
+        ) from exc
+
     slot_env_file = paths.slot_data_dir(slot_name) / "env"
 
-    docker_args: list[str] = [
-        "/usr/bin/docker run --rm",
+    if not extra_env:
+        return provider.render_systemd_override(
+            slot_name,
+            cfg,
+            model_info,
+            env_file_path=slot_env_file,
+        )
+
+    # extra_env path: render with a spec whose env has been merged.
+    # Provider.render_systemd_override rebuilds the spec internally, so
+    # for this case we build the spec ourselves, mutate it, then call
+    # the base-class renderer directly.
+    from dataclasses import replace
+
+    spec = provider.container_spec(cfg, model_info)
+    merged_spec = replace(spec, env={**spec.env, **extra_env})
+    return _render_from_spec(
+        slot_name,
+        merged_spec,
+        provider_name,
+        env_file_path=slot_env_file,
+    )
+
+
+def _render_from_spec(
+    slot_name: str,
+    spec: Any,  # ContainerSpec; ``Any`` to avoid a top-level import cycle
+    provider_name: str,
+    *,
+    env_file_path: Path,
+    container_runtime: str = "/usr/bin/docker",
+) -> str:
+    """Render a drop-in directly from an already-built ContainerSpec.
+
+    Mirrors the default :meth:`Provider.render_systemd_override`
+    implementation but skips the ``container_spec`` rebuild so callers
+    can mutate the spec (e.g. inject ``extra_env``) before rendering.
+
+    Kept in this module rather than on the Provider base class so the
+    Provider contract stays minimal — Providers contribute *specs*, the
+    renderer owns *systemd drop-in shape*.
+    """
+    # Re-use the Provider base class quoting helper to stay consistent.
+    from hal0.providers.base import _quote_for_systemd
+
+    container_name = f"hal0-slot-{slot_name}"
+
+    argv: list[str] = [
+        f"{container_runtime} run --rm",
         f"--name {container_name}",
-        "--network host",
-        f"--env-file {slot_env_file}",
+        f"--env-file {env_file_path}",
     ]
-    for key, value in sorted((extra_env or {}).items()):
-        docker_args.append(f"-e {key}={_quote_env_value(value)}")
-    docker_args.append(resolved_image)
+    if spec.network_mode:
+        argv.append(f"--network {spec.network_mode}")
+    for host_path, container_path in spec.mounts:
+        argv.append(
+            f"-v {_quote_for_systemd(host_path)}:{_quote_for_systemd(container_path)}"
+        )
+    for device in spec.devices:
+        argv.append(f"--device {_quote_for_systemd(device)}")
+    for group in spec.group_add:
+        argv.append(f"--group-add {_quote_for_systemd(str(group))}")
+    for cap in spec.cap_add:
+        argv.append(f"--cap-add {_quote_for_systemd(cap)}")
+    for opt in spec.security_opt:
+        argv.append(f"--security-opt {_quote_for_systemd(opt)}")
+    for key, value in sorted(spec.env.items()):
+        argv.append(f"-e {key}={_quote_for_systemd(value)}")
+    argv.extend(spec.extra_args)
+    argv.append(_quote_for_systemd(spec.image))
+    for arg in spec.command:
+        argv.append(_quote_for_systemd(arg))
 
-    exec_start = " \\\n  ".join(docker_args)
-
-    # The drop-in MUST clear the inherited ExecStart with an empty assignment
-    # before re-setting it — that is systemd's documented mechanism for
-    # overriding a list-valued directive on a template unit.
-    # See `systemd.unit(5)` § "Drop-in files".
+    exec_start = " \\\n  ".join(argv)
     lines = [
-        "# hal0 slot override — rendered by hal0.slots.unit_template.render_override",
+        f"# hal0 slot override — rendered by hal0.slots.unit_template ({provider_name})",
         "# Do not edit manually; changes will be overwritten on the next slot config change.",
         "",
         "[Unit]",
         f"Description=hal0 inference slot ({slot_name})",
         "",
         "[Service]",
-        f"EnvironmentFile={slot_env_file}",
+        f"EnvironmentFile={env_file_path}",
         f"SyslogIdentifier=hal0-slot-{slot_name}",
-        # Clear inherited ExecStart / ExecStop, then set our own.
         "ExecStart=",
         f"ExecStart={exec_start}",
         "ExecStop=",
-        f"ExecStop=/usr/bin/docker stop -t 30 {container_name}",
-        "ExecStopPost=-/usr/bin/docker rm -f " + container_name,
+        f"ExecStop={container_runtime} stop -t 30 {container_name}",
+        f"ExecStopPost=-{container_runtime} rm -f {container_name}",
         "",
     ]
     return "\n".join(lines)

@@ -463,6 +463,33 @@ class SlotManager:
             return []
         return list(await asyncio.gather(*(self.status(n) for n in names)))
 
+    async def iter_configs(self) -> list[dict[str, Any]]:
+        """Return raw slot config dicts for every configured slot.
+
+        Lightweight — reads TOML only, never calls systemctl.  Intended
+        for startup hooks (e.g. ``lifespan`` auto-registering slots as
+        upstreams) that need slot metadata before any real systemd
+        interaction.
+
+        Returns:
+            One dict per slot, in stable order.  Each dict carries at
+            least ``name`` and ``port``; the rest of the SlotConfig
+            shape (``backend``, ``provider``, …) round-trips verbatim.
+        """
+        out: list[dict[str, Any]] = []
+        for name in self._all_configured_slot_names():
+            try:
+                cfg = await self._load_slot_config(name)
+            except SlotConfigError as exc:
+                log.warning(
+                    "slot.config_skipped",
+                    slot=name,
+                    error=str(exc),
+                )
+                continue
+            out.append(cfg)
+        return out
+
     # ── low-level lifecycle ──────────────────────────────────────────────────
 
     async def spawn(self, slot_name: str, slot_cfg: SlotConfig | dict[str, Any]) -> Slot:

@@ -23,6 +23,7 @@ PLAN.md §5 Tier 1 (atomic env writes, health probe hardening).
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 from typing import Any
@@ -31,6 +32,36 @@ import httpx
 
 from hal0.api.middleware.error_codes import Hal0Error
 from hal0.providers.base import ContainerSpec, Provider
+
+log = logging.getLogger(__name__)
+
+
+def _resolve_gpu_group_ids() -> list[int]:
+    """Return numeric GIDs for the GPU access groups on the host.
+
+    The toolbox image ships with a stock ``ubuntu:24.04`` ``/etc/group``
+    that has no ``render``/``video`` entries, so passing the **names** to
+    ``docker run --group-add`` fails fast ("unable to find group ...").
+    Pass the host's numeric GIDs instead — the kernel only cares about
+    the integers when checking access to ``/dev/dri/renderD128`` etc.
+
+    Falls back to the Linux convention (render=993, video=44) on systems
+    without ``grp`` (Windows hosts).  Skips groups that don't exist.
+    """
+    gids: list[int] = []
+    try:
+        import grp
+
+        for name, fallback in (("render", 993), ("video", 44)):
+            try:
+                gids.append(grp.getgrnam(name).gr_gid)
+            except KeyError:
+                # Group missing on this host — skip rather than guess.
+                log.debug("group %r not on host; skipping --group-add", name)
+    except ImportError:
+        # No grp module (Windows) — fall back to conventional Linux GIDs.
+        gids = [993, 44]
+    return gids
 
 # ── Toolbox image refs ─────────────────────────────────────────────────────────
 # Per PLAN.md §12 the hal0 toolbox images are published under
@@ -293,12 +324,26 @@ class LlamaServerProvider(Provider):
     # ── Image / container spec ─────────────────────────────────────────────────
 
     def image_ref(self, slot_cfg: dict[str, Any]) -> str:
-        """Resolve the toolbox image based on slot.backend.
+        """Resolve the toolbox image for this slot.
+
+        Resolution order:
+          1. ``slot_cfg["image"]`` — explicit override from slot TOML
+             (e.g. ``image = "hal0-toolbox-vulkan:dev"`` for local builds).
+          2. ``HAL0_TOOLBOX_IMAGE_{BACKEND}`` env var — installer / operator
+             override without editing slot TOML.  Example:
+             ``HAL0_TOOLBOX_IMAGE_VULKAN=ghcr.io/hal0-dev/...@sha256:abc``
+             materialised by the installer at first-run.
+          3. ``_HAL0_TOOLBOX_IMAGES[backend]`` — the schema default
+             (``ghcr.io/hal0-dev/hal0-toolbox-<backend>:v1``).
 
         Backends: "vulkan" | "rocm" | "cpu" (cpu falls through to vulkan
         since the vulkan image runs on cpu when no GPU is exposed).
-        Default: vulkan.
         """
+        # (1) Per-slot override always wins.
+        override = slot_cfg.get("image") or slot_cfg.get("slot", {}).get("image")
+        if override:
+            return str(override)
+
         backend = (
             slot_cfg.get("backend")
             or slot_cfg.get("slot", {}).get("backend")
@@ -307,6 +352,14 @@ class LlamaServerProvider(Provider):
         )
         if backend == "cpu":
             backend = "vulkan"
+
+        # (2) Env-var override per backend (installer materialisation hook).
+        env_key = f"HAL0_TOOLBOX_IMAGE_{backend.upper()}"
+        env_override = os.environ.get(env_key, "").strip()
+        if env_override:
+            return env_override
+
+        # (3) Default image map.
         image = _HAL0_TOOLBOX_IMAGES.get(backend)
         if image is None:
             raise ValueError(
@@ -371,6 +424,14 @@ class LlamaServerProvider(Provider):
         if hf_home:
             container_env["HF_HOME"] = hf_home
 
+        # ``group_add`` must be **numeric GIDs**, not names: the toolbox
+        # image inherits ``ubuntu:24.04``'s /etc/group, which doesn't
+        # define ``render``/``video``.  Passing names there fails fast
+        # with "unable to find group render".  Resolve from the host's
+        # /etc/group at render time so distros with non-standard GIDs
+        # still work.
+        group_add: list[str] = [str(gid) for gid in _resolve_gpu_group_ids()]
+
         return ContainerSpec(
             image=self.image_ref(slot_cfg),
             command=command,
@@ -379,7 +440,7 @@ class LlamaServerProvider(Provider):
             devices=["/dev/kfd", "/dev/dri"],
             cap_add=[],
             security_opt=["seccomp=unconfined", "apparmor=unconfined"],
-            group_add=["video", "render"],
+            group_add=group_add,
             port=port,
             network_mode="host",
             extra_args=[],

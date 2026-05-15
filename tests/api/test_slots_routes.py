@@ -205,6 +205,66 @@ def test_list_real_wins_on_name_collision(
     assert primaries[0].get("_synthetic") is not True
 
 
+# ── lifespan auto-register ─────────────────────────────────────────────────
+
+
+def test_lifespan_autoregisters_local_slot_as_upstream(
+    slot_root: Path,
+    isolated_client: TestClient,
+    isolated_app: FastAPI,
+) -> None:
+    """A slot TOML on disk produces a matching ``kind=slot`` upstream entry.
+
+    Without this, a fresh install with only a slot TOML can't route
+    ``model: <slot_name>`` requests — the dispatcher resolves via the
+    upstream registry, and SlotManager doesn't auto-mirror its slots
+    there.  The lifespan hook closes that gap.
+    """
+    # ``slot_root`` writes /etc/hal0/slots/primary.toml with port=8081.
+    upstream = isolated_app.state.upstreams.get("primary")
+    assert upstream is not None, "primary slot should be auto-registered as an upstream"
+    assert upstream.kind == "slot"
+    assert upstream.slot_name == "primary"
+    assert upstream.url == "http://127.0.0.1:8081/v1"
+    assert upstream.warmup_strategy == "lazy"
+
+
+def test_lifespan_autoregister_skips_when_explicit_upstream_exists(
+    slot_root: Path,
+    tmp_hal0_home: str,
+) -> None:
+    """An explicit upstreams.toml entry beats auto-register on name collision.
+
+    Operator-supplied URLs (e.g. pointing at a reverse-proxy in front of
+    the slot) must survive lifespan startup unchanged.
+    """
+    # Write upstreams.toml claiming a different URL for the 'primary' slot.
+    cfg_dir = Path(tmp_hal0_home) / "etc" / "hal0"
+    cfg_dir.mkdir(parents=True, exist_ok=True)
+    (cfg_dir / "upstreams.toml").write_text(
+        "\n".join(
+            [
+                "[[upstream]]",
+                'name = "primary"',
+                'kind = "slot"',
+                'url = "http://10.0.0.2:9000/v1"',
+                'slot_name = "primary"',
+                'auth_style = "none"',
+                'warmup_strategy = "eager"',
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    app = create_app()
+    with TestClient(app) as _client:
+        upstream = app.state.upstreams.get("primary")
+        assert upstream is not None
+        # Explicit URL survives — auto-register must have skipped this name.
+        assert upstream.url == "http://10.0.0.2:9000/v1"
+        assert upstream.warmup_strategy == "eager"
+
+
 # ── load-success-path ──────────────────────────────────────────────────────
 
 
