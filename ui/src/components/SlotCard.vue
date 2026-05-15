@@ -43,6 +43,41 @@ const modelLabel = computed(() => {
   return s.length > 36 ? s.slice(0, 34) + '…' : s
 })
 
+// Multi-model display: FLM slots multiplex chat + embed + asr on one NPU.
+// `slot.models` is the full list (chat tag first, then auxiliary tags).
+const allModels = computed(() => {
+  const raw = props.slot.models
+  if (Array.isArray(raw) && raw.length > 0) return raw
+  // Fall back to the single-model fields so non-FLM slots still render.
+  return [modelLabel.value].filter((m) => m && m !== 'no model')
+})
+const hasMultipleModels = computed(() => allModels.value.length > 1)
+function truncateModel(m) {
+  const s = String(m || '')
+  return s.length > 28 ? s.slice(0, 26) + '…' : s
+}
+
+// Hardware-target indicator. Maps slot backend/provider to a category so
+// the chip reads as "this slot runs on the NPU" rather than the abstract
+// "slot" kind. Colours follow our token palette (success=green, accent=cyan,
+// warning=amber, danger=red); CPU is intentionally muted.
+const hardwareTarget = computed(() => {
+  const backend = (props.slot.backend || '').toLowerCase()
+  const provider = (props.slot.provider || '').toLowerCase()
+  // NPU first — FLM and any future amdxdna backends.
+  if (backend === 'flm' || provider === 'flm') return { id: 'npu', label: 'NPU' }
+  // Discrete GPU paths.
+  if (backend === 'cuda' || backend === 'rocm') return { id: 'gpu', label: 'GPU' }
+  // Integrated GPU — Vulkan on Strix Halo / generic iGPU.
+  if (backend === 'vulkan' || backend === 'metal') return { id: 'igpu', label: 'iGPU' }
+  if (backend === 'cpu') return { id: 'cpu', label: 'CPU' }
+  // Custom providers that don't declare a backend — best-effort fallback
+  // based on provider name. Voice / vibevoice / moonshine run on iGPU+CPU
+  // mix in haloai but show as 'iGPU' for now.
+  if (provider === 'kokoro' || provider === 'moonshine') return { id: 'igpu', label: 'iGPU' }
+  return { id: 'unknown', label: backend || provider || 'slot' }
+})
+
 function fmtUptime(s) {
   if (!s || s < 60) return '—'
   const mins = Math.floor(s / 60), hrs = Math.floor(mins / 60), days = Math.floor(hrs / 24)
@@ -103,12 +138,24 @@ const sparkSvg = computed(() => {
       <span class="sc-port mono">{{ slot.port ? `:${slot.port}` : '—' }}</span>
     </div>
 
-    <div class="sc-model mono" :title="modelLabel">{{ modelLabel }}</div>
+    <div class="sc-models">
+      <template v-if="hasMultipleModels">
+        <span
+          v-for="(m, i) in allModels"
+          :key="m"
+          class="sc-model-chip mono"
+          :class="{ primary: i === 0 }"
+          :title="m"
+        >{{ truncateModel(m) }}</span>
+      </template>
+      <template v-else>
+        <span class="sc-model mono" :title="modelLabel">{{ modelLabel }}</span>
+      </template>
+    </div>
 
     <div class="sc-meta">
-      <span v-if="slot.backend" class="sc-chip">{{ slot.backend }}</span>
+      <span class="sc-chip" :class="`hw-${hardwareTarget.id}`">{{ hardwareTarget.label }}</span>
       <span v-if="slot.context_size" class="sc-chip dim">ctx {{ (slot.context_size / 1024).toFixed(0) }}K</span>
-      <span v-if="slot.kind" class="sc-chip dim">{{ slot.kind }}</span>
     </div>
 
     <!-- Stats row -->
@@ -214,13 +261,35 @@ const sparkSvg = computed(() => {
   50%      { box-shadow: 0 0 0 4px color-mix(in oklch, currentColor, transparent 90%); }
 }
 
-.sc-model {
+.sc-models {
   padding: 0 12px;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+  min-height: 17px;
+}
+.sc-model {
   font-size: 11px;
   color: var(--color-fg-muted);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  max-width: 100%;
+}
+.sc-model-chip {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-2);
+  color: var(--color-fg-muted);
+  border: 1px solid var(--color-border);
+  white-space: nowrap;
+}
+.sc-model-chip.primary {
+  color: var(--color-fg);
+  border-color: color-mix(in oklch, var(--color-accent), transparent 60%);
+  background: color-mix(in oklch, var(--color-accent), transparent 90%);
 }
 
 .sc-meta {
@@ -238,9 +307,34 @@ const sparkSvg = computed(() => {
   background: var(--color-surface-2);
   color: var(--color-fg-muted);
   border: 1px solid var(--color-border);
-  text-transform: lowercase;
+  letter-spacing: 0.04em;
 }
-.sc-chip.dim { opacity: 0.7; }
+.sc-chip.dim { opacity: 0.7; text-transform: lowercase; }
+
+/* Hardware target chip — colour-coded so the user can see at a glance
+   which compute path the slot uses. NPU is amber (distinctive), GPU red,
+   iGPU green (Strix Halo's default path), CPU muted. */
+.sc-chip.hw-npu  {
+  color: var(--color-warning);
+  border-color: color-mix(in oklch, var(--color-warning), transparent 60%);
+  background: color-mix(in oklch, var(--color-warning), transparent 88%);
+}
+.sc-chip.hw-gpu  {
+  color: var(--color-danger);
+  border-color: color-mix(in oklch, var(--color-danger), transparent 60%);
+  background: color-mix(in oklch, var(--color-danger), transparent 88%);
+}
+.sc-chip.hw-igpu {
+  color: var(--color-success);
+  border-color: color-mix(in oklch, var(--color-success), transparent 60%);
+  background: color-mix(in oklch, var(--color-success), transparent 88%);
+}
+.sc-chip.hw-cpu  {
+  color: var(--color-fg-muted);
+  border-color: var(--color-border-hi);
+  background: var(--color-surface-3);
+}
+.sc-chip.hw-unknown { opacity: 0.6; text-transform: lowercase; }
 
 .sc-stats {
   margin: 8px 12px 0;

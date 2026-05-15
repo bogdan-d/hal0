@@ -223,6 +223,12 @@ class SlotManager:
             )
 
         prior = self._states.get(name)
+        # Carry prior extras forward (backend / provider stamped at create
+        # time should survive starting→warming→ready transitions). Caller-
+        # supplied keys override, missing keys inherit.
+        carried_extra: dict[str, Any] = dict(prior.extra) if prior else {}
+        if extra:
+            carried_extra.update(extra)
         record = SlotStateRecord(
             name=name,
             state=to_state,
@@ -230,7 +236,7 @@ class SlotManager:
             port=port or (prior.port if prior else 0),
             updated_at=time.time(),
             message=message,
-            extra=extra or {},
+            extra=carried_extra,
         )
         # Persist atomically before broadcasting — readers via state_stream
         # observe state.json on disk after they read the queue (Tier 3).
@@ -618,7 +624,10 @@ class SlotManager:
             SlotState.OFFLINE,
             port=_cfg_port(cfg_dict),
             model_id=_model_default(cfg_dict) or None,
-            extra={"backend": cfg_dict.get("backend", "vulkan")},
+            extra={
+                "backend": cfg_dict.get("backend", "vulkan"),
+                "provider": cfg_dict.get("provider", "llama-server"),
+            },
             force=True,
         )
         return await self.status(slot_name)

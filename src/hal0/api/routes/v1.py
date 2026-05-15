@@ -15,6 +15,7 @@ clients (OpenWebUI, the chat UI, third-party SDKs) work unmodified.
 from __future__ import annotations
 
 import json
+import re
 import time
 from typing import Any
 
@@ -84,7 +85,23 @@ async def _read_json_body(request: Request) -> dict[str, Any]:
 
     The dispatcher tolerates empty bodies (path-default model resolution
     kicks in); validation of the parsed shape belongs to the upstream.
+
+    Multipart/form-data requests (audio uploads to /v1/audio/transcriptions
+    and friends) are not JSON; we parse just enough to extract the ``model``
+    field so the dispatcher can route. The body itself is forwarded raw —
+    the upstream FLM server re-reads multipart from the inbound request.
     """
+    content_type = (request.headers.get("content-type") or "").lower()
+    if content_type.startswith("multipart/form-data"):
+        try:
+            form = await request.form()
+        except Exception:
+            return {}
+        # Surface the model field so dispatcher.dispatch can route; other
+        # fields aren't needed at this layer.
+        model = form.get("model")
+        return {"model": str(model)} if isinstance(model, str) else {}
+
     try:
         raw = await request.body()
     except Exception:
@@ -196,9 +213,83 @@ async def rerankings(request: Request, dispatcher: DispatcherDep) -> Response:
 
 @router.post("/audio/transcriptions")
 async def audio_transcriptions(request: Request, dispatcher: DispatcherDep) -> Response:
-    return await _dispatch_and_forward(request, dispatcher)
+    # Multipart upload — extract the model field to route, then forward the
+    # raw multipart bytes unchanged so the upstream's own multipart parser
+    # works. JSON re-encoding (the default dispatch path) would corrupt the
+    # WAV payload.
+    return await _forward_multipart(request, dispatcher)
 
 
 @router.post("/audio/speech")
 async def audio_speech(request: Request, dispatcher: DispatcherDep) -> Response:
+    # /v1/audio/speech is the TTS input direction — body is JSON
+    # ({"model": "...", "input": "...", "voice": "..."}). Standard path.
     return await _dispatch_and_forward(request, dispatcher)
+
+
+_MODEL_FIELD_RE = re.compile(
+    rb'Content-Disposition:\s*form-data;\s*name="model"\s*\r\n\r\n([^\r\n]+)',
+    re.IGNORECASE,
+)
+
+
+def _extract_multipart_model(raw_body: bytes) -> str:
+    """Pull the ``model`` form field out of a multipart body.
+
+    Multipart bodies hold each field as a part with a Content-Disposition
+    header naming it; for the ``model`` field the value is a short ASCII
+    string immediately following the header's blank line. A regex match
+    avoids the full streaming parser starlette ships (which would re-read
+    request.stream() — empty after request.body() consumes it).
+    """
+    m = _MODEL_FIELD_RE.search(raw_body or b"")
+    if not m:
+        return ""
+    try:
+        return m.group(1).decode("utf-8", errors="replace").strip()
+    except Exception:
+        return ""
+
+
+async def _forward_multipart(request: Request, dispatcher: DispatcherDep) -> Response:
+    """Route a multipart request without re-serialising its body.
+
+    The dispatcher's normal _remap_model path JSON-encodes the body, which
+    corrupts multipart payloads (WAV files etc.). We:
+
+    1. Buffer the raw inbound bytes.
+    2. Extract the ``model`` form field with a single regex over the bytes —
+       starlette's request.form() reads from request.stream() which is
+       empty after request.body() has already consumed the body.
+    3. Hand the dispatcher a fake-body dict carrying only ``{"model": ...}``
+       so its route resolution still works.
+    4. After dispatch picks an upstream, overwrite call.body with the
+       original raw bytes + content-type header so httpx forwards verbatim.
+    """
+    import httpx
+
+    raw_body = await request.body()
+    headers = dict(request.headers)
+    content_type = headers.get("content-type") or "multipart/form-data"
+    model_value = _extract_multipart_model(raw_body)
+
+    call = await dispatcher.dispatch(request, body={"model": model_value} if model_value else {})
+
+    last_used = getattr(request.app.state, "last_used_model", None)
+    if last_used is not None and call.upstream_name and call.resolved_model:
+        last_used[call.upstream_name] = call.resolved_model
+
+    # Replace the dispatcher's JSON-encoded body with the raw multipart bytes.
+    call.body = raw_body
+    call.headers = {**call.headers, "content-type": content_type}
+
+    # Reuse the dispatcher's existing forward path.
+    try:
+        return await dispatcher.forward(call)
+    except httpx.HTTPError as exc:
+        from hal0.dispatcher.router import UpstreamUnavailable
+
+        raise UpstreamUnavailable(
+            f"upstream {call.upstream_name!r} multipart forward failed: {exc}",
+            details={"upstream": call.upstream_name, "error": str(exc)},
+        ) from exc

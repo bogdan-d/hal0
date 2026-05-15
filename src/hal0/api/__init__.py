@@ -83,6 +83,51 @@ async def _autoregister_slot_upstreams(
         log.info("slots.autoregistered", slot=name, port=int(port))
 
 
+# ── FLM multiplex model seeding ────────────────────────────────────────────
+# An FLM slot can serve up to three models from one process — the chat tag
+# in ``model.default`` plus embed-gemma (when ``defaults.load_embed=true``)
+# plus whisper-v3:turbo (when ``defaults.load_asr=true``). Those auxiliary
+# models don't show up in FLM's ``/v1/models`` response (it only lists chat
+# tags), so the dispatcher's passthrough cache never learns about them and
+# routes ``model: "embed-gemma"`` to nowhere. Seed the cache explicitly.
+_FLM_EMBED_TAG = "embed-gemma"
+_FLM_ASR_TAG = "whisper-v3:turbo"
+
+
+async def _seed_multiplex_models(
+    registry: UpstreamRegistry,
+    slot_manager: SlotManager,
+    model_cache: dict[str, list[str]],
+) -> None:
+    """Add FLM multiplex tags (embed-gemma, whisper-v3:turbo) to the model
+    cache for any slot whose config opts into the matching multiplex.
+
+    Idempotent — appends only when missing. Runs after
+    ``_autoregister_slot_upstreams`` so every slot already has an upstream
+    entry by the time we touch its cache key.
+    """
+    try:
+        cfgs = await slot_manager.iter_configs()
+    except Exception as exc:
+        log.warning("slots.multiplex_seed_failed", error=str(exc))
+        return
+    for cfg in cfgs:
+        name = cfg.get("name", "")
+        provider = cfg.get("provider", "")
+        if provider != "flm" or not name:
+            continue
+        if registry.get(name) is None:
+            continue
+        defaults = cfg.get("defaults") or {}
+        bucket = model_cache.setdefault(name, [])
+        if defaults.get("load_embed") and _FLM_EMBED_TAG not in bucket:
+            bucket.append(_FLM_EMBED_TAG)
+            log.info("slots.multiplex_seeded", slot=name, model=_FLM_EMBED_TAG)
+        if defaults.get("load_asr") and _FLM_ASR_TAG not in bucket:
+            bucket.append(_FLM_ASR_TAG)
+            log.info("slots.multiplex_seeded", slot=name, model=_FLM_ASR_TAG)
+
+
 def _hydrate_upstreams(registry: UpstreamRegistry) -> None:
     """Populate the upstream registry from /etc/hal0/upstreams.toml.
 
@@ -141,8 +186,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     async def _fetch_and_cache(u: Upstream) -> list[str]:
         models = await upstreams.fetch_models(u.name)
-        model_cache[u.name] = models
-        return models
+        # Preserve multiplex tags seeded at startup (e.g. embed-gemma /
+        # whisper-v3:turbo on FLM slots). Without this, the dispatcher's
+        # cold-cache prefetch overwrites the seeded entries and embed /
+        # asr routing breaks until process restart.
+        existing = model_cache.get(u.name, [])
+        merged = list(models)
+        for tag in existing:
+            if tag not in merged:
+                merged.append(tag)
+        model_cache[u.name] = merged
+        return merged
 
     dispatcher = Dispatcher(
         upstream_registry=upstreams,
@@ -163,6 +217,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # upstreams.toml entries (hydrated above) win — autoregister skips
     # names that already exist in the registry.
     await _autoregister_slot_upstreams(upstreams, slot_manager)
+    await _seed_multiplex_models(upstreams, slot_manager, model_cache)
 
     from hal0.hardware import HardwareStats
 

@@ -45,18 +45,37 @@ def _get_slot_manager(request: Request) -> SlotManager:
     return sm
 
 
-def _slot_to_dict(slot: Slot) -> dict[str, Any]:
+def _slot_to_dict(slot: Slot, request: Request | None = None) -> dict[str, Any]:
     """Serialise a real Slot snapshot into the API shape.
 
     Adds ``kind="local"`` so the UI can distinguish real slots from the
     synthetic upstream-backed entries (which carry ``kind="remote"`` or
     similar and ``_synthetic: true``).
+
+    When ``request`` is provided, also includes a ``models`` list pulled
+    from the shared model cache. For an FLM slot serving chat + embed +
+    asr concurrently, this surfaces all three tags so the dashboard can
+    render the slot as multi-model instead of showing only the chat tag.
     """
     base = slot.as_dict()
     base["kind"] = "local"
-    # Mirror the synthetic shape's top-level ``status`` field so the
-    # dashboard's existing slot rendering keeps working without a branch.
     base["status"] = slot.state.value
+    # Lift backend / provider out of metadata to the top level so the UI
+    # doesn't have to dig — the slot snapshot's `backend` is only set on
+    # transitions that pass it explicitly, but metadata carries both
+    # consistently after create / update_config.
+    meta = base.get("metadata") or {}
+    if not base.get("backend") and meta.get("backend"):
+        base["backend"] = meta.get("backend")
+    if not base.get("provider") and meta.get("provider"):
+        base["provider"] = meta.get("provider")
+    if request is not None:
+        cache = getattr(request.app.state, "model_cache", {}) or {}
+        loaded = list(cache.get(slot.name, []))
+        if slot.model_id and slot.model_id in loaded:
+            loaded.remove(slot.model_id)
+            loaded.insert(0, slot.model_id)
+        base["models"] = loaded
     return base
 
 
@@ -121,7 +140,7 @@ async def list_slots(request: Request) -> list[dict[str, object]]:
     """
     sm = _get_slot_manager(request)
     real_slots = await sm.list()
-    real_entries: list[dict[str, Any]] = [_slot_to_dict(s) for s in real_slots]
+    real_entries: list[dict[str, Any]] = [_slot_to_dict(s, request) for s in real_slots]
     real_names = {entry["name"] for entry in real_entries}
 
     synthetic = _synthesize_slots_from_upstreams(request)
@@ -156,7 +175,7 @@ async def create_slot(request: Request) -> dict[str, object]:
         raise Hal0Error("slot 'name' is required (non-empty string)")
 
     snap = await sm.create(name, body)
-    return _slot_to_dict(snap)
+    return _slot_to_dict(snap, request)
 
 
 # ── metrics / capacity ─────────────────────────────────────────────────────
@@ -233,7 +252,7 @@ async def get_slot(name: str, request: Request) -> dict[str, object]:
     sm = _get_slot_manager(request)
     try:
         snap = await sm.status(name)
-        return _slot_to_dict(snap)
+        return _slot_to_dict(snap, request)
     except Exception:
         # Fall through to synthetic lookup before re-raising — a remote
         # upstream named ``haloai`` should be observable via this endpoint
@@ -279,7 +298,7 @@ async def update_slot_config(name: str, request: Request) -> dict[str, object]:
     if not isinstance(body, dict):
         raise Hal0Error("request body must be a JSON object")
     snap = await sm.update_config(name, body)
-    return _slot_to_dict(snap)
+    return _slot_to_dict(snap, request)
 
 
 @router.patch("/{name}/defaults")
@@ -297,7 +316,7 @@ async def update_slot_defaults(name: str, request: Request) -> dict[str, object]
     if not isinstance(body, dict):
         raise Hal0Error("request body must be a JSON object")
     snap = await sm.update_config(name, {"model": body})
-    return _slot_to_dict(snap)
+    return _slot_to_dict(snap, request)
 
 
 @router.post("/{name}/backend")
@@ -312,7 +331,7 @@ async def set_slot_backend(name: str, request: Request) -> dict[str, object]:
     if not isinstance(backend, str) or not backend.strip():
         raise Hal0Error("'backend' is required in request body")
     snap = await sm.update_config(name, {"backend": backend})
-    return _slot_to_dict(snap)
+    return _slot_to_dict(snap, request)
 
 
 # ── lifecycle ──────────────────────────────────────────────────────────────
@@ -330,21 +349,21 @@ async def load_slot(name: str, request: Request) -> dict[str, object]:
         body = {}
     model_id = body.get("model_id") if isinstance(body, dict) else None
     snap = await sm.load(name, model_id=model_id)
-    return _slot_to_dict(snap)
+    return _slot_to_dict(snap, request)
 
 
 @router.post("/{name}/unload")
 async def unload_slot(name: str, request: Request) -> dict[str, object]:
     sm = _get_slot_manager(request)
     snap = await sm.unload(name)
-    return _slot_to_dict(snap)
+    return _slot_to_dict(snap, request)
 
 
 @router.post("/{name}/restart")
 async def restart_slot(name: str, request: Request) -> dict[str, object]:
     sm = _get_slot_manager(request)
     snap = await sm.restart(name)
-    return _slot_to_dict(snap)
+    return _slot_to_dict(snap, request)
 
 
 @router.post("/{name}/swap")
@@ -362,7 +381,7 @@ async def swap_slot(name: str, request: Request) -> dict[str, object]:
             details={"slot": name},
         )
     snap = await sm.swap(name, model_id)
-    return _slot_to_dict(snap)
+    return _slot_to_dict(snap, request)
 
 
 # ── logs ───────────────────────────────────────────────────────────────────
