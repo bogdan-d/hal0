@@ -102,7 +102,22 @@ jobs:
                        || true
           docker image prune -af || true
           docker buildx prune -af || true
-          df -h /
+          # GHA runners give us /mnt with ~80 GB unused while / has only
+          # ~14 GB.  Move Docker's data-root to /mnt so build layers /
+          # overlay storage land on the big disk.  This is the only
+          # reliable fix for "Errno 28 No space left on device" inside a
+          # multi-GB pip install.
+          if [ -d /mnt ]; then
+            sudo systemctl stop docker docker.socket containerd
+            sudo mkdir -p /mnt/docker
+            if [ -d /var/lib/docker ]; then
+              sudo mv /var/lib/docker /mnt/docker/lib || sudo cp -a /var/lib/docker /mnt/docker/lib
+              sudo rm -rf /var/lib/docker
+            fi
+            sudo ln -sf /mnt/docker/lib /var/lib/docker
+            sudo systemctl start containerd docker
+          fi
+          df -h / /mnt 2>/dev/null || df -h /
 
       - name: Set up Docker Buildx
         if: steps.filter.outputs.build == 'true'

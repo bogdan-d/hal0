@@ -113,10 +113,11 @@ RUN git clone --depth 1 --branch "${COMFYUI_REF}" \
 # torch-2.5.1 is the current stable ROCm 6.2 wheel set on
 # download.pytorch.org/whl/rocm6.2 (2.4.x was removed from the index
 # 2026-04). Compatible with ComfyUI 0.3.x.
-RUN pip install --index-url https://download.pytorch.org/whl/rocm6.2 \
+RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/rocm6.2 \
         torch==2.5.1+rocm6.2 \
         torchvision==0.20.1+rocm6.2 \
-    && pip install -r requirements.txt
+    && pip install --no-cache-dir -r requirements.txt \
+    && rm -rf /root/.cache/pip /tmp/* /var/tmp/*
 
 # Pre-create the persistent layout so the bind-mounted host directory
 # starts with the right shape even on first run.
