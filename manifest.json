@@ -1,0 +1,29 @@
+{
+  "_schema": "hal0.manifest.v1",
+  "_comment": "Toolbox image digests pinned per hal0 release. Phase 5 (update mechanism) replaces these placeholders with real cosign-signed digests. Until then images are pulled by :v1 tag. Schema: each toolbox is keyed by short name with 'image' (ghcr ref) and 'digest' (sha256:... or 'placeholder'). See PLAN.md §12 (toolbox images) and §17 (Risks: 'Toolbox images on ghcr.io/hal0-dev/ blocked by org provisioning').",
+  "version": "0.0.0",
+  "channel": "dev",
+  "toolboxes": {
+    "vulkan": {
+      "image": "ghcr.io/hal0-dev/hal0-toolbox-vulkan:v1",
+      "digest": "placeholder"
+    },
+    "rocm": {
+      "image": "ghcr.io/hal0-dev/hal0-toolbox-rocm:v1",
+      "digest": "placeholder"
+    },
+    "flm": {
+      "image": "ghcr.io/hal0-dev/hal0-toolbox-flm:v1",
+      "digest": "placeholder"
+    },
+    "moonshine": {
+      "image": "ghcr.io/hal0-dev/hal0-toolbox-moonshine:v1",
+      "digest": "placeholder"
+    },
+    "kokoro": {
+      "image": "ghcr.io/hal0-dev/hal0-toolbox-kokoro:v1",
+      "digest": "placeholder",
+      "_upstream_reference": "ghcr.io/remsky/kokoro-fastapi-cpu:latest"
+    }
+  }
+}

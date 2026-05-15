@@ -1,44 +1,117 @@
 """Dispatcher — registry-aware request router.
 
-The Dispatcher reads the model registry and upstream list to decide where
-to forward each OpenAI-compatible request.  It does not start or stop slots;
-if a slot is offline, it returns a structured dispatch error and leaves slot
-management to the caller.
+The :class:`Dispatcher` reads the model registry and upstream list to
+decide where to forward each OpenAI-compatible request.  It does not
+start or stop slots; if a slot is offline, it returns a structured
+dispatch error and leaves slot management to the caller.
 
-Resolution order (per PLAN.md §1 and haloai lib/dispatcher.py):
-  1. Exact registry binding: request.model → registered slot/upstream
-  2. Provider fallback: cold-cache prefetch, single-flight coalescing
-  3. Upstream fallback: remote upstream if all local slots are busy/offline
-  4. Error: no route found → {"error": {"code": "dispatch.no_route", ...}}
+Resolution order (PLAN.md §3, ported from haloai ``lib/dispatcher.py``):
 
-Decision logging: every routing decision emits one structured log line with
-{request_id, model, resolution_path, upstream, cache_state, latency_ms}
-to journald with SYSLOG_IDENTIFIER=hal0-dispatch (PLAN.md §5 Tier 2).
+  1. **registry** — exact :class:`ModelRegistry` binding for the requested
+     model id (or path-default for ``/embeddings`` and ``/rerank``).  If
+     the bound upstream is online, forward there.
+  2. **passthrough** — pick any upstream whose cached ``/v1/models``
+     already advertises the requested model id.
+  3. **cold-cache prefetch** — fan out ``/v1/models`` against remote
+     upstreams whose caches are empty (with a configurable timeout —
+     Tier 2), then re-check passthrough.  The prefetch fanout is wrapped
+     in :class:`SingleFlightGroup` (Tier 3) so 100 concurrent identical
+     prefetches share a single upstream call.
+  4. **legacy fallback** — :func:`hal0.dispatcher.proxy.resolve_slot`
+     path-and-name heuristics from haloai ``lib/proxy.py``.  Kept until
+     v0.2.
 
-Port target: haloai lib/dispatcher.py (617 lines).
-See PLAN.md §3 and §5 Tier 2.
+Decision logging: every routing decision emits one structured log line
+to journald with ``SYSLOG_IDENTIFIER=hal0-dispatch`` (PLAN.md §5 Tier 2),
+carrying ``{request_id, model, resolution_path, upstream, cache_state,
+latency_ms}``.
+
+Port targets: haloai ``lib/dispatcher.py`` (617 lines), ``lib/proxy.py``.
+See PLAN.md §3 and §5 Tier 1+2+3.
 """
 
 from __future__ import annotations
 
+import asyncio
+import json
+import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from hal0.upstreams.registry import UpstreamRegistry
+import structlog
+
+from hal0.api.middleware.error_codes import Hal0Error
+from hal0.dispatcher.proxy import LegacyResolutionFailed, resolve_slot
+from hal0.dispatcher.single_flight import SingleFlightGroup
+from hal0.upstreams.registry import Upstream, UpstreamRegistry
 
 if TYPE_CHECKING:
     from fastapi import Request
+
+    from hal0.registry.store import ModelRegistry
+
+# NOTE: structlog binds via contextvars in the request_id middleware, so
+# this logger automatically carries {request_id} on every emitted line.
+log = structlog.get_logger("hal0-dispatch")
+
+# Path defaults used only for routing — never written back into the body.
+# Mirrors haloai lib/dispatcher.py:_DEFAULT_MODEL etc.
+_DEFAULT_MODEL = "primary"
+_EMBED_DEFAULT = "embed"
+_RERANK_DEFAULT = "embed"
+
+
+# ── Typed errors ──────────────────────────────────────────────────────────────
+
+
+class DispatchError(Hal0Error):
+    """Base for any failure the dispatcher itself raises.
+
+    All subclasses use the ``dispatch.*`` namespace so the structured
+    error envelope identifies them as routing failures rather than
+    upstream errors.
+    """
+
+    code = "dispatch.error"
+    status = 500
+
+
+class NoRouteFound(DispatchError):
+    """No upstream could be found for the requested model id."""
+
+    code = "dispatch.no_route"
+    status = 404
+
+
+class UnknownUpstream(DispatchError):
+    """Registry binds the model to an upstream that is not registered."""
+
+    code = "dispatch.unknown_upstream"
+    status = 400
+
+
+class RegistryLoadFailed(DispatchError):  # TIER1
+    """Reading the registry raised — surface it instead of silently swallowing.
+
+    Replaces the haloai ``lib/dispatcher.py:115-120`` ``except Exception``
+    that returned an empty dict on failure (silently degrading every
+    subsequent dispatch to passthrough-only).  Now: log WARN, raise typed.
+    """
+
+    code = "dispatch.registry_unavailable"
+    status = 503
+
+
+# ── UpstreamCall ──────────────────────────────────────────────────────────────
 
 
 @dataclass
 class UpstreamCall:
     """A fully-resolved routing decision ready to be forwarded.
 
-    Mirrors the shape in haloai lib/dispatcher.py, adapted for hal0's
-    typed Upstream model.
-
-    All fields are set before the Dispatcher returns; callers must not
-    mutate this object.
+    Mirrors the shape in haloai ``lib/dispatcher.py``, adapted for hal0's
+    typed :class:`Upstream` model.
     """
 
     upstream_name: str
@@ -68,46 +141,461 @@ class UpstreamCall:
     resolution_path: str = ""
     """Debug breadcrumb describing how this routing decision was made.
 
-    Examples: "registry.exact", "registry.fallback", "upstream.remote".
+    Examples: ``registry``, ``passthrough:openrouter``,
+    ``passthrough-prefetched:anthropic``, ``legacy_slot:primary``.
     """
 
     latency_ms: float = 0.0
     """Time spent in routing logic (not including the upstream round-trip)."""
 
 
+# ── Hook protocols (cross-subtree stubs) ──────────────────────────────────────
+#
+# `cached_models`, `is_online`, and `fetch_models` are owned by Agent J's
+# upstreams subtree.  Until that lands, the Dispatcher accepts them as
+# injectable callables and falls back to safe defaults (empty cache,
+# best-effort fetch via UpstreamRegistry.fetch_models()).  This keeps the
+# Dispatcher testable in isolation while preserving the haloai algorithm.
+
+CachedModelsFn = Callable[[str], list[str]]
+"""Return the cached /v1/models list for an upstream by name (may be empty)."""
+
+IsOnlineFn = Callable[[Upstream], Awaitable[bool]]
+"""Async predicate: is this upstream reachable right now?"""
+
+FetchModelsFn = Callable[[Upstream], Awaitable[list[str]]]
+"""Async fetcher: pull /v1/models from the upstream, updating its cache."""
+
+
+def _default_cached_models(_name: str) -> list[str]:
+    # NOTE: until Agent J wires the cache, every cache lookup is empty so
+    # passthrough never short-circuits.  Cold-cache prefetch still triggers.
+    return []
+
+
+async def _default_is_online(_upstream: Upstream) -> bool:
+    # NOTE: pessimistic default — Agent J's health probe will replace this.
+    return False
+
+
+async def _default_fetch_models(_upstream: Upstream) -> list[str]:
+    return []
+
+
+# ── Dispatcher ────────────────────────────────────────────────────────────────
+
+
 class Dispatcher:
     """Routes incoming OpenAI-compatible requests to an upstream or slot.
 
-    Instantiated once in the API lifespan and injected via Depends().
-    Thread/async-safe: all state is either immutable or protected by asyncio
-    locks inside UpstreamRegistry.
+    Instantiated once in the API lifespan and injected via FastAPI
+    ``Depends()``.  Thread/async-safe: all state is either immutable or
+    confined to per-call locals / asyncio primitives.
+
+    Dependencies are constructor-injected so unit tests can mock them
+    cleanly:
+
+    Args:
+        upstream_registry:  Registry of routing targets.
+        model_registry:     Source of truth for model→upstream bindings.
+        prefetch_timeout_s: Cold-cache prefetch fanout timeout
+                            (PLAN.md §5 Tier 2 — was hardcoded 4s, now 8s).
+        cached_models:      Returns the cached /v1/models for an upstream.
+        is_online:          Health probe predicate.
+        fetch_models:       Async /v1/models fetcher.
+        single_flight:      Coalescing group for prefetch fanouts (Tier 3).
     """
 
-    def __init__(self, upstream_registry: UpstreamRegistry | None = None) -> None:
+    def __init__(
+        self,
+        upstream_registry: UpstreamRegistry | None = None,
+        model_registry: ModelRegistry | None = None,
+        *,
+        prefetch_timeout_s: float = 8.0,  # TIER2 — configurable (was hardcoded 4s)
+        cached_models: CachedModelsFn | None = None,
+        is_online: IsOnlineFn | None = None,
+        fetch_models: FetchModelsFn | None = None,
+        single_flight: SingleFlightGroup | None = None,
+    ) -> None:
         self._upstreams = upstream_registry or UpstreamRegistry()
-        # NOTE: prefetch_timeout_s is configurable (PLAN.md §5 Tier 2, default 8s)
-        self.prefetch_timeout_s: float = 8.0
+        self._models = model_registry
+        # TIER2 — prefetch timeout is configurable.  Default 8s (haloai had 4s).
+        self.prefetch_timeout_s: float = prefetch_timeout_s
+        self._cached_models: CachedModelsFn = cached_models or _default_cached_models
+        self._is_online: IsOnlineFn = is_online or _default_is_online
+        self._fetch_models: FetchModelsFn = fetch_models or _default_fetch_models
+        # TIER3 — every cold-cache prefetch goes through this group.
+        self._single_flight: SingleFlightGroup = single_flight or SingleFlightGroup()
 
-    async def dispatch(self, request: Request, body: dict[str, Any] | None = None) -> UpstreamCall:
-        """Resolve a request to an UpstreamCall.
+    # ── public API ────────────────────────────────────────────────────────
+
+    async def dispatch(
+        self,
+        request: Request,
+        body: dict[str, Any] | None = None,
+    ) -> UpstreamCall:
+        """Resolve a request to an :class:`UpstreamCall`.
 
         Args:
             request: The incoming FastAPI Request object.
-            body:    Parsed JSON body dict.  If None, the body will be read
-                     from request.body() internally.
+            body:    Parsed JSON body dict.  If None, the body is read
+                     from ``request.body()`` internally.
 
         Returns:
-            A populated UpstreamCall ready for forwarding.
+            A populated :class:`UpstreamCall` ready for forwarding.
 
         Raises:
-            NotImplementedError: Until Phase 1 port from haloai lib/dispatcher.py.
+            NoRouteFound: No upstream could serve the request.
+            UnknownUpstream: Registry pointed at a non-existent upstream.
+            RegistryLoadFailed: Reading the registry raised.
         """
-        raise NotImplementedError("Phase 1: port from /opt/haloai/lib/dispatcher.py")
+        t0 = time.monotonic()
+        if body is None:
+            try:
+                body = await request.json()
+            except Exception:
+                body = {}
+        body = body or {}
+        path = request.url.path
+        method = request.method
 
-    async def forward(self, call: UpstreamCall) -> Any:
+        original_model = ""
+        raw_model = body.get("model")
+        if isinstance(raw_model, str):
+            original_model = raw_model.strip()
+        model_id = original_model or self._default_for_path(path)
+        streaming = bool(body.get("stream"))
+
+        # ── Step 1: registry lookup ──────────────────────────────────────
+        registry_entry = self._registry_route_for(model_id)
+        if registry_entry is not None:
+            upstream_name, upstream_model = registry_entry
+            upstream = self._upstreams.get(upstream_name)
+            if upstream is None:
+                # Explicit binding to a missing upstream — config error, not a
+                # silent fallthrough.  Mirrors haloai's UnknownUpstream raise.
+                raise UnknownUpstream(
+                    f"model {model_id!r} maps to upstream {upstream_name!r} "
+                    f"which is not registered in upstreams.toml",
+                    details={"model": model_id, "upstream": upstream_name},
+                )
+
+            advertised = self._cached_models(upstream.name)
+            online = bool(advertised) or await self._is_online(upstream)
+            if not online and upstream.kind == "slot":
+                # Slot caches can be cold even when healthy.  Try one fresh
+                # fetch before declaring it offline.
+                try:
+                    await self._fetch_models(upstream)
+                    advertised = self._cached_models(upstream.name)
+                    online = bool(advertised)
+                except Exception as exc:  # TIER1 — log, don't swallow silently
+                    log.warning(
+                        "registry-bound slot fetch failed",
+                        upstream=upstream.name,
+                        model=model_id,
+                        error=str(exc),
+                    )
+
+            if online:
+                # Slot-as-truth body remap: if the requested model id isn't
+                # in the slot's advertised set, rewrite to what the slot
+                # actually has loaded (required for strict backends like vLLM).
+                effective_body = body
+                resolved = upstream_model
+                if advertised and model_id not in advertised:
+                    actual = next(iter(advertised))
+                    effective_body = {**body, "model": actual}
+                    resolved = actual
+                call = UpstreamCall(
+                    upstream_name=upstream.name,
+                    target_url=_join_url(upstream.url, path),
+                    headers=self._build_headers(request, upstream),
+                    body=json.dumps(effective_body).encode("utf-8"),
+                    streaming=streaming,
+                    method=method,
+                    resolved_model=resolved,
+                    requested_model=original_model,
+                    resolution_path="registry",
+                )
+                self._log_decision(call, t0, cache_state="warm" if advertised else "probed")
+                return call
+            # Registry-bound slot offline → fall through.
+            log.info(
+                "registry binding offline; falling through",
+                upstream=upstream.name,
+                model=model_id,
+            )
+
+        # ── Step 2: passthrough on warm caches ───────────────────────────
+        for upstream in self._upstreams_in_priority_order():
+            if model_id in self._cached_models(upstream.name):
+                call = UpstreamCall(
+                    upstream_name=upstream.name,
+                    target_url=_join_url(upstream.url, path),
+                    headers=self._build_headers(request, upstream),
+                    body=_remap_model(body, model_id),
+                    streaming=streaming,
+                    method=method,
+                    resolved_model=model_id,
+                    requested_model=original_model,
+                    resolution_path=f"passthrough:{upstream.name}",
+                )
+                self._log_decision(call, t0, cache_state="warm")
+                return call
+
+        # ── Step 3: cold-cache prefetch ──────────────────────────────────
+        cold_remotes = [
+            u
+            for u in self._upstreams_in_priority_order()
+            if u.kind == "remote" and not self._cached_models(u.name)
+        ]
+        if cold_remotes:
+            await self._cold_prefetch(cold_remotes)  # TIER2 + TIER3
+            for upstream in self._upstreams_in_priority_order():
+                if model_id in self._cached_models(upstream.name):
+                    call = UpstreamCall(
+                        upstream_name=upstream.name,
+                        target_url=_join_url(upstream.url, path),
+                        headers=self._build_headers(request, upstream),
+                        body=_remap_model(body, model_id),
+                        streaming=streaming,
+                        method=method,
+                        resolved_model=model_id,
+                        requested_model=original_model,
+                        resolution_path=f"passthrough-prefetched:{upstream.name}",
+                    )
+                    self._log_decision(call, t0, cache_state="prefetched")
+                    return call
+
+        # ── Step 4: legacy heuristics ────────────────────────────────────
+        try:  # TIER1 — narrow exception handling; log + re-raise typed errors
+            slot_upstream = resolve_slot(path, body, self._upstreams)
+        except LegacyResolutionFailed as exc:
+            # Bubble the typed error up after logging the decision point.
+            log.warning(
+                "legacy fallback exhausted",
+                model=model_id,
+                path=path,
+                error=exc.message,
+            )
+            raise NoRouteFound(
+                f"model {model_id!r} not found in registry, no upstream advertised it, "
+                f"and legacy slot resolution failed",
+                details={"model": model_id, "path": path, "legacy_error": exc.message},
+            ) from exc
+        except Hal0Error:
+            # Typed errors are caller-meaningful: re-raise unchanged.
+            raise
+        except Exception as exc:  # TIER1 — was: silent swallow at haloai dispatcher.py:291
+            log.warning(
+                "legacy fallback raised unexpectedly",
+                model=model_id,
+                path=path,
+                error=str(exc),
+                error_type=type(exc).__name__,
+            )
+            raise NoRouteFound(
+                f"model {model_id!r}: legacy slot resolution raised {type(exc).__name__}",
+                details={"model": model_id, "path": path, "error": str(exc)},
+            ) from exc
+
+        call = UpstreamCall(
+            upstream_name=slot_upstream.name,
+            target_url=_join_url(slot_upstream.url, path),
+            headers=self._build_headers(request, slot_upstream),
+            body=_remap_model(body, original_model),
+            streaming=streaming,
+            method=method,
+            resolved_model=original_model or model_id,
+            requested_model=original_model,
+            resolution_path=f"legacy_slot:{slot_upstream.name}",
+        )
+        self._log_decision(call, t0, cache_state="legacy")
+        return call
+
+    async def forward(self, call: UpstreamCall) -> Any:  # pragma: no cover
         """Execute the HTTP forward and return a FastAPI Response.
 
-        Raises:
-            NotImplementedError: Until Phase 1 port.
+        # NOTE: Phase 1 stub — full streaming/non-streaming forward (mirroring
+        # haloai lib/dispatcher.py:_forward_direct and _forward_streaming)
+        # lands once the providers + slot manager are wired.  The hook is here
+        # so api/routes/v1.py can call dispatcher.dispatch() then
+        # dispatcher.forward() without further refactor.
         """
-        raise NotImplementedError("Phase 1: port from /opt/haloai/lib/dispatcher.py")
+        raise NotImplementedError(
+            "Dispatcher.forward: integrate with providers in a later Phase 1 slice"
+        )
+
+    # ── internals ────────────────────────────────────────────────────────
+
+    def _default_for_path(self, path: str) -> str:
+        if "/embeddings" in path:
+            return _EMBED_DEFAULT
+        if "/rerank" in path:
+            return _RERANK_DEFAULT
+        return _DEFAULT_MODEL
+
+    def _registry_route_for(self, model_id: str) -> tuple[str, str] | None:
+        """Look up a registry binding for a model id.
+
+        Returns (upstream_name, upstream_model) or None if the model isn't
+        in the registry or the registry isn't available.  A registry
+        load failure raises :class:`RegistryLoadFailed` — never silently
+        returns None (PLAN.md §5 Tier 1 against haloai dispatcher.py:115-120).
+        """
+        if self._models is None:
+            return None
+        try:  # TIER1 — was: bare except returning {} at haloai dispatcher.py:115-120
+            route = self._models.route_for(model_id)
+        except NotImplementedError:
+            # Cross-subtree stub: Agent I/B hasn't shipped the registry yet.
+            # NOTE: treated as "no binding" rather than fatal so the dispatcher
+            # remains useful in unit tests against partial stubs.
+            return None
+        except Hal0Error:
+            raise
+        except Exception as exc:  # narrow, typed re-raise
+            log.warning(
+                "registry load failed",
+                model=model_id,
+                error=str(exc),
+                error_type=type(exc).__name__,
+            )
+            raise RegistryLoadFailed(
+                "model registry unavailable",
+                details={"error": str(exc)},
+            ) from exc
+
+        if route is None:
+            return None
+        # route_for returns a URL by interface; for now treat the URL as the
+        # upstream identifier and rely on the model registry's richer API once
+        # Agent I finalises it.  In tests we mock _registry_route_for directly.
+        # NOTE: until ModelRegistry exposes (upstream_name, upstream_model)
+        # tuple natively, this method may be monkey-patched in tests.
+        return (route, model_id)
+
+    def _upstreams_in_priority_order(self) -> list[Upstream]:
+        try:
+            return list(self._upstreams.list())
+        except NotImplementedError:
+            # Cross-subtree stub fallback.
+            return []
+
+    def _build_headers(self, request: Request, upstream: Upstream) -> dict[str, str]:
+        """Forward client headers minus hop-by-hop, plus upstream auth slot.
+
+        # NOTE: auth header materialisation depends on Agent J's
+        # upstreams.auth_headers() helper which isn't shipped yet.  For
+        # now we forward client headers verbatim minus hop-by-hop.
+        """
+        out: dict[str, str] = {}
+        for k, v in request.headers.items():
+            lk = k.lower()
+            if lk in _HOP_BY_HOP or lk == "authorization":
+                continue
+            out[k] = v
+        # Future hook: out.update(auth_headers(upstream)) when Agent J ships it.
+        _ = upstream  # silence unused
+        return out
+
+    async def _cold_prefetch(self, cold_remotes: list[Upstream]) -> None:  # TIER2 + TIER3
+        """Fan out /v1/models against cold remote upstreams, single-flighted.
+
+        All concurrent prefetches for the same upstream share one HTTP call
+        (Tier 3).  The total fanout is bounded by ``prefetch_timeout_s``
+        (Tier 2, configurable; was hardcoded 4s in haloai).
+        """
+
+        async def _one(u: Upstream) -> None:
+            key = f"prefetch:{u.name}"
+            try:
+                await self._single_flight.do(key, self._fetch_models, u)
+            except Exception as exc:  # TIER1 — log, don't crash the fanout
+                # Errors in cold prefetch are *expected* (remotes go offline).
+                # We swallow at this granularity ONLY because the call sites
+                # (passthrough recheck below) treat missing cache as no-route.
+                log.debug(
+                    "cold prefetch leg failed",
+                    upstream=u.name,
+                    error=str(exc),
+                    error_type=type(exc).__name__,
+                )
+
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(*(_one(u) for u in cold_remotes), return_exceptions=True),
+                timeout=self.prefetch_timeout_s,
+            )
+        except TimeoutError:
+            log.info(
+                "cold-cache prefetch timed out",
+                remotes=len(cold_remotes),
+                timeout_s=self.prefetch_timeout_s,
+            )
+
+    def _log_decision(self, call: UpstreamCall, t0: float, *, cache_state: str) -> None:
+        """Emit one structured log line per dispatch decision (Tier 2)."""
+        latency_ms = (time.monotonic() - t0) * 1000.0
+        call.latency_ms = latency_ms
+        # TIER2 — structlog with hal0-dispatch identifier (set by app logging config).
+        log.info(
+            "dispatch.decision",
+            model=call.resolved_model or call.requested_model,
+            resolution_path=call.resolution_path,
+            upstream=call.upstream_name,
+            cache_state=cache_state,
+            latency_ms=round(latency_ms, 3),
+        )
+
+
+# ── helpers ───────────────────────────────────────────────────────────────────
+
+# Hop-by-hop headers never forwarded (RFC 7230 §6.1).
+_HOP_BY_HOP = frozenset(
+    {
+        "transfer-encoding",
+        "connection",
+        "keep-alive",
+        "proxy-authenticate",
+        "proxy-authorization",
+        "te",
+        "trailers",
+        "upgrade",
+        "content-encoding",
+        "content-length",
+        "host",
+    }
+)
+
+
+def _remap_model(body: dict[str, Any], new_model: str) -> bytes:
+    """Set ``body["model"] = new_model`` and re-serialise to bytes."""
+    if new_model:
+        body = {**body, "model": new_model}
+    return json.dumps(body).encode("utf-8")
+
+
+def _join_url(upstream_url: str, request_path: str) -> str:
+    """Map ``/v1/<path>`` onto ``<upstream_url>/<path>``.
+
+    Upstream URLs end in ``/v1`` by convention (per upstreams.toml).  The
+    incoming request path is ``/v1/chat/completions`` etc., so we strip
+    the leading ``/v1`` before joining to avoid ``/v1/v1/...``.
+    """
+    base = upstream_url.rstrip("/")
+    suffix = request_path[3:] if request_path.startswith("/v1") else request_path
+    if not suffix.startswith("/"):
+        suffix = "/" + suffix
+    return base + suffix
+
+
+__all__ = [
+    "DispatchError",
+    "Dispatcher",
+    "NoRouteFound",
+    "RegistryLoadFailed",
+    "UnknownUpstream",
+    "UpstreamCall",
+]

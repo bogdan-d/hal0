@@ -15,6 +15,14 @@ export default defineConfig({
     emptyOutDir: true,
   },
   server: {
+    host: '0.0.0.0',
+    port: 5173,
+    allowedHosts: ['ai.thinmint.dev', 'localhost', '127.0.0.1'],
+    hmr: {
+      host: 'ai.thinmint.dev',
+      protocol: 'wss',
+      clientPort: 443,
+    },
     proxy: {
       '/api': 'http://127.0.0.1:8080',
       '/v1': 'http://127.0.0.1:8080',

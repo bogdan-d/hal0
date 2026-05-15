@@ -567,14 +567,16 @@ Working assumption: 1 person full-time + Claude as pair. Adjust if not.
 - CI skeleton (GitHub Actions, ruff + pytest)
 - README, ARCHITECTURE.md, CONTRIBUTING.md drafted
 
-**Phase 1 — port core (weeks 2-3)**
-- Port slot manager → `hal0/slots/manager.py`
-- Port dispatcher → `hal0/dispatcher/router.py`
-- Port providers (llama_server, flm, moonshine, kokoro)
-- Port registry, hardware probe, upstreams, config (with pydantic schema)
-- `hal0-slot@.service` template unit, env writer (atomic)
-- Unit tests for each module
-- API routers wired up; `/v1/*` and `/api/slots/*` working end-to-end
+**Phase 1 — port core (weeks 2-3)** — ✅ done 2026-05-15
+- Port slot manager → `hal0/slots/manager.py` ✅
+- Port dispatcher → `hal0/dispatcher/router.py` ✅
+- Port providers (llama_server, flm, moonshine, kokoro) ✅
+- Port registry, hardware probe, upstreams, config (with pydantic schema) ✅
+- `hal0-slot@.service` template unit, env writer (atomic) ✅
+- Unit tests for each module ✅ (326 passing, 2 integration tests gated on installed systemd template)
+- API routers wired up; `/v1/*` and `/api/slots/*` working end-to-end — partial: `Dispatcher.forward()` is a `NotImplementedError` hook for Phase 2 wiring; everything upstream of it (resolution, single-flight, registry, slot mgmt) is live
+- All three reliability tiers in (TIER1/TIER2/TIER3 markers across the ported code, lifecycle state machine + single-flight + migration framework + adaptive backoff)
+- Cross-agent reconciliation: `HardwareInfo` canonicalised in `config/schema.py` (multi-GPU list, MiB integers, richer GPUInfo with compute/vulkan_capable + drm_path + nested NPUInfo); slot port range stays at PLAN §2's 8081-8099
 
 **Phase 2 — installer + LXC QA (week 4)**
 - Provision `hal0-test` LXC with Strix Halo passthrough

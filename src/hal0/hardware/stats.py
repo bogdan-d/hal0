@@ -1,4 +1,4 @@
-"""Hardware runtime stats — GPU utilisation, RAM usage, etc.
+"""Hardware runtime stats — GPU utilisation, RAM usage, slot port occupancy.
 
 HardwareStats provides live metrics for:
   - GET /api/stats/gpu
@@ -12,65 +12,197 @@ See PLAN.md §3.
 
 from __future__ import annotations
 
+import contextlib
+import socket
+from pathlib import Path
 from typing import Any
+
+import structlog
+
+from hal0.hardware.probe import _amd_drm_device, _read_sysfs_mb, _run
+
+log = structlog.get_logger(__name__)
+
+
+# Slot port pool (PLAN §2: "8081-8099 — slot ports assigned by config").
+# The task brief says 8100-8199; PLAN.md says 8081-8099. We honour PLAN.md
+# (the canonical decision) and expose the range here so the API + dashboard
+# don't drift from config.SlotsConfig.port_range_{start,end}.
+#
+# # NOTE: PLAN §2 says ports 8081-8099 — task brief mentioned 8100-8199.
+# Going with PLAN. If the brief was right the constant can be flipped here
+# without touching call sites.
+SLOT_PORT_RANGE_START = 8081
+SLOT_PORT_RANGE_END = 8099
+
+
+def _port_in_use(port: int, host: str = "127.0.0.1") -> bool:
+    """Return True if anything is listening on (host, port).
+
+    We try a non-blocking connect rather than a bind: this works even when
+    we're running as a non-privileged user that can't bind low-numbered
+    ports, and it doesn't transiently steal a free port.
+    """
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(0.05)
+    try:
+        return s.connect_ex((host, port)) == 0
+    except OSError:
+        return False
+    finally:
+        s.close()
 
 
 class HardwareStats:
     """Live hardware metrics reader.
 
-    Reads from sysfs, /proc/meminfo, and (on NVIDIA) NVML.  All methods
-    are synchronous; wrap in asyncio.to_thread() for async callers.
+    Reads from sysfs, /proc/meminfo, and (via subprocess) nvidia-smi.
+    All methods are synchronous; wrap in asyncio.to_thread() for async callers.
     """
 
     def gpu_util(self) -> float | None:
         """Return current GPU compute utilisation as a fraction [0.0, 1.0].
 
-        Returns None if the metric is unavailable (e.g. no driver support).
-
-        Raises:
-            NotImplementedError: Until Phase 1 port from haloai lib/hardware.py.
+        Tries nvidia-smi first, then AMD sysfs (gpu_busy_percent). Returns
+        None if no utilisation counter is exposed.
         """
-        raise NotImplementedError("Phase 1: port from /opt/haloai/lib/hardware.py")
+        rc, out, _ = _run(
+            [
+                "nvidia-smi",
+                "--query-gpu=utilization.gpu",
+                "--format=csv,noheader,nounits",
+            ]
+        )
+        if rc == 0 and out.strip():
+            try:
+                return round(float(out.strip().splitlines()[0]) / 100.0, 3)
+            except ValueError:
+                pass
+        drm = _amd_drm_device()
+        if drm is not None:
+            txt = self._read_text(drm / "gpu_busy_percent")
+            if txt is not None:
+                try:
+                    return round(float(txt.strip()) / 100.0, 3)
+                except ValueError:
+                    pass
+        return None
 
     def gpu_vram_used_mb(self) -> float | None:
         """Return current GPU VRAM usage in MiB.
 
-        On AMD UMA (Strix Halo), returns GTT used from sysfs.
-        Returns None if unavailable.
-
-        Raises:
-            NotImplementedError: Until Phase 1 port.
+        On AMD UMA (Strix Halo), returns GTT used. On NVIDIA, parses nvidia-smi.
         """
-        raise NotImplementedError("Phase 1: port from /opt/haloai/lib/hardware.py")
+        rc, out, _ = _run(
+            [
+                "nvidia-smi",
+                "--query-gpu=memory.used",
+                "--format=csv,noheader,nounits",
+            ]
+        )
+        if rc == 0 and out.strip():
+            try:
+                return round(float(out.strip().splitlines()[0]), 1)
+            except ValueError:
+                pass
+        drm = _amd_drm_device()
+        if drm is not None:
+            vram = _read_sysfs_mb(drm / "mem_info_vram_used")
+            gtt = _read_sysfs_mb(drm / "mem_info_gtt_used")
+            # Prefer the larger of the two — Strix Halo reports model bytes in GTT,
+            # discrete cards report in VRAM.
+            candidates = [v for v in (vram, gtt) if v is not None]
+            return max(candidates) if candidates else None
+        return None
 
     def gpu_vram_total_mb(self) -> float | None:
-        """Return total GPU VRAM in MiB.
-
-        Raises:
-            NotImplementedError: Until Phase 1 port.
-        """
-        raise NotImplementedError("Phase 1: port from /opt/haloai/lib/hardware.py")
+        """Return total GPU VRAM in MiB (or GTT pool on UMA)."""
+        rc, out, _ = _run(
+            [
+                "nvidia-smi",
+                "--query-gpu=memory.total",
+                "--format=csv,noheader,nounits",
+            ]
+        )
+        if rc == 0 and out.strip():
+            try:
+                return round(float(out.strip().splitlines()[0]), 1)
+            except ValueError:
+                pass
+        drm = _amd_drm_device()
+        if drm is not None:
+            vram = _read_sysfs_mb(drm / "mem_info_vram_total")
+            gtt = _read_sysfs_mb(drm / "mem_info_gtt_total")
+            candidates = [v for v in (vram, gtt) if v is not None]
+            return max(candidates) if candidates else None
+        return None
 
     def ram_used_gb(self) -> float:
-        """Return current system RAM used in GiB (MemTotal - MemAvailable).
-
-        Raises:
-            NotImplementedError: Until Phase 1 port.
-        """
-        raise NotImplementedError("Phase 1: port from /opt/haloai/lib/hardware.py")
+        """Return current system RAM used in GiB (MemTotal - MemAvailable)."""
+        total = 0
+        avail = 0
+        txt = self._read_text(Path("/proc/meminfo"))
+        if not txt:
+            return 0.0
+        for line in txt.splitlines():
+            if line.startswith("MemTotal:"):
+                with contextlib.suppress(IndexError, ValueError):
+                    total = int(line.split()[1])
+            elif line.startswith("MemAvailable:"):
+                with contextlib.suppress(IndexError, ValueError):
+                    avail = int(line.split()[1])
+        return round(max(0, total - avail) / (1024 * 1024), 2)
 
     def ram_available_gb(self) -> float:
-        """Return current system RAM available in GiB (MemAvailable).
+        """Return current system RAM available in GiB (MemAvailable)."""
+        txt = self._read_text(Path("/proc/meminfo"))
+        if not txt:
+            return 0.0
+        for line in txt.splitlines():
+            if line.startswith("MemAvailable:"):
+                try:
+                    return round(int(line.split()[1]) / (1024 * 1024), 2)
+                except (IndexError, ValueError):
+                    return 0.0
+        return 0.0
 
-        Raises:
-            NotImplementedError: Until Phase 1 port.
+    def slot_port_occupancy(self) -> dict[int, bool]:
+        """Return {port: in_use} for every port in the slot pool.
+
+        Used by SlotsConfig validation and the dashboard's "next free port"
+        display. Probes 127.0.0.1 only (slots never bind public).
         """
-        raise NotImplementedError("Phase 1: port from /opt/haloai/lib/hardware.py")
+        return {p: _port_in_use(p) for p in range(SLOT_PORT_RANGE_START, SLOT_PORT_RANGE_END + 1)}
+
+    def occupied_slot_ports(self) -> list[int]:
+        """Return the sorted list of slot ports currently bound."""
+        return [p for p, used in self.slot_port_occupancy().items() if used]
 
     def snapshot(self) -> dict[str, Any]:
         """Return a JSON-safe dict of all available stats.
 
-        Raises:
-            NotImplementedError: Until Phase 1 port.
+        Field shape mirrors the haloai /api/status response (subset):
+            ram_used_gb, ram_available_gb,
+            gpu_util, gpu_vram_used_mb, gpu_vram_total_mb,
+            slot_ports_occupied: list[int]
         """
-        raise NotImplementedError("Phase 1: port from /opt/haloai/lib/hardware.py")
+        return {
+            "ram_used_gb": self.ram_used_gb(),
+            "ram_available_gb": self.ram_available_gb(),
+            "gpu_util": self.gpu_util(),
+            "gpu_vram_used_mb": self.gpu_vram_used_mb(),
+            "gpu_vram_total_mb": self.gpu_vram_total_mb(),
+            "slot_ports_occupied": self.occupied_slot_ports(),
+        }
+
+    # Internal helpers kept here (rather than imported) so tests can monkeypatch
+    # this instance method without touching the probe module's globals.
+
+    def _read_text(self, path: Path) -> str | None:
+        try:
+            return path.read_text()
+        except OSError:
+            return None
+
+
+__all__ = ["SLOT_PORT_RANGE_END", "SLOT_PORT_RANGE_START", "HardwareStats"]

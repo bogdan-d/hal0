@@ -20,9 +20,22 @@ Key exports:
 
 from __future__ import annotations
 
-from hal0.dispatcher.router import Dispatcher, UpstreamCall
+from hal0.dispatcher.router import (
+    Dispatcher,
+    DispatchError,
+    NoRouteFound,
+    RegistryLoadFailed,
+    UnknownUpstream,
+    UpstreamCall,
+)
+from hal0.dispatcher.single_flight import SingleFlightGroup
 
 __all__ = [
+    "DispatchError",
     "Dispatcher",
+    "NoRouteFound",
+    "RegistryLoadFailed",
+    "SingleFlightGroup",
+    "UnknownUpstream",
     "UpstreamCall",
 ]
