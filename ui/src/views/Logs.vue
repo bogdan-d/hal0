@@ -1,11 +1,30 @@
 <script setup>
 /**
- * Logs.vue
+ * Logs.vue — SSE-tailed journald viewer.
  *
- * SSE-based realtime log tail. Filters: level (all/error/warn/info/debug),
- * slot (all + each named slot), free-text search.
- * Design: monospace terminal-style box, no fancy formatting. Lines auto-scroll
- * to bottom unless the user has scrolled up (user scroll = pause auto-scroll).
+ * Backend contract (Team C, see /api/logs and /api/logs/stream):
+ *   GET /api/logs?unit=<u>&n=<N>&since=<ts>&level=<lvl>
+ *     → { unit, lines: [..lines..], count } (best-effort; empty on
+ *       hosts without journalctl)
+ *   GET /api/logs/stream?unit=<u>&level=<lvl>&since=<ts>
+ *     → SSE, each frame `data: "<JSON-encoded line>"`
+ *
+ * Controls:
+ *   - Unit selector: defaults to hal0-api, plus one option per slot
+ *     (hal0-slot@<name>) and a custom-unit text entry for power users.
+ *   - Level filter: error | warning | info | debug (maps to journalctl
+ *     --priority severities — selecting "info" includes everything info
+ *     and more-severe, matching the backend's _LEVELS table).
+ *   - Time range: last 5 min / 1 hr / 24 hr / custom (passes journalctl-
+ *     compatible ``--since`` strings).
+ *   - Freeze toggle: stops the SSE stream and keeps the viewport static
+ *     so the user can scroll back through historical lines without new
+ *     ones racing in.
+ *
+ * Line classification (line-error / line-warn / line-debug) reads the
+ * line text since journalctl's `--output=cat` mode doesn't preserve
+ * structured priority — best-effort, matches what `journalctl -u` shows
+ * the user in a terminal.
  */
 import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
 import { useSystemStore } from '../stores/system.js'
@@ -15,80 +34,129 @@ import Card from '../components/Card.vue'
 
 const system = useSystemStore()
 
-const lines     = ref([])
-const filter    = ref({ level: 'all', slot: 'all', text: '' })
-const connected = ref(false)
-const loading   = ref(false)
-const logboxEl  = ref(null)
+const lines      = ref([])
+const filter     = ref({
+  unit: 'hal0-api',
+  customUnit: '',
+  level: '',         // '' = all
+  range: '1h',       // '5m' | '1h' | '24h' | 'custom'
+  customSince: '',
+  text: '',
+})
+const connected  = ref(false)
+const frozen     = ref(false)
+const loading    = ref(false)
+const error      = ref(null)
+const logboxEl   = ref(null)
 const autoScroll = ref(true)
 
 let es = null
 
-const levelColors = {
-  ERROR: 'line-error',
-  WARN:  'line-warn',
-  DEBUG: 'line-debug',
-}
-
 function lineClass(line) {
-  if (line.includes(' ERROR ') || line.includes('[ERROR]')) return 'line-error'
-  if (line.includes(' WARN ')  || line.includes('[WARN]'))  return 'line-warn'
-  if (line.includes(' DEBUG ') || line.includes('[DEBUG]')) return 'line-debug'
+  // journalctl --output=cat strips priority, so classify on substring
+  // matches the way the user would visually scan a terminal.
+  if (/\bERROR\b|\bERR\b|\[ERROR\]/.test(line)) return 'line-error'
+  if (/\bWARN(ING)?\b|\[WARN\]/.test(line))      return 'line-warn'
+  if (/\bDEBUG\b|\[DEBUG\]/.test(line))          return 'line-debug'
   return ''
 }
 
 const filteredLines = computed(() => {
-  let result = lines.value
-  if (filter.value.level !== 'all') {
-    const lvl = filter.value.level.toUpperCase()
-    result = result.filter((l) => l.includes(` ${lvl} `) || l.includes(`[${lvl}]`))
-  }
-  if (filter.value.slot !== 'all') {
-    const slotTag = filter.value.slot
-    result = result.filter((l) => l.includes(slotTag))
-  }
-  if (filter.value.text.trim()) {
-    const q = filter.value.text.toLowerCase()
-    result = result.filter((l) => l.toLowerCase().includes(q))
-  }
-  return result
+  if (!filter.value.text.trim()) return lines.value
+  const q = filter.value.text.toLowerCase()
+  return lines.value.filter((l) => l.toLowerCase().includes(q))
 })
 
-function buildStreamUrl() {
+// All unit options exposed to the selector.
+const unitOptions = computed(() => {
+  const opts = [
+    { value: 'hal0-api',      label: 'hal0-api' },
+    { value: 'hal0-openwebui', label: 'hal0-openwebui' },
+  ]
+  for (const s of system.slots) {
+    if (s.name) opts.push({ value: `hal0-slot@${s.name}`, label: `hal0-slot@${s.name}` })
+  }
+  opts.push({ value: '__custom__', label: 'Custom unit…' })
+  return opts
+})
+
+const effectiveUnit = computed(() => {
+  if (filter.value.unit === '__custom__') return filter.value.customUnit.trim()
+  return filter.value.unit
+})
+
+// Build the `since` query param. journalctl accepts ISO timestamps and
+// human strings like "5 min ago" — we pass the latter directly.
+const sinceParam = computed(() => {
+  const r = filter.value.range
+  if (r === '5m')  return '5 minutes ago'
+  if (r === '1h')  return '1 hour ago'
+  if (r === '24h') return '24 hours ago'
+  if (r === 'custom') return filter.value.customSince.trim() || null
+  return null
+})
+
+function buildQuery(extra = {}) {
   const params = new URLSearchParams()
-  if (filter.value.slot !== 'all') params.set('slot', filter.value.slot)
-  return `/api/logs/stream?${params}`
+  params.set('unit', effectiveUnit.value)
+  if (filter.value.level) params.set('level', filter.value.level)
+  if (sinceParam.value)   params.set('since', sinceParam.value)
+  for (const [k, v] of Object.entries(extra)) {
+    if (v != null) params.set(k, String(v))
+  }
+  return params.toString()
 }
 
-async function connect() {
-  disconnect()
+async function loadHistorical() {
+  // Don't query when there's no unit to ask about.
+  if (!effectiveUnit.value) return
   loading.value = true
-  // Load last 500 historical lines
+  error.value = null
   try {
-    const data = await api(`/api/logs?lines=500${filter.value.slot !== 'all' ? `&slot=${filter.value.slot}` : ''}`)
-    lines.value = (data?.logs ?? '').split('\n').filter(Boolean)
-  } catch {
+    const data = await api(`/api/logs?${buildQuery({ n: 500 })}`)
+    lines.value = Array.isArray(data?.lines) ? data.lines.slice() : []
+    if (data?.hint) error.value = data.hint
+  } catch (e) {
     lines.value = []
+    error.value = e.message
   } finally {
     loading.value = false
   }
+}
 
-  // SSE tail
+function openStream() {
+  closeStream()
+  if (!effectiveUnit.value) return
   try {
-    es = new EventSource(buildStreamUrl())
+    es = new EventSource(`/api/logs/stream?${buildQuery()}`)
     es.onopen = () => { connected.value = true }
     es.onmessage = (ev) => {
-      lines.value.push(ev.data)
+      if (frozen.value) return
+      let line = ev.data
+      // Backend wraps each line in JSON (`json.dumps(line)`) so clients
+      // can JSON.parse to strip quotes / preserve embedded quotes.
+      try { line = JSON.parse(line) } catch { /* leave as-is */ }
+      lines.value.push(line)
+      // Cap buffer so the page doesn't grow unbounded on a chatty unit.
       if (lines.value.length > 5000) lines.value = lines.value.slice(-5000)
       if (autoScroll.value) scrollToBottom()
     }
     es.onerror = () => { connected.value = false }
-  } catch {}
+  } catch (e) {
+    error.value = `EventSource failed: ${e.message}`
+  }
 }
 
-function disconnect() {
+function closeStream() {
   if (es) { es.close(); es = null }
   connected.value = false
+}
+
+async function reload() {
+  closeStream()
+  await loadHistorical()
+  if (!frozen.value) openStream()
+  scrollToBottom()
 }
 
 async function scrollToBottom() {
@@ -104,60 +172,116 @@ function onScroll() {
   autoScroll.value = scrollHeight - scrollTop - clientHeight < 40
 }
 
+function toggleFreeze() {
+  frozen.value = !frozen.value
+  if (frozen.value) {
+    closeStream()
+  } else {
+    openStream()
+  }
+}
+
 function clear() {
   lines.value = []
 }
 
-// Re-connect when slot filter changes
-watch(() => filter.value.slot, () => connect())
+// Reconnect when any filter input changes. Debounce so typing a custom
+// unit name doesn't fire a stream open per keystroke — wait for blur or
+// 400 ms of idle.
+let reloadTimer = null
+function debouncedReload() {
+  clearTimeout(reloadTimer)
+  reloadTimer = setTimeout(reload, 400)
+}
 
-onMounted(connect)
-onUnmounted(disconnect)
+watch(
+  () => [filter.value.unit, filter.value.customUnit, filter.value.level, filter.value.range, filter.value.customSince],
+  () => debouncedReload(),
+)
+
+// Ensure slots are loaded so the unit selector can offer slot units.
+onMounted(async () => {
+  if (system.slots.length === 0) {
+    await system.fetchStatus().catch(() => {})
+  }
+  reload()
+})
+onUnmounted(closeStream)
 </script>
 
 <template>
   <div class="logs-page">
-    <PageHeader title="Logs" subtitle="API and slot log stream">
+    <PageHeader title="Logs" subtitle="systemd journal tail">
       <template #actions>
-        <div class="status-dot-wrap" :title="connected ? 'SSE connected' : 'Disconnected'" aria-label="SSE connection status">
-          <span class="dot" :class="connected ? 'dot-live' : 'dot-off'" aria-hidden="true" />
-          <span class="dot-label">{{ connected ? 'live' : 'offline' }}</span>
+        <div class="status-dot-wrap" :title="connected ? 'SSE connected' : (frozen ? 'frozen' : 'disconnected')" aria-label="SSE connection status">
+          <span class="dot" :class="frozen ? 'dot-frozen' : (connected ? 'dot-live' : 'dot-off')" aria-hidden="true" />
+          <span class="dot-label">{{ frozen ? 'frozen' : (connected ? 'live' : 'offline') }}</span>
         </div>
+        <button class="btn-secondary" type="button" @click="toggleFreeze">
+          <template v-if="frozen">
+            <svg width="13" height="13" fill="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.14v14l11-7-11-7z"/></svg>
+            Resume
+          </template>
+          <template v-else>
+            <svg width="13" height="13" fill="currentColor" viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg>
+            Freeze
+          </template>
+        </button>
         <button class="btn-secondary" type="button" @click="clear">Clear</button>
-        <button class="btn-secondary" type="button" @click="connect">
+        <button class="btn-secondary" type="button" @click="reload">
           <svg width="13" height="13" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" :class="{ spin: loading }" aria-hidden="true">
             <path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
           </svg>
-          Reconnect
+          Reload
         </button>
       </template>
     </PageHeader>
 
     <!-- Filters -->
     <div class="filters-bar">
-      <label class="sr-only" for="log-level-filter">Log level</label>
+      <label class="sr-only" for="log-unit-filter">Unit</label>
+      <select id="log-unit-filter" v-model="filter.unit" class="filter-select">
+        <option v-for="o in unitOptions" :key="o.value" :value="o.value">{{ o.label }}</option>
+      </select>
+      <input
+        v-if="filter.unit === '__custom__'"
+        v-model="filter.customUnit"
+        type="text"
+        class="filter-input mono"
+        placeholder="hal0-slot@foo"
+        aria-label="Custom systemd unit"
+      />
+
+      <label class="sr-only" for="log-level-filter">Level</label>
       <select id="log-level-filter" v-model="filter.level" class="filter-select">
-        <option value="all">All levels</option>
-        <option value="error">ERROR</option>
-        <option value="warn">WARN</option>
-        <option value="info">INFO</option>
-        <option value="debug">DEBUG</option>
+        <option value="">All levels</option>
+        <option value="error">error</option>
+        <option value="warning">warning+</option>
+        <option value="info">info+</option>
+        <option value="debug">debug+</option>
       </select>
 
-      <label class="sr-only" for="log-slot-filter">Slot</label>
-      <select id="log-slot-filter" v-model="filter.slot" class="filter-select">
-        <option value="all">All slots</option>
-        <option value="api">API</option>
-        <option v-for="s in system.slots" :key="s.name" :value="s.name">{{ s.name }}</option>
+      <label class="sr-only" for="log-range-filter">Range</label>
+      <select id="log-range-filter" v-model="filter.range" class="filter-select">
+        <option value="5m">Last 5 min</option>
+        <option value="1h">Last 1 hr</option>
+        <option value="24h">Last 24 hr</option>
+        <option value="custom">Custom…</option>
       </select>
+      <input
+        v-if="filter.range === 'custom'"
+        v-model="filter.customSince"
+        type="text"
+        class="filter-input mono"
+        placeholder="2026-05-15 12:00 or '30 minutes ago'"
+        aria-label="Custom since value"
+      />
 
-      <label class="sr-only" for="log-text-filter">Search</label>
       <div class="search-wrap">
         <svg width="12" height="12" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" class="search-icon" aria-hidden="true">
           <path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-4.35-4.35M10.5 18a7.5 7.5 0 100-15 7.5 7.5 0 000 15z"/>
         </svg>
         <input
-          id="log-text-filter"
           v-model="filter.text"
           class="filter-search"
           placeholder="Filter text…"
@@ -165,11 +289,13 @@ onUnmounted(disconnect)
         />
       </div>
 
-      <span class="line-count">{{ filteredLines.length }} lines</span>
+      <span class="line-count">{{ filteredLines.length }} / {{ lines.length }} lines</span>
     </div>
 
     <!-- Log box -->
     <div class="page-body">
+      <div v-if="error" class="error-banner" role="alert">{{ error }}</div>
+
       <Card :padded="false" class="logbox-card">
         <div
           ref="logboxEl"
@@ -189,8 +315,7 @@ onUnmounted(disconnect)
           >{{ line }}</div>
         </div>
 
-        <!-- Auto-scroll indicator -->
-        <div v-if="!autoScroll" class="scroll-paused">
+        <div v-if="!autoScroll && !frozen" class="scroll-paused">
           <button type="button" class="scroll-resume-btn" @click="autoScroll = true; scrollToBottom()">
             ↓ Auto-scroll paused — click to resume
           </button>
@@ -202,7 +327,7 @@ onUnmounted(disconnect)
 
 <style scoped>
 .logs-page { display: flex; flex-direction: column; height: 100%; min-height: 0; }
-.page-body { padding: 0 24px 20px; flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.page-body { padding: 0 24px 20px; flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 10px; }
 
 .filters-bar {
   display: flex;
@@ -212,7 +337,8 @@ onUnmounted(disconnect)
   border-bottom: 1px solid var(--color-border);
   flex-wrap: wrap;
 }
-.filter-select {
+.filter-select,
+.filter-input {
   padding: 5px 8px;
   border-radius: var(--radius);
   border: 1px solid var(--color-border);
@@ -221,8 +347,11 @@ onUnmounted(disconnect)
   font-size: 12px;
   font-family: var(--font-mono);
   cursor: pointer;
+  outline: none;
 }
-.filter-select:focus { outline: none; border-color: var(--color-border-hi); }
+.filter-input { cursor: text; color: var(--color-fg); min-width: 220px; }
+.filter-select:focus,
+.filter-input:focus { border-color: var(--color-border-hi); }
 
 .search-wrap { position: relative; }
 .search-icon { position: absolute; left: 8px; top: 50%; transform: translateY(-50%); color: var(--color-fg-faint); pointer-events: none; }
@@ -243,14 +372,15 @@ onUnmounted(disconnect)
 
 .line-count { font-family: var(--font-mono); font-size: 11px; color: var(--color-fg-faint); margin-left: auto; }
 
-/* Status dot */
 .status-dot-wrap { display: flex; align-items: center; gap: 6px; }
 .dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
-.dot-live { background: var(--color-success); box-shadow: 0 0 6px -1px var(--color-success); }
-.dot-off  { background: var(--color-fg-faint); }
-.dot-label { font-family: var(--font-mono); font-size: 11px; color: var(--color-fg-faint); }
+.dot-live   { background: var(--color-success); box-shadow: 0 0 6px -1px var(--color-success); }
+.dot-frozen { background: var(--color-accent); }
+.dot-off    { background: var(--color-fg-faint); }
+.dot-label  { font-family: var(--font-mono); font-size: 11px; color: var(--color-fg-faint); }
 
-/* Log box */
+.error-banner { padding: 8px 14px; border-radius: var(--radius); background: color-mix(in oklch, var(--color-warning) 10%, var(--color-surface)); border: 1px solid color-mix(in oklch, var(--color-warning) 30%, transparent); color: var(--color-warning); font-size: 12px; font-family: var(--font-mono); }
+
 .logbox-card { flex: 1; display: flex; flex-direction: column; position: relative; min-height: 0; }
 .logbox {
   flex: 1;
@@ -262,7 +392,8 @@ onUnmounted(disconnect)
   font-size: 11.5px;
   line-height: 1.55;
 }
-.logbox-loading, .logbox-empty { color: var(--color-fg-faint); padding: 8px 0; }
+.logbox-loading,
+.logbox-empty { color: var(--color-fg-faint); padding: 8px 0; }
 .log-line { color: var(--color-fg-muted); white-space: pre-wrap; word-break: break-all; }
 .log-line.line-error { color: var(--color-danger); }
 .log-line.line-warn  { color: var(--color-warning); }
