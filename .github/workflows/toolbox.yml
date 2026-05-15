@@ -117,7 +117,7 @@ jobs:
         if: steps.filter.outputs.build == 'true'
         id: build
         continue-on-error: ${{ matrix.optional == 'true' }}
-        timeout-minutes: ${{ matrix.image == 'flm' && 60 || (matrix.image == 'rocm' && 45 || 30) }}
+        timeout-minutes: ${{ matrix.image == 'flm' && 60 || (matrix.image == 'rocm' && 120 || 30) }}
         uses: docker/build-push-action@v6
         with:
           context: .

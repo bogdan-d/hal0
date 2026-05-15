@@ -37,11 +37,14 @@ ARG LLAMA_CPP_REF=master
 ARG DEBIAN_FRONTEND=noninteractive
 
 # AMDGPU_TARGETS controls which GFX archs hip-clang emits code for.
-# Defaults cover RX 6000 (gfx1030), RX 7000 (gfx1100/1101/1102), and
-# Strix Halo iGPU (gfx1151) so the same image works across the AMD
-# family. Override at build for a slimmer build:
-#   docker build --build-arg AMDGPU_TARGETS=gfx1100 ...
-ARG AMDGPU_TARGETS="gfx1030;gfx1100;gfx1101;gfx1102;gfx1151"
+# Default arch list — pruned to the two hal0 priority targets so the CI
+# build fits inside the 45-90 min GHA window (full 5-arch list takes
+# ~5+ hours of HIP template compilation). Operators on other archs
+# (gfx1030 / gfx1101 / gfx1102) can rebuild locally with
+#   docker build --build-arg AMDGPU_TARGETS=gfx1101 ...
+#   gfx1100 = Radeon RX 7900 XTX/XT (RDNA 3, discrete) — fastest path
+#   gfx1151 = Strix Halo iGPU (RDNA 3.5, the first-class home target)
+ARG AMDGPU_TARGETS="gfx1100;gfx1151"
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential \
