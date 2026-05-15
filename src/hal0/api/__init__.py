@@ -29,6 +29,10 @@ from hal0.api.routes import (
     updater,
     v1,
 )
+from hal0.dispatcher.router import Dispatcher
+from hal0.hardware.probe import HardwareProbe
+from hal0.registry.store import ModelRegistry
+from hal0.upstreams.registry import UpstreamRegistry
 
 log = structlog.get_logger(__name__)
 
@@ -36,8 +40,29 @@ log = structlog.get_logger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     log.info("hal0.api.startup", version=__version__)
-    yield
-    log.info("hal0.api.shutdown")
+
+    upstreams = UpstreamRegistry()
+    model_registry = ModelRegistry()
+    hardware_probe = HardwareProbe()
+
+    dispatcher = Dispatcher(
+        upstream_registry=upstreams,
+        model_registry=model_registry,
+        # Adapt UpstreamRegistry.fetch_models(name) to the Dispatcher's
+        # FetchModelsFn signature (takes an Upstream object).
+        fetch_models=lambda u: upstreams.fetch_models(u.name),
+    )
+
+    app.state.upstreams = upstreams
+    app.state.model_registry = model_registry
+    app.state.hardware_probe = hardware_probe
+    app.state.dispatcher = dispatcher
+
+    try:
+        yield
+    finally:
+        await dispatcher.aclose()
+        log.info("hal0.api.shutdown")
 
 
 def create_app() -> FastAPI:

@@ -574,7 +574,7 @@ Working assumption: 1 person full-time + Claude as pair. Adjust if not.
 - Port registry, hardware probe, upstreams, config (with pydantic schema) ✅
 - `hal0-slot@.service` template unit, env writer (atomic) ✅
 - Unit tests for each module ✅ (326 passing, 2 integration tests gated on installed systemd template)
-- API routers wired up; `/v1/*` and `/api/slots/*` working end-to-end — partial: `Dispatcher.forward()` is a `NotImplementedError` hook for Phase 2 wiring; everything upstream of it (resolution, single-flight, registry, slot mgmt) is live
+- API routers wired up; `/v1/*` and `/api/slots/*` working end-to-end ✅ (`Dispatcher.forward()` now backed by a shared httpx client with streaming + non-streaming + binary paths; `/v1/{models,chat/completions,completions,embeddings,rerankings,audio/*}` all route through dispatch→forward; lifespan creates the singleton, response hop-by-hop headers filtered)
 - All three reliability tiers in (TIER1/TIER2/TIER3 markers across the ported code, lifecycle state machine + single-flight + migration framework + adaptive backoff)
 - Cross-agent reconciliation: `HardwareInfo` canonicalised in `config/schema.py` (multi-GPU list, MiB integers, richer GPUInfo with compute/vulkan_capable + drm_path + nested NPUInfo); slot port range stays at PLAN §2's 8081-8099
 

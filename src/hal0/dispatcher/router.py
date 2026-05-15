@@ -35,11 +35,13 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+import httpx
 import structlog
+from fastapi.responses import Response, StreamingResponse
 
 from hal0.api.middleware.error_codes import Hal0Error
 from hal0.dispatcher.proxy import LegacyResolutionFailed, resolve_slot
@@ -50,6 +52,24 @@ if TYPE_CHECKING:
     from fastapi import Request
 
     from hal0.registry.store import ModelRegistry
+
+# Hop-by-hop response headers that must not be forwarded to the client.
+# httpx already decompresses content; content-length must be recomputed; and
+# Transfer-Encoding/Connection are conn-scoped per RFC 7230.
+_HOP_BY_HOP_RESPONSE_HEADERS = frozenset(
+    {
+        "connection",
+        "content-encoding",
+        "content-length",
+        "keep-alive",
+        "proxy-authenticate",
+        "proxy-authorization",
+        "te",
+        "trailer",
+        "transfer-encoding",
+        "upgrade",
+    }
+)
 
 # NOTE: structlog binds via contextvars in the request_id middleware, so
 # this logger automatically carries {request_id} on every emitted line.
@@ -101,6 +121,18 @@ class RegistryLoadFailed(DispatchError):  # TIER1
 
     code = "dispatch.registry_unavailable"
     status = 503
+
+
+class UpstreamUnavailable(DispatchError):
+    """The chosen upstream couldn't be reached (timeout, connection refused, etc.).
+
+    Distinct from a 5xx response body — those are passed through verbatim
+    so the client sees the real upstream error envelope.  This error means
+    we never got an HTTP response at all.
+    """
+
+    code = "dispatch.upstream_unavailable"
+    status = 502
 
 
 # ── UpstreamCall ──────────────────────────────────────────────────────────────
@@ -216,6 +248,7 @@ class Dispatcher:
         is_online: IsOnlineFn | None = None,
         fetch_models: FetchModelsFn | None = None,
         single_flight: SingleFlightGroup | None = None,
+        http_client: httpx.AsyncClient | None = None,
     ) -> None:
         self._upstreams = upstream_registry or UpstreamRegistry()
         self._models = model_registry
@@ -226,6 +259,26 @@ class Dispatcher:
         self._fetch_models: FetchModelsFn = fetch_models or _default_fetch_models
         # TIER3 — every cold-cache prefetch goes through this group.
         self._single_flight: SingleFlightGroup = single_flight or SingleFlightGroup()
+        # Shared HTTP client for forward().  Lazy-init so unit tests that
+        # only exercise dispatch() don't open sockets.
+        self._http_client: httpx.AsyncClient | None = http_client
+        self._owns_http_client: bool = http_client is None
+
+    def _get_http_client(self) -> httpx.AsyncClient:
+        if self._http_client is None:
+            # Long read timeout for slow generation; short connect/write/pool.
+            # Streaming responses ignore the read timeout once the stream starts.
+            self._http_client = httpx.AsyncClient(
+                timeout=httpx.Timeout(connect=5.0, read=300.0, write=10.0, pool=5.0),
+                follow_redirects=False,
+            )
+        return self._http_client
+
+    async def aclose(self) -> None:
+        """Close the shared httpx client.  Safe to call multiple times."""
+        if self._http_client is not None and self._owns_http_client:
+            await self._http_client.aclose()
+            self._http_client = None
 
     # ── public API ────────────────────────────────────────────────────────
 
@@ -414,17 +467,117 @@ class Dispatcher:
         self._log_decision(call, t0, cache_state="legacy")
         return call
 
-    async def forward(self, call: UpstreamCall) -> Any:  # pragma: no cover
+    async def forward(self, call: UpstreamCall) -> Response:
         """Execute the HTTP forward and return a FastAPI Response.
 
-        # NOTE: Phase 1 stub — full streaming/non-streaming forward (mirroring
-        # haloai lib/dispatcher.py:_forward_direct and _forward_streaming)
-        # lands once the providers + slot manager are wired.  The hook is here
-        # so api/routes/v1.py can call dispatcher.dispatch() then
-        # dispatcher.forward() without further refactor.
+        Two paths:
+
+        - **Streaming** (``call.streaming``): returns a
+          :class:`StreamingResponse` that pipes the upstream's chunks
+          straight to the client.  Suitable for SSE
+          (``text/event-stream``) and raw binary (e.g. Kokoro's
+          ``audio/wav``).
+        - **Non-streaming**: reads the full upstream body and returns a
+          :class:`Response` with the same status code and content.
+
+        Upstream non-2xx responses are passed through verbatim so the
+        client sees the upstream's error envelope (matters for
+        OpenAI-compat error shapes).  Network-level failures (timeout,
+        connection refused, DNS) raise :class:`UpstreamUnavailable` so
+        the error middleware emits a structured ``dispatch.upstream_unavailable``
+        envelope.
+
+        Mirrors haloai ``lib/dispatcher.py``'s ``_forward_direct`` and
+        ``_forward_streaming`` (PLAN.md §3).
         """
-        raise NotImplementedError(
-            "Dispatcher.forward: integrate with providers in a later Phase 1 slice"
+        client = self._get_http_client()
+        if call.streaming:
+            return await self._forward_streaming(client, call)
+        return await self._forward_direct(client, call)
+
+    async def _forward_direct(
+        self,
+        client: httpx.AsyncClient,
+        call: UpstreamCall,
+    ) -> Response:
+        try:
+            resp = await client.request(
+                call.method,
+                call.target_url,
+                content=call.body or None,
+                headers=call.headers,
+            )
+        except (httpx.HTTPError, OSError) as exc:
+            log.warning(
+                "dispatch.forward_failed",
+                upstream=call.upstream_name,
+                method=call.method,
+                target=call.target_url,
+                error=str(exc),
+                error_type=type(exc).__name__,
+            )
+            raise UpstreamUnavailable(
+                f"upstream {call.upstream_name!r} unreachable: {type(exc).__name__}",
+                details={
+                    "upstream": call.upstream_name,
+                    "target": call.target_url,
+                    "error": str(exc),
+                },
+            ) from exc
+
+        return Response(
+            content=resp.content,
+            status_code=resp.status_code,
+            headers=_filter_response_headers(resp.headers),
+            media_type=resp.headers.get("content-type"),
+        )
+
+    async def _forward_streaming(
+        self,
+        client: httpx.AsyncClient,
+        call: UpstreamCall,
+    ) -> StreamingResponse:
+        # We open the stream eagerly so connect errors surface as
+        # UpstreamUnavailable instead of leaking through StreamingResponse
+        # as a generator-time exception that confuses the error middleware.
+        try:
+            req = client.build_request(
+                call.method,
+                call.target_url,
+                content=call.body or None,
+                headers=call.headers,
+            )
+            resp = await client.send(req, stream=True)
+        except (httpx.HTTPError, OSError) as exc:
+            log.warning(
+                "dispatch.forward_stream_open_failed",
+                upstream=call.upstream_name,
+                method=call.method,
+                target=call.target_url,
+                error=str(exc),
+                error_type=type(exc).__name__,
+            )
+            raise UpstreamUnavailable(
+                f"upstream {call.upstream_name!r} unreachable: {type(exc).__name__}",
+                details={
+                    "upstream": call.upstream_name,
+                    "target": call.target_url,
+                    "error": str(exc),
+                },
+            ) from exc
+
+        async def _iter() -> AsyncIterator[bytes]:
+            try:
+                async for chunk in resp.aiter_raw():
+                    yield chunk
+            finally:
+                await resp.aclose()
+
+        return StreamingResponse(
+            _iter(),
+            status_code=resp.status_code,
+            headers=_filter_response_headers(resp.headers),
+            media_type=resp.headers.get("content-type"),
         )
 
     # ── internals ────────────────────────────────────────────────────────
@@ -591,6 +744,11 @@ def _join_url(upstream_url: str, request_path: str) -> str:
     return base + suffix
 
 
+def _filter_response_headers(headers: httpx.Headers) -> dict[str, str]:
+    """Drop hop-by-hop and length headers so Starlette can recompute them."""
+    return {k: v for k, v in headers.items() if k.lower() not in _HOP_BY_HOP_RESPONSE_HEADERS}
+
+
 __all__ = [
     "DispatchError",
     "Dispatcher",
@@ -598,4 +756,5 @@ __all__ = [
     "RegistryLoadFailed",
     "UnknownUpstream",
     "UpstreamCall",
+    "UpstreamUnavailable",
 ]

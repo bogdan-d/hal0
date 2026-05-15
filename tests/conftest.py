@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -18,9 +20,10 @@ def app() -> FastAPI:
 
 
 @pytest.fixture(scope="function")
-def client(app: FastAPI) -> TestClient:
-    """Return a TestClient wrapping a fresh app instance."""
-    return TestClient(app)
+def client(app: FastAPI) -> Iterator[TestClient]:
+    """TestClient with lifespan executed (so app.state singletons exist)."""
+    with TestClient(app) as c:
+        yield c
 
 
 @pytest.fixture(scope="function")
