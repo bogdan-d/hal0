@@ -57,12 +57,18 @@ def test_stub_returns_501_envelope(client: TestClient, method: str, path: str) -
 # system.not_implemented) so the UI can branch on the specific code.
 # Asserting the typed code prevents an accidental regression to the
 # generic stub envelope.
-_TYPED_PENDING_ENDPOINTS: list[tuple[str, str, str]] = [
-    ("POST", "/api/models/qwen3-4b-q4/pull", "model.pull_pending"),
-    ("GET", "/api/install/curated-models", "model.pull_pending"),
-]
+# NOTE: the v0.1 model-pull wave (Team B) wired this surface live —
+# the endpoints below now return real responses instead of typed 501s.
+# This list is intentionally empty in the v1 release; kept as a slot for
+# future waves so an introduced 501 doesn't slip back to the generic
+# ``system.not_implemented`` envelope.
+_TYPED_PENDING_ENDPOINTS: list[tuple[str, str, str]] = []
 
 
+@pytest.mark.skipif(
+    not _TYPED_PENDING_ENDPOINTS,
+    reason="no typed-pending endpoints in this release",
+)
 @pytest.mark.parametrize("method,path,code", _TYPED_PENDING_ENDPOINTS)
 def test_typed_pending_endpoint_returns_domain_code(
     client: TestClient, method: str, path: str, code: str

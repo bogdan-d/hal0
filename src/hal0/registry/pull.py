@@ -1,0 +1,400 @@
+"""Hugging Face model pull — streaming download + SHA-256 + atomic install.
+
+The pull engine runs as a FastAPI BackgroundTask: queue → running →
+{completed, failed, cancelled}. State lives on ``app.state.model_pull_jobs``
+so SSE / status endpoints can observe progress without coupling to this
+module.
+
+The actual download streams from
+``https://huggingface.co/<repo>/resolve/main/<file>`` to a tempfile
+under ``/var/lib/hal0/models/.tmp/`` and ``os.replace()``s into the final
+location on success. We compute SHA-256 incrementally while streaming so
+the registry entry can record an integrity tag without a second pass.
+
+# NOTE: HF's ``resolve/main`` URLs are content-addressed at the LFS layer
+# — once we've downloaded a file we treat it as immutable. No revalidation,
+# no 304 dance. Anyone wanting a fresh build deletes the file and re-pulls.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import hashlib
+import logging
+import os
+import re
+import secrets
+import tempfile
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+import httpx
+
+from hal0.config import paths
+from hal0.errors import Hal0Error
+from hal0.registry.model import Model
+from hal0.registry.store import ModelNotFound, ModelRegistry
+
+log = logging.getLogger(__name__)
+
+
+# ── Tunables ─────────────────────────────────────────────────────────────────
+
+# Stream chunk size — 256 KiB is a good balance between throughput and
+# progress-update granularity. SSE emits at most one event per chunk.
+_CHUNK_BYTES: int = 256 * 1024
+
+# Minimum interval between SSE progress emits (when chunk-rate is high).
+_SSE_MIN_INTERVAL_S: float = 0.5
+
+# Connect timeout (the body stream is intentionally unbounded — large
+# GGUFs take minutes on slow links).
+_CONNECT_TIMEOUT_S: float = 30.0
+_READ_TIMEOUT_S: float | None = None  # None → unbounded body read
+
+# Path-safety regex: model ids are user-controllable, so we strip anything
+# that could escape the models directory.
+_SANITISE_RE = re.compile(r"[^A-Za-z0-9._-]+")
+
+
+# ── Typed errors ─────────────────────────────────────────────────────────────
+
+
+class PullError(Hal0Error):
+    """Base error for pull operations."""
+
+    code = "model.pull_failed"
+    status = 500
+
+
+class PullInvalidSource(PullError):
+    """The model entry doesn't carry enough info to know what to download."""
+
+    code = "model.invalid_source"
+    status = 422
+
+
+class PullJobNotFound(PullError):
+    """No pull job for this model id."""
+
+    code = "model.pull_job_not_found"
+    status = 404
+
+
+# ── Job record ───────────────────────────────────────────────────────────────
+
+
+@dataclass
+class PullJob:
+    """One in-flight model pull, addressable by ``model_id``.
+
+    Lives on ``app.state.model_pull_jobs[model_id]``. SSE / status routes
+    snapshot ``as_dict()`` to surface progress without holding the
+    dataclass across event-loop ticks.
+    """
+
+    job_id: str
+    model_id: str
+    state: str = "queued"  # queued → running → {completed,failed,cancelled}
+    bytes_downloaded: int = 0
+    bytes_total: int = 0
+    started_at: float = 0.0
+    finished_at: float | None = None
+    error: str | None = None
+    error_code: str | None = None
+    sha256: str | None = None
+    path: str | None = None
+    cancel_requested: bool = False
+    # Async signalling — set every time the background task makes
+    # progress. SSE waits on this rather than polling.
+    progress_event: asyncio.Event = field(default_factory=asyncio.Event)
+
+    def as_dict(self) -> dict[str, Any]:
+        """Serialisable snapshot for /pull/status and SSE frames."""
+        return {
+            "id": self.job_id,
+            "model_id": self.model_id,
+            "state": self.state,
+            "bytes_downloaded": self.bytes_downloaded,
+            "bytes_total": self.bytes_total,
+            "started_at": self.started_at,
+            "finished_at": self.finished_at,
+            "error": self.error,
+            "error_code": self.error_code,
+            "sha256": self.sha256,
+            "path": self.path,
+        }
+
+    def _signal(self) -> None:
+        """Pulse the progress event so any awaiting SSE generator wakes up."""
+        self.progress_event.set()
+        self.progress_event = asyncio.Event()
+
+
+# ── Path helpers ─────────────────────────────────────────────────────────────
+
+
+def _sanitise_id(model_id: str) -> str:
+    """Strip path-unsafe characters from a model id.
+
+    The id is used as a directory name under ``/var/lib/hal0/models/``;
+    if it contains '/' or '..' it could escape the models tree. Mapping
+    everything else to '-' keeps the directory navigable.
+    """
+    cleaned = _SANITISE_RE.sub("-", model_id).strip("-.") or "model"
+    return cleaned
+
+
+def _final_path(model_id: str, filename: str) -> Path:
+    """Resolve the final on-disk path: /var/lib/hal0/models/<id>/<file>."""
+    return paths.models_dir() / _sanitise_id(model_id) / filename
+
+
+def _tmp_dir() -> Path:
+    """Return the tempfile staging directory for in-flight pulls."""
+    return paths.models_dir() / ".tmp"
+
+
+def hf_download_url(repo: str, filename: str, revision: str = "main") -> str:
+    """Build the canonical HuggingFace download URL.
+
+    ``resolve/main`` (not ``raw/main``) is required for GGUF — LFS files
+    aren't served raw. HF returns a 302 to a signed CDN URL; httpx
+    follows that for us when ``follow_redirects=True``.
+    """
+    repo = repo.strip("/")
+    filename = filename.lstrip("/")
+    return f"https://huggingface.co/{repo}/resolve/{revision}/{filename}"
+
+
+# ── Job orchestration ────────────────────────────────────────────────────────
+
+
+def make_job(model_id: str) -> PullJob:
+    """Create a fresh job record for ``model_id``."""
+    return PullJob(
+        job_id=secrets.token_hex(8),
+        model_id=model_id,
+        state="queued",
+        started_at=time.time(),
+    )
+
+
+def get_job(jobs: dict[str, PullJob], model_id: str) -> PullJob | None:
+    """Return the most recent job for ``model_id``, or None."""
+    return jobs.get(model_id)
+
+
+async def run_pull(
+    job: PullJob,
+    *,
+    hf_repo: str,
+    hf_file: str,
+    registry: ModelRegistry,
+    hf_token: str | None = None,
+    client: httpx.AsyncClient | None = None,
+) -> None:
+    """Background-task body: stream the file, hash it, install it, register it.
+
+    Mutates ``job`` in place and pulses ``job._signal()`` on every chunk
+    boundary or 500ms tick (whichever is rarer) so SSE consumers see
+    progress without polling.
+
+    Cancellation: callers set ``job.cancel_requested = True``. The next
+    chunk read checks the flag, deletes the partial, transitions to
+    ``cancelled``, and returns.
+    """
+    job.state = "running"
+    job.started_at = time.time()
+    job._signal()
+
+    url = hf_download_url(hf_repo, hf_file)
+    headers: dict[str, str] = {"User-Agent": "hal0/installer"}
+    if hf_token:
+        headers["Authorization"] = f"Bearer {hf_token}"
+
+    tmp_dir = _tmp_dir()
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    rand_tag = secrets.token_hex(4)
+    tmp_path = tmp_dir / f"{_sanitise_id(job.model_id)}.{rand_tag}.part"
+
+    hasher = hashlib.sha256()
+    last_emit = time.monotonic()
+    owns_client = client is None
+    if client is None:
+        client = httpx.AsyncClient(
+            timeout=httpx.Timeout(_CONNECT_TIMEOUT_S, read=_READ_TIMEOUT_S),
+            follow_redirects=True,
+        )
+
+    try:
+        async with client.stream("GET", url, headers=headers) as resp:
+            if resp.status_code == 401 or resp.status_code == 403:
+                raise PullError(
+                    f"hugging face returned {resp.status_code} for {hf_repo}/{hf_file}"
+                    " (gated repo? set HF_TOKEN)",
+                    details={
+                        "status": resp.status_code,
+                        "repo": hf_repo,
+                        "file": hf_file,
+                    },
+                )
+            if resp.status_code == 404:
+                raise PullError(
+                    f"hugging face has no file {hf_file!r} in {hf_repo!r} at main",
+                    details={"repo": hf_repo, "file": hf_file},
+                )
+            if resp.status_code >= 400:
+                raise PullError(
+                    f"hugging face returned HTTP {resp.status_code} for {url}",
+                    details={"status": resp.status_code, "url": url},
+                )
+
+            content_length = resp.headers.get("content-length")
+            if content_length:
+                try:
+                    job.bytes_total = int(content_length)
+                except ValueError:
+                    job.bytes_total = 0
+            job._signal()
+
+            with open(tmp_path, "wb") as f:
+                async for chunk in resp.aiter_bytes(chunk_size=_CHUNK_BYTES):
+                    if job.cancel_requested:
+                        # Caller asked for cancellation — drop the partial
+                        # and exit cleanly.
+                        f.close()
+                        with contextlib.suppress(OSError):
+                            tmp_path.unlink(missing_ok=True)
+                        job.state = "cancelled"
+                        job.finished_at = time.time()
+                        job._signal()
+                        return
+                    if not chunk:
+                        continue
+                    f.write(chunk)
+                    hasher.update(chunk)
+                    job.bytes_downloaded += len(chunk)
+                    now = time.monotonic()
+                    if (now - last_emit) >= _SSE_MIN_INTERVAL_S:
+                        last_emit = now
+                        job._signal()
+
+        # Download complete — atomic install.
+        final = _final_path(job.model_id, hf_file)
+        final.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(tmp_path, final)
+        tmp_path = final  # so the cleanup `finally` doesn't unlink the installed file
+        size_bytes = final.stat().st_size
+        digest = hasher.hexdigest()
+
+        # Register / update the registry entry.
+        _register_pulled(
+            registry,
+            model_id=job.model_id,
+            path=str(final),
+            size_bytes=size_bytes,
+            sha256=digest,
+            hf_repo=hf_repo,
+            hf_filename=hf_file,
+        )
+
+        job.path = str(final)
+        job.sha256 = digest
+        job.bytes_downloaded = size_bytes
+        if job.bytes_total == 0:
+            job.bytes_total = size_bytes
+        job.state = "completed"
+        job.finished_at = time.time()
+        job._signal()
+    except asyncio.CancelledError:
+        # Task itself was cancelled by the event loop — treat as cancellation.
+        with contextlib.suppress(OSError):
+            if tmp_path and tmp_path.exists() and tmp_path.suffix == ".part":
+                tmp_path.unlink()
+        job.state = "cancelled"
+        job.finished_at = time.time()
+        job._signal()
+        raise
+    except Hal0Error as exc:
+        with contextlib.suppress(OSError):
+            if tmp_path and tmp_path.exists() and tmp_path.suffix == ".part":
+                tmp_path.unlink()
+        job.state = "failed"
+        job.error = exc.message
+        job.error_code = exc.code
+        job.finished_at = time.time()
+        job._signal()
+        log.warning("model.pull_failed", extra={"model_id": job.model_id, "error": exc.message})
+    except Exception as exc:
+        with contextlib.suppress(OSError):
+            if tmp_path and tmp_path.exists() and tmp_path.suffix == ".part":
+                tmp_path.unlink()
+        job.state = "failed"
+        job.error = f"{type(exc).__name__}: {exc}"
+        job.error_code = "model.pull_failed"
+        job.finished_at = time.time()
+        job._signal()
+        log.exception("model.pull_unexpected_error", extra={"model_id": job.model_id})
+    finally:
+        if owns_client:
+            await client.aclose()
+
+
+def _register_pulled(
+    registry: ModelRegistry,
+    *,
+    model_id: str,
+    path: str,
+    size_bytes: int,
+    sha256: str,
+    hf_repo: str,
+    hf_filename: str,
+) -> None:
+    """Upsert the registry entry after a successful pull."""
+    updates: dict[str, Any] = {
+        "path": path,
+        "size_bytes": size_bytes,
+        "hf_repo": hf_repo,
+        "hf_filename": hf_filename,
+        "metadata": {"sha256": sha256},
+    }
+    try:
+        existing = registry.get(model_id)
+    except ModelNotFound:
+        registry.add(
+            Model(
+                id=model_id,
+                name=model_id,
+                path=path,
+                size_bytes=size_bytes,
+                hf_repo=hf_repo,
+                hf_filename=hf_filename,
+                capabilities=["chat"],
+                metadata={"sha256": sha256},
+            )
+        )
+        return
+    # Preserve license / capabilities / tags from any pre-pull register
+    # call (e.g. pick-default seeded the entry from the curated catalogue
+    # before kicking off the pull).
+    merged_meta = dict(existing.metadata)
+    merged_meta["sha256"] = sha256
+    updates["metadata"] = merged_meta
+    registry.update(model_id, updates)
+
+
+__all__ = [
+    "PullError",
+    "PullInvalidSource",
+    "PullJob",
+    "PullJobNotFound",
+    "_sanitise_id",
+    "get_job",
+    "hf_download_url",
+    "make_job",
+    "run_pull",
+]

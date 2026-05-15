@@ -118,9 +118,26 @@ def test_install_probe_writes_hardware_json(
     assert info["probed_at"], "probed_at should be a non-empty ISO timestamp"
 
 
-def test_install_curated_models_still_pending(isolated_client: TestClient) -> None:
-    """Curated-models endpoint stays 501 with the typed envelope (Team B's wave)."""
+def test_install_curated_models_returns_catalogue(isolated_client: TestClient) -> None:
+    """Curated-models endpoint surfaces the manifest the wizard renders."""
     r = isolated_client.get("/api/install/curated-models")
-    assert r.status_code == 501
+    assert r.status_code == 200, r.text
     body = r.json()
-    assert body["error"]["code"] == "model.pull_pending"
+    assert body["custom_allowed"] is True
+    ids = {m["id"] for m in body["models"]}
+    # Catalogue must always include at least the three named picks.
+    assert {"qwen3-4b", "llama32-3b", "phi3-mini"}.issubset(ids)
+    # Every entry carries the wizard's required fields.
+    for m in body["models"]:
+        for key in (
+            "id",
+            "display_name",
+            "description",
+            "size_gb",
+            "vram_gb_min",
+            "license",
+            "license_url",
+            "hf_repo",
+            "hf_file",
+        ):
+            assert key in m, f"missing {key!r} on curated entry {m.get('id')}"
