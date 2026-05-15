@@ -87,9 +87,9 @@ def test_start_cmd_uses_flm_serve(
 # ─── image_ref / container_spec ───────────────────────────────────────────────
 
 
-def test_image_ref_is_hal0_dev_flm(provider: FLMProvider) -> None:
+def test_image_ref_is_hal0ai_flm(provider: FLMProvider) -> None:
     assert provider.image_ref({}) == _HAL0_FLM_IMAGE
-    assert _HAL0_FLM_IMAGE.startswith("ghcr.io/hal0-dev/hal0-toolbox-flm")
+    assert _HAL0_FLM_IMAGE.startswith("ghcr.io/hal0ai/hal0-toolbox-flm")
 
 
 def test_container_spec_passes_through_accel_device(

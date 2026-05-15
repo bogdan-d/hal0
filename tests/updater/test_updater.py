@@ -92,7 +92,7 @@ def _write_release_manifest(
         "url": f"file://{tarball}",
         "sig_url": f"file://{sig}",
         "digest_sha256": _sha256_of(tarball),
-        "signer_identity": "^https://github\\.com/hal0-dev/hal0/.*",
+        "signer_identity": "^https://github\\.com/hal0ai/hal0/.*",
         "signer_issuer": "https://token.actions.githubusercontent.com",
         "min_data_version": 1,
         "released_at": "2026-05-15T12:00:00Z",

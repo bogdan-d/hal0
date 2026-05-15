@@ -13,9 +13,9 @@ Upstream reference image:
   ghcr.io/remsky/kokoro-fastapi-gpu:latest (PyTorch + CUDA)
 
 # NOTE: hal0 ships its own toolbox build under
-#   ghcr.io/hal0-dev/hal0-toolbox-kokoro:v1
+#   ghcr.io/hal0ai/hal0-toolbox-kokoro:v1
 # which wraps remsky/Kokoro-FastAPI with hal0's runtime conventions
-# (model paths, port binding, healthcheck shape). Until hal0-dev GHCR
+# (model paths, port binding, healthcheck shape). Until hal0ai GHCR
 # is provisioned (PLAN.md §17 Risks), the toolbox build can be sourced
 # from the upstream image.
 
@@ -37,7 +37,7 @@ from hal0.providers._gpu import resolve_gpu_group_ids
 from hal0.providers.base import ContainerSpec, Provider
 
 # ── Toolbox image ──────────────────────────────────────────────────────────────
-_HAL0_KOKORO_IMAGE = "ghcr.io/hal0-dev/hal0-toolbox-kokoro:v1"
+_HAL0_KOKORO_IMAGE = "ghcr.io/hal0ai/hal0-toolbox-kokoro:v1"
 
 # Bare-process entrypoint inside the toolbox image (mirrors remsky's
 # FastAPI app launch). Used for start_cmd() outside containers and for
@@ -134,7 +134,7 @@ class KokoroProvider(Provider):
         Resolution order (matches ``llama_server.image_ref``):
           1. ``slot_cfg["image"]`` — explicit override from slot TOML.
           2. ``HAL0_TOOLBOX_IMAGE_KOKORO`` env var.
-          3. The default ``ghcr.io/hal0-dev/hal0-toolbox-kokoro:v1``.
+          3. The default ``ghcr.io/hal0ai/hal0-toolbox-kokoro:v1``.
         """
         override = slot_cfg.get("image") or slot_cfg.get("slot", {}).get("image")
         if override:

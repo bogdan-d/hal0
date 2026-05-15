@@ -166,11 +166,11 @@ def test_image_ref_rejects_unknown_backend(provider: LlamaServerProvider) -> Non
         provider.image_ref({"backend": "tpu"})
 
 
-def test_image_ref_uses_hal0_dev_namespace(provider: LlamaServerProvider) -> None:
-    """PLAN.md §12: toolbox images live under ghcr.io/hal0-dev/."""
+def test_image_ref_uses_hal0ai_namespace(provider: LlamaServerProvider) -> None:
+    """PLAN.md §12: toolbox images live under ghcr.io/hal0ai/."""
     for backend in ("vulkan", "rocm"):
         ref = provider.image_ref({"backend": backend})
-        assert ref.startswith("ghcr.io/hal0-dev/hal0-toolbox-"), ref
+        assert ref.startswith("ghcr.io/hal0ai/hal0-toolbox-"), ref
 
 
 def test_image_ref_slot_cfg_override_wins(provider: LlamaServerProvider) -> None:
@@ -275,7 +275,7 @@ def test_render_systemd_override_emits_full_docker_line(
     # bind-mount for the model file
     assert "/var/lib/hal0/models:/var/lib/hal0/models" in out
     # image + ENTRYPOINT args (llama-server flags)
-    assert "ghcr.io/hal0-dev/hal0-toolbox-vulkan:v1" in out
+    assert "ghcr.io/hal0ai/hal0-toolbox-vulkan:v1" in out
     assert "--model" in out
     assert "--port 8081" in out or "--port" in out
     assert "-ngl" in out

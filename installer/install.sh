@@ -3,7 +3,7 @@
 #
 # Usage:
 #   sudo bash install.sh             # standard install at /opt/hal0
-#   bash install.sh --dev            # local-only install under $PWD/.hal0-dev
+#   bash install.sh --dev            # local-only install under $PWD/.hal0ai
 #   sudo bash install.sh --no-start  # set up everything but don't start units
 #
 # Env overrides:
@@ -40,7 +40,7 @@ for arg in "$@"; do
         --help|-h)
             cat <<EOF
 Usage: install.sh [--dev] [--no-start]
-  --dev        install under \$PWD/.hal0-dev/, no systemd setup
+  --dev        install under \$PWD/.hal0ai/, no systemd setup
   --no-start   set up everything but don't enable/start the API
 EOF
             exit 0
@@ -54,7 +54,7 @@ HAL0_USER="${HAL0_USER:-root}"
 PY="${HAL0_PYTHON:-python3}"
 
 if [[ "${DEV_MODE}" -eq 1 ]]; then
-    PREFIX="${HAL0_PREFIX:-${PWD}/.hal0-dev}"
+    PREFIX="${HAL0_PREFIX:-${PWD}/.hal0ai}"
     ETC_DIR="${PREFIX}/etc/hal0"
     VAR_DIR="${PREFIX}/var/lib/hal0"
     UNIT_DIR="${PREFIX}/etc/systemd/system"
@@ -172,8 +172,8 @@ if [[ ! -f "${API_ENV}" ]]; then
 HAL0_PORT=${HAL0_PORT}
 HAL0_LOG_LEVEL=info
 # Uncomment to pin specific toolbox images:
-# HAL0_TOOLBOX_IMAGE_VULKAN=ghcr.io/hal0-dev/hal0-toolbox-vulkan:v1
-# HAL0_TOOLBOX_IMAGE_ROCM=ghcr.io/hal0-dev/hal0-toolbox-rocm:v1
+# HAL0_TOOLBOX_IMAGE_VULKAN=ghcr.io/hal0ai/hal0-toolbox-vulkan:v1
+# HAL0_TOOLBOX_IMAGE_ROCM=ghcr.io/hal0ai/hal0-toolbox-rocm:v1
 EOF
     info "wrote ${API_ENV}"
 fi
@@ -208,7 +208,7 @@ API_UNIT="${UNIT_DIR}/hal0-api.service"
 cat > "${API_UNIT}" <<EOF
 [Unit]
 Description=hal0 API daemon
-Documentation=https://github.com/hal0-dev/hal0
+Documentation=https://github.com/hal0ai/hal0
 After=network-online.target
 Wants=network-online.target
 

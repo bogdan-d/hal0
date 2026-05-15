@@ -40,13 +40,13 @@ from hal0.providers._gpu import resolve_gpu_group_ids as _resolve_gpu_group_ids
 
 # ── Toolbox image refs ─────────────────────────────────────────────────────────
 # Per PLAN.md §12 the hal0 toolbox images are published under
-# ghcr.io/hal0-dev/. The actual GHCR org/images are not published yet
-# (see PLAN §17 Risks: "Toolbox images on ghcr.io/hal0-dev/ blocked by
+# ghcr.io/hal0ai/. The actual GHCR org/images are not published yet
+# (see PLAN §17 Risks: "Toolbox images on ghcr.io/hal0ai/ blocked by
 # org provisioning"). Names are fixed now so the rest of the system can
 # wire against them; Phase 5 publishes digests into manifest.json.
 _HAL0_TOOLBOX_IMAGES = {
-    "vulkan": "ghcr.io/hal0-dev/hal0-toolbox-vulkan:v1",
-    "rocm": "ghcr.io/hal0-dev/hal0-toolbox-rocm:v1",
+    "vulkan": "ghcr.io/hal0ai/hal0-toolbox-vulkan:v1",
+    "rocm": "ghcr.io/hal0ai/hal0-toolbox-rocm:v1",
 }
 
 # ── Timeouts ───────────────────────────────────────────────────────────────────
@@ -105,8 +105,8 @@ class LlamaServerProvider(Provider):
     """Provider for llama.cpp (llama-server) backends.
 
     Toolbox images (PLAN.md §12):
-      Vulkan: ghcr.io/hal0-dev/hal0-toolbox-vulkan:v1
-      ROCm:   ghcr.io/hal0-dev/hal0-toolbox-rocm:v1
+      Vulkan: ghcr.io/hal0ai/hal0-toolbox-vulkan:v1
+      ROCm:   ghcr.io/hal0ai/hal0-toolbox-rocm:v1
 
     Backend is selected by slot_cfg["backend"]: "vulkan" | "rocm" | "cpu".
     "cpu" maps to the Vulkan image (it runs CPU when no GPU is exposed).
@@ -306,10 +306,10 @@ class LlamaServerProvider(Provider):
              (e.g. ``image = "hal0-toolbox-vulkan:dev"`` for local builds).
           2. ``HAL0_TOOLBOX_IMAGE_{BACKEND}`` env var — installer / operator
              override without editing slot TOML.  Example:
-             ``HAL0_TOOLBOX_IMAGE_VULKAN=ghcr.io/hal0-dev/...@sha256:abc``
+             ``HAL0_TOOLBOX_IMAGE_VULKAN=ghcr.io/hal0ai/...@sha256:abc``
              materialised by the installer at first-run.
           3. ``_HAL0_TOOLBOX_IMAGES[backend]`` — the schema default
-             (``ghcr.io/hal0-dev/hal0-toolbox-<backend>:v1``).
+             (``ghcr.io/hal0ai/hal0-toolbox-<backend>:v1``).
 
         Backends: "vulkan" | "rocm" | "cpu" (cpu falls through to vulkan
         since the vulkan image runs on cpu when no GPU is exposed).

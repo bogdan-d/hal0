@@ -154,7 +154,7 @@ public interfaces.
 - Python package: `hal0`
 - CLI binary: `hal0` (with subcommands)
 - systemd prefix: `hal0-`
-- Toolbox image org: `ghcr.io/hal0-dev/`
+- Toolbox image org: `ghcr.io/hal0ai/`
 
 ---
 
@@ -414,7 +414,7 @@ hal0 update [--channel=stable|nightly] [--check] [--rollback]
   `{version, url, sig_url, manifest_url, min_data_version}`
 - If `version > current`:
   - Download tarball + sig to `/var/lib/hal0/cache/`
-  - Verify cosign signature against `hal0-dev/hal0` GitHub OIDC identity
+  - Verify cosign signature against `hal0ai/hal0` GitHub OIDC identity
   - Extract to `/usr/lib/hal0-<new>/`
   - Run any pending config migrations (`hal0 config migrate` if `schema_version` advanced)
   - Atomic-swap `/usr/lib/hal0/current` symlink
@@ -473,7 +473,7 @@ Runs on PR with browser cached, ~8 min total.
 
 ### Three boxes, three jobs
 
-- **hal0-dev** (10.0.1.141, this VM, RTX 4080): code lives here. IDE, fish shell, local toolchain. Backend logic + UI dev + installer scripting. Vulkan / CUDA dev for non-NPU paths
+- **hal0ai** (10.0.1.141, this VM, RTX 4080): code lives here. IDE, fish shell, local toolchain. Backend logic + UI dev + installer scripting. Vulkan / CUDA dev for non-NPU paths
 - **hal0-test** (new Proxmox LXC, 10.0.1.221 or similar, Strix Halo passthrough): **installer QA target**. Wiped between release candidates. Every RC runs through `wipe → install → smoke test`. Also exercises NPU + ROCm paths that CI can't
 - **haloai** (10.0.1.220, existing): untouched until v1 cuts over. Continues running haloai + Hermes + your daily slots
 
@@ -499,11 +499,11 @@ Rename + republish. Current source: `ghcr.io/hal0ai/amd-strix-halo-toolboxes:*-s
 (kyuz0-derived, pending PRs #86/#87 upstream).
 
 v1 images:
-- `ghcr.io/hal0-dev/hal0-toolbox-vulkan:v1`
-- `ghcr.io/hal0-dev/hal0-toolbox-rocm:v1`
-- `ghcr.io/hal0-dev/hal0-toolbox-flm:v1` (NPU)
-- `ghcr.io/hal0-dev/hal0-toolbox-moonshine:v1`
-- `ghcr.io/hal0-dev/hal0-toolbox-kokoro:v1`
+- `ghcr.io/hal0ai/hal0-toolbox-vulkan:v1`
+- `ghcr.io/hal0ai/hal0-toolbox-rocm:v1`
+- `ghcr.io/hal0ai/hal0-toolbox-flm:v1` (NPU)
+- `ghcr.io/hal0ai/hal0-toolbox-moonshine:v1`
+- `ghcr.io/hal0ai/hal0-toolbox-kokoro:v1`
 
 Each tagged + signed (cosign). hal0 release manifest references specific
 image digests, so an update pulls the exact images known-good for that
@@ -561,7 +561,7 @@ refactor.
 Working assumption: 1 person full-time + Claude as pair. Adjust if not.
 
 **Phase 0 — scaffold (week 1)**
-- New `hal0-dev:/home/halo/dev/hal0/` repo, `git init`
+- New `hal0ai:/home/halo/dev/hal0/` repo, `git init`
 - pyproject.toml, package layout, FastAPI app factory, empty routers
 - Vue 3 + Tailwind 4 scaffold; sidebar, dark theme, empty 9 view stubs
 - CI skeleton (GitHub Actions, ruff + pytest)
@@ -639,7 +639,7 @@ own decisions before relevant milestones:
 |---|---|---|
 | Slot lifecycle state machine refactor balloons in scope | Medium | Time-box phase 5 at 5 days; if not converging, fall back to status-snapshot model and defer state machine to v0.2 |
 | Cosign release pipeline + signed-artifact verification has nasty edges | Medium | Prototype in phase 2 against a throwaway release, not phase 5 |
-| Toolbox images on `ghcr.io/hal0-dev/` blocked by org provisioning | Low | Use `ghcr.io/<personal>/` initially; transfer post-v1 |
+| ~~Toolbox images on `ghcr.io/hal0ai/` blocked by org provisioning~~ | RESOLVED | `hal0ai` GitHub org exists (decided 2026-05-15) |
 | OpenWebUI internal API changes break prewire env | Low | Pin OpenWebUI container version per hal0 release; test on every update bump |
 | Strix Halo NPU driver flakiness on `hal0-test` LXC delays integration | Medium | Build CI path on Vulkan-CPU first; NPU is release-gate only, not per-commit |
 | Self-update mechanism corrupts an install | Low–Medium | Atomic symlink swap + retained previous version + `hal0 update --rollback` command. Test rollback as part of release-gate |

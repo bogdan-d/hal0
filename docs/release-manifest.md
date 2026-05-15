@@ -23,19 +23,19 @@ file post-build; the runtime consumer is `hal0.updater.Updater.apply()`.
   "_schema": "hal0.releases.v1",
   "version": "0.1.1",
   "channel": "stable",
-  "url": "https://github.com/hal0-dev/hal0/releases/download/v0.1.1/hal0-0.1.1.tar.gz",
-  "sig_url": "https://github.com/hal0-dev/hal0/releases/download/v0.1.1/hal0-0.1.1.tar.gz.sig",
+  "url": "https://github.com/hal0ai/hal0/releases/download/v0.1.1/hal0-0.1.1.tar.gz",
+  "sig_url": "https://github.com/hal0ai/hal0/releases/download/v0.1.1/hal0-0.1.1.tar.gz.sig",
   "digest_sha256": "5e884898da28047151d0e56f8dc6292773603d0d6aabbdd62a11ef721d1542d8",
-  "signer_identity": "^https://github\\.com/hal0-dev/hal0/\\.github/workflows/release\\.yml@refs/tags/v0\\.1\\.1$",
+  "signer_identity": "^https://github\\.com/hal0ai/hal0/\\.github/workflows/release\\.yml@refs/tags/v0\\.1\\.1$",
   "signer_issuer": "https://token.actions.githubusercontent.com",
   "min_data_version": 1,
   "released_at": "2026-05-15T12:00:00Z",
-  "notes_url": "https://github.com/hal0-dev/hal0/releases/tag/v0.1.1",
+  "notes_url": "https://github.com/hal0ai/hal0/releases/tag/v0.1.1",
   "manifest_url": "https://releases.hal0.dev/stable.json",
   "toolbox_images": {
-    "vulkan": { "tag": "ghcr.io/hal0-dev/hal0-toolbox-vulkan:v0.1.1", "digest": "sha256:..." },
-    "rocm":   { "tag": "ghcr.io/hal0-dev/hal0-toolbox-rocm:v0.1.1",   "digest": "sha256:..." },
-    "flm":    { "tag": "ghcr.io/hal0-dev/hal0-toolbox-flm:v0.1.1",    "digest": "sha256:..." }
+    "vulkan": { "tag": "ghcr.io/hal0ai/hal0-toolbox-vulkan:v0.1.1", "digest": "sha256:..." },
+    "rocm":   { "tag": "ghcr.io/hal0ai/hal0-toolbox-rocm:v0.1.1",   "digest": "sha256:..." },
+    "flm":    { "tag": "ghcr.io/hal0ai/hal0-toolbox-flm:v0.1.1",    "digest": "sha256:..." }
   }
 }
 ```

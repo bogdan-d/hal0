@@ -11,7 +11,7 @@ for live PCM16 transcription.
 # infer() passthrough.  Streaming WS is handled directly by the
 # Dispatcher, not by this Provider's infer().
 
-Toolbox image: ghcr.io/hal0-dev/hal0-toolbox-moonshine:v1 (PLAN.md §12).
+Toolbox image: ghcr.io/hal0ai/hal0-toolbox-moonshine:v1 (PLAN.md §12).
 Port target: new hal0 provider wrapping haloai lib/voice/moonshine_server.py.
 """
 
@@ -27,7 +27,7 @@ from hal0.providers._gpu import resolve_gpu_group_ids
 from hal0.providers.base import ContainerSpec, Provider
 
 # ── Toolbox image ──────────────────────────────────────────────────────────────
-_HAL0_MOONSHINE_IMAGE = "ghcr.io/hal0-dev/hal0-toolbox-moonshine:v1"
+_HAL0_MOONSHINE_IMAGE = "ghcr.io/hal0ai/hal0-toolbox-moonshine:v1"
 
 # Moonshine server entrypoint inside the toolbox image.
 # NOTE: The toolbox image ENTRYPOINT runs the FastAPI server; this binary
@@ -126,7 +126,7 @@ class MoonshineProvider(Provider):
              (e.g. ``image = "hal0-toolbox-moonshine:dev"``).
           2. ``HAL0_TOOLBOX_IMAGE_MOONSHINE`` env var — installer /
              operator override without editing slot TOML.
-          3. The default ``ghcr.io/hal0-dev/hal0-toolbox-moonshine:v1``.
+          3. The default ``ghcr.io/hal0ai/hal0-toolbox-moonshine:v1``.
         """
         override = slot_cfg.get("image") or slot_cfg.get("slot", {}).get("image")
         if override:

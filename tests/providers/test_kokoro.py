@@ -71,9 +71,9 @@ def test_start_cmd_emits_required_flags(
 # ─── image_ref / container_spec ───────────────────────────────────────────────
 
 
-def test_image_ref_is_hal0_dev_kokoro(provider: KokoroProvider) -> None:
+def test_image_ref_is_hal0ai_kokoro(provider: KokoroProvider) -> None:
     assert provider.image_ref({}) == _HAL0_KOKORO_IMAGE
-    assert _HAL0_KOKORO_IMAGE.startswith("ghcr.io/hal0-dev/hal0-toolbox-kokoro")
+    assert _HAL0_KOKORO_IMAGE.startswith("ghcr.io/hal0ai/hal0-toolbox-kokoro")
 
 
 def test_container_spec_cpu_no_devices(

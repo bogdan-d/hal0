@@ -84,9 +84,9 @@ def test_start_cmd_emits_argparse_flags(
 # ─── image_ref / container_spec ───────────────────────────────────────────────
 
 
-def test_image_ref_is_hal0_dev_moonshine(provider: MoonshineProvider) -> None:
+def test_image_ref_is_hal0ai_moonshine(provider: MoonshineProvider) -> None:
     assert provider.image_ref({}) == _HAL0_MOONSHINE_IMAGE
-    assert _HAL0_MOONSHINE_IMAGE.startswith("ghcr.io/hal0-dev/hal0-toolbox-moonshine")
+    assert _HAL0_MOONSHINE_IMAGE.startswith("ghcr.io/hal0ai/hal0-toolbox-moonshine")
 
 
 def test_container_spec_command_args_only(

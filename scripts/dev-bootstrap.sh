@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # hal0 dev-bootstrap — start hal0 services for local development
 #
-# Run from the repo root on hal0-dev (or any dev machine):
+# Run from the repo root on hal0ai (or any dev machine):
 #   bash scripts/dev-bootstrap.sh
 #
 # Starts:

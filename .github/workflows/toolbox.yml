@@ -5,7 +5,7 @@ name: Toolbox images
 #
 # Publish target: ghcr.io/<owner>/hal0-toolbox-<name>:{v1, sha-<git-sha>}.
 # Owner resolves to ${{ github.repository_owner }} — see PLAN.md §17 risk
-# note: until the `hal0-dev/` GH org is provisioned this lands under the
+# note: until the `hal0ai/` GH org is provisioned this lands under the
 # personal namespace.  Manifest digests are pinned post-publish.
 
 on:
