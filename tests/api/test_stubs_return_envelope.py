@@ -13,7 +13,9 @@ from fastapi.testclient import TestClient
 # Endpoints leave this list as they get wired up; the remaining ones are
 # all genuine Phase 2+ surfaces (installer, updater, logs streaming, etc.)
 _STUB_ENDPOINTS = [
-    ("GET", "/api/slots/foo"),
+    # Step 2 wired /api/slots/{name} to the real SlotManager — removed
+    # from the stub list because an unknown slot now returns the typed
+    # slot.not_found envelope, not system.not_implemented.
     ("POST", "/api/models"),
     ("GET", "/api/logs/api"),
     ("GET", "/api/upstreams"),

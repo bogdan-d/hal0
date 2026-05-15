@@ -33,6 +33,7 @@ from hal0.config.loader import ConfigParseError, load_upstreams_config
 from hal0.dispatcher.router import Dispatcher
 from hal0.hardware.probe import HardwareProbe
 from hal0.registry.store import ModelRegistry
+from hal0.slots.manager import SlotManager
 from hal0.upstreams.registry import Upstream, UpstreamRegistry
 
 log = structlog.get_logger(__name__)
@@ -106,10 +107,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         fetch_models=_fetch_and_cache,
     )
 
+    # SlotManager has no startup/shutdown work — it's a stateless façade
+    # over /etc/hal0/slots/*.toml + /var/lib/hal0/slots/*/state.json plus
+    # systemctl subprocesses. Per-slot configs are discovered lazily by
+    # paths.slots_config_dir(), so HAL0_HOME changes in tests are honoured.
+    slot_manager = SlotManager()
+
     app.state.upstreams = upstreams
     app.state.model_registry = model_registry
     app.state.hardware_probe = hardware_probe
     app.state.dispatcher = dispatcher
+    app.state.slot_manager = slot_manager
     app.state.model_cache = model_cache
     # Tracks the most recent model id sent to each upstream so the
     # dashboard's synthetic slot reflects current usage instead of the

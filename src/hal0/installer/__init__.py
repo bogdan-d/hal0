@@ -16,8 +16,11 @@ Key exports:
 
 from __future__ import annotations
 
+from hal0.installer.template_unit import DEFAULT_DEST, install_template_unit
 from hal0.installer.wizard import FirstRunWizard
 
 __all__ = [
+    "DEFAULT_DEST",
     "FirstRunWizard",
+    "install_template_unit",
 ]

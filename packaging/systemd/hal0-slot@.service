@@ -1,0 +1,71 @@
+# hal0 inference slot template unit.
+#
+# Instance the unit per slot, e.g.:
+#   systemctl start hal0-slot@primary.service
+#
+# Each instance is configured by two on-disk artefacts that the
+# SlotManager owns:
+#   /var/lib/hal0/slots/<name>/env                            (env file)
+#   /etc/systemd/system/hal0-slot@<name>.service.d/override.conf
+#
+# The drop-in override.conf is rendered by
+# ``hal0.slots.unit_template.render_override`` and carries the concrete
+# ExecStart (docker run line), SyslogIdentifier, and any per-slot
+# resource limits.  This template provides only the structural skeleton
+# — ExecStart here is a *fallback* that exits with a clear error if a
+# slot is started without its drop-in (which would indicate a broken
+# install).
+#
+# See PLAN.md §2 (deployment model) and src/hal0/slots/unit_template.py
+# (drop-in renderer).
+
+[Unit]
+Description=hal0 inference slot %i
+Documentation=https://github.com/hal0-dev/hal0
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+# Avoid restart storms if the slot fails fast (bad model, missing image).
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+# The drop-in re-asserts this so a renamed env file would not silently
+# fall back to the inherited path; both must agree.
+EnvironmentFile=/var/lib/hal0/slots/%i/env
+
+# Fallback ExecStart — the drop-in clears this with an empty
+# ``ExecStart=`` and substitutes the real ``/usr/bin/docker run …``
+# line.  If you see this fire in journalctl, the per-slot
+# override.conf is missing or empty.
+ExecStart=/bin/bash -c 'echo "hal0-slot@%i: missing drop-in override.conf — refusing to start" >&2; exit 78'
+
+# Lifecycle policy.
+Restart=on-failure
+RestartSec=5s
+TimeoutStartSec=120
+TimeoutStopSec=30
+
+# Required for GPU/iGPU drivers that map large fixed buffers into the
+# container's address space.  Without this, the kernel may refuse to
+# lock model weights in RAM.
+LimitMEMLOCK=infinity
+
+# Slot ownership.  Phase 0 used root for bootstrap; Phase 1+ runs as
+# the same unprivileged hal0 user that owns hal0-api.
+User=hal0
+Group=hal0
+WorkingDirectory=/var/lib/hal0/slots/%i
+
+# Journal tagging — the drop-in overrides this with the concrete slot
+# name (``hal0-slot-<name>``) so ``journalctl -t hal0-slot-primary``
+# filters cleanly.
+SyslogIdentifier=hal0-slot-%i
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+# Template units cannot be enabled directly; each instance enables
+# itself via ``systemctl enable hal0-slot@<name>``.
+WantedBy=multi-user.target
