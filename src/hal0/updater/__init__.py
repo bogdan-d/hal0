@@ -20,8 +20,16 @@ Key exports:
 
 from __future__ import annotations
 
-from hal0.updater.updater import Updater
+from hal0.updater.updater import (
+    DEFAULT_RELEASES_URL,
+    Updater,
+    fetch_release_manifest,
+    releases_url,
+)
 
 __all__ = [
+    "DEFAULT_RELEASES_URL",
     "Updater",
+    "fetch_release_manifest",
+    "releases_url",
 ]
