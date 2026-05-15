@@ -275,6 +275,65 @@ async def test_status_reconciles_drift(
     assert snap.state == SlotState.ERROR
 
 
+async def test_status_rehydrates_backend_from_toml_when_state_extra_missing(
+    slot_root: Path,
+    tmp_hal0_home: str,
+    systemctl_stub: dict[str, Any],
+) -> None:
+    """Old state.json files (pre extras-carry) lacked ``extra.backend``.
+
+    The fix: ``status()`` falls back to the slot's TOML so the dashboard
+    chip on SlotCard sees the right backend without forcing a reload.
+    See handoff-2026-05-15 §"Remaining gaps" #5.
+    """
+    from hal0.slots.state import SlotState as _S
+    from hal0.slots.state import SlotStateRecord, write_state_atomic
+
+    # Hand-write a state.json that mimics the legacy shape — no
+    # ``extra.backend`` carried.  slot_root fixture already put
+    # primary.toml on disk with ``backend = "vulkan"``.
+    state_path = (
+        Path(tmp_hal0_home)
+        / "var-lib"
+        / "hal0"
+        / "slots"
+        / "primary"
+        / "state.json"
+    )
+    write_state_atomic(
+        state_path,
+        SlotStateRecord(name="primary", state=_S.OFFLINE, port=8081, extra={}),
+    )
+
+    sm = SlotManager()
+    snap = await sm.status("primary")
+    assert snap.backend == "vulkan", (
+        f"status() must re-hydrate backend from /etc/hal0/slots/primary.toml "
+        f"when state.json carries no extra.backend (got {snap.backend!r})"
+    )
+    # And the metadata top-level mirror it so /api/slots' _slot_to_dict fallback
+    # picks it up too.
+    assert snap.metadata.get("backend") == "vulkan"
+
+
+async def test_status_unloaded_slot_uses_toml_backend(
+    slot_root: Path,
+    tmp_hal0_home: str,
+    systemctl_stub: dict[str, Any],
+) -> None:
+    """A slot that has a TOML but never wrote state.json still surfaces backend.
+
+    Fresh-install case: /etc/hal0/slots/primary.toml exists from the
+    installer's defaults, but state.json doesn't yet because the slot
+    has never been loaded.
+    """
+    sm = SlotManager()
+    snap = await sm.status("primary")
+    assert snap.state == SlotState.OFFLINE
+    assert snap.backend == "vulkan"
+    assert snap.port == 8081
+
+
 # ── state machine enforcement ────────────────────────────────────────────────
 
 
