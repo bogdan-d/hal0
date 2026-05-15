@@ -16,7 +16,6 @@ _STUB_ENDPOINTS = [
     # Step 2 wired /api/slots/{name} to the real SlotManager — removed
     # from the stub list because an unknown slot now returns the typed
     # slot.not_found envelope, not system.not_implemented.
-    ("POST", "/api/models"),
     ("GET", "/api/logs/api"),
     ("GET", "/api/updates/check"),
     ("GET", "/api/install/state"),

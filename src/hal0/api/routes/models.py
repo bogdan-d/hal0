@@ -91,28 +91,76 @@ async def list_models(request: Request) -> dict[str, Any]:
     return {"models": data, "count": len(data), "filtered_aliases": filtered}
 
 
-@router.post("")
-async def create_model() -> dict[str, object]:
-    raise NotImplementedYet("create_model: registry-side model authoring lands with the installer")
+@router.post("", status_code=201)
+async def create_model(request: Request) -> dict[str, Any]:
+    """Register a new model in the local ModelRegistry.
+
+    Body shape: serialized ``Model`` — see ``hal0.registry.store.Model``.
+    The model must already exist on disk (e.g. dropped into
+    ``/var/lib/hal0/models/``) — this endpoint records metadata, it does
+    not download. Use POST /api/models/{id}/pull for downloads.
+    """
+    from hal0.registry.store import Model
+
+    registry = request.app.state.model_registry
+    try:
+        body = await request.json()
+    except Exception as exc:
+        raise Hal0Error("body must be valid JSON", details={"error": str(exc)}) from exc
+    if not isinstance(body, dict):
+        raise Hal0Error("body must be a JSON object")
+    try:
+        model = Model(**body)
+    except (TypeError, ValueError) as exc:
+        raise Hal0Error(f"invalid Model payload: {exc}") from exc
+    registry.add(model)
+    return _model_to_dict(model)
+
+
+def _model_to_dict(model: Any) -> dict[str, Any]:
+    """Serialise a registry Model to the dashboard's flat shape."""
+    if hasattr(model, "model_dump"):
+        return model.model_dump(mode="json")
+    return {**getattr(model, "__dict__", {})}
 
 
 @router.get("/{model_id:path}")
 async def get_model(model_id: str, request: Request) -> dict[str, Any]:
+    """Return a single model by id, preferring the local registry then
+    falling back to whichever upstream advertises it."""
+    registry = request.app.state.model_registry
+    if registry.has(model_id):
+        return _model_to_dict(registry.get(model_id))
     listing = await list_models(request)
     for m in listing["models"]:
         if m["id"] == model_id:
             return m
-    raise NotImplementedYet(f"get_model {model_id}: not found in any upstream catalog")
+    raise Hal0Error(
+        f"model {model_id!r} not found in registry or any upstream catalog",
+        details={"model_id": model_id},
+    )
 
 
 @router.put("/{model_id:path}")
-async def update_model(model_id: str) -> dict[str, object]:
-    raise NotImplementedYet(f"update_model {model_id}: registry-side authoring is post-installer")
+async def update_model(model_id: str, request: Request) -> dict[str, Any]:
+    """Apply partial updates to a registered model's metadata."""
+    registry = request.app.state.model_registry
+    try:
+        body = await request.json()
+    except Exception as exc:
+        raise Hal0Error("body must be valid JSON", details={"error": str(exc)}) from exc
+    if not isinstance(body, dict):
+        raise Hal0Error("body must be a JSON object")
+    model = registry.update(model_id, body)
+    return _model_to_dict(model)
 
 
 @router.delete("/{model_id:path}")
-async def delete_model(model_id: str) -> dict[str, object]:
-    raise NotImplementedYet(f"delete_model {model_id}: registry-side authoring is post-installer")
+async def delete_model(model_id: str, request: Request) -> dict[str, object]:
+    """Remove a model from the local registry (does not delete files)."""
+    registry = request.app.state.model_registry
+    removed = registry.remove(model_id)
+    return {"id": model_id, "deleted": bool(removed)}
 
 
 @router.post("/{model_id:path}/pull")

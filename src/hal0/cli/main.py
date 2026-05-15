@@ -7,14 +7,25 @@ Entry point declared in pyproject.toml:
 
 from __future__ import annotations
 
+import json as jsonlib
 from enum import StrEnum
 
 import typer
 import uvicorn
 from rich.console import Console
+from rich.panel import Panel
+from rich.syntax import Syntax
+from rich.table import Table
 
 import hal0
-from hal0.cli._shared import NOT_IMPLEMENTED
+from hal0.cli._shared import (
+    CliApiError,
+    _api_base,
+    _api_unreachable,
+    api_get,
+    api_post,
+    die,
+)
 from hal0.cli.config_commands import app as config_app
 from hal0.cli.model_commands import app as model_app
 from hal0.cli.slot_commands import app as slot_app
@@ -71,15 +82,70 @@ def main_callback(
 @app.command()
 def status() -> None:
     """Show system and slot summary."""
-    # Phase 1: GET _api_base() + "/api/status" and render a rich table.
-    console.print(NOT_IMPLEMENTED)
+    url = _api_base()
+    if _api_unreachable(url):
+        raise typer.Exit(1)
+    try:
+        st = api_get("/api/status")
+        slots = api_get("/api/slots")
+        ups = api_get("/api/upstreams")
+    except CliApiError as exc:
+        die(str(exc))
+        return
+    console.print(
+        Panel(
+            f"[bold]{st.get('name', 'hal0')}[/bold] v{st.get('version', '?')}  "
+            f"· slots={len(slots)} · upstreams={len(ups)}",
+            border_style="cyan",
+        )
+    )
+    table = Table(title="Slots")
+    table.add_column("Name", style="bold")
+    table.add_column("State")
+    table.add_column("Model")
+    table.add_column("Port", justify="right")
+    for s in slots:
+        table.add_row(
+            s.get("name", "—"),
+            s.get("status", "—"),
+            s.get("model") or s.get("model_id") or "—",
+            str(s.get("port") or "—"),
+        )
+    console.print(table)
 
 
 @app.command()
 def probe() -> None:
     """Re-run hardware detection and update hardware.json."""
-    # Phase 1: POST _api_base() + "/api/hardware/probe"
-    console.print(NOT_IMPLEMENTED)
+    url = _api_base()
+    if _api_unreachable(url):
+        raise typer.Exit(1)
+    try:
+        hw = api_post("/api/hardware/probe")
+    except CliApiError as exc:
+        die(str(exc))
+        return
+    summary = {
+        "cpu": hw.get("cpu_name"),
+        "ram_mb": hw.get("ram_mb"),
+        "unified_memory_mb": hw.get("unified_memory_mb"),
+        "gpu": hw.get("gpu_name"),
+        "gtt_total_mb": hw.get("gtt_total_mb"),
+        "vram_total_mb": hw.get("vram_total_mb"),
+        "npu": hw.get("npu_name"),
+    }
+    console.print(
+        Panel(
+            Syntax(
+                jsonlib.dumps(summary, indent=2),
+                "json",
+                theme="ansi_dark",
+                background_color="default",
+            ),
+            title="hardware probe",
+            border_style="cyan",
+        )
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -133,9 +133,30 @@ async def list_slots(request: Request) -> list[dict[str, object]]:
 
 
 @router.post("", status_code=201)
-async def create_slot() -> dict[str, object]:
-    """Create a new slot. Body: SlotConfig schema (Phase 1)."""
-    raise NotImplementedYet("create_slot: Phase 1")
+async def create_slot(request: Request) -> dict[str, object]:
+    """Create a new slot. Body: SlotConfig schema.
+
+    Writes /etc/hal0/slots/<name>.toml, the systemd drop-in override, the
+    env file, and the initial state.json. Does NOT start the slot — the
+    caller follows with POST /api/slots/<name>/load when ready.
+    """
+    sm = _get_slot_manager(request)
+    try:
+        body = await request.json()
+    except Exception as exc:
+        raise Hal0Error(
+            "request body must be valid JSON",
+            details={"error": str(exc)},
+        ) from exc
+    if not isinstance(body, dict):
+        raise Hal0Error("request body must be a JSON object")
+
+    name = body.get("name")
+    if not isinstance(name, str) or not name.strip():
+        raise Hal0Error("slot 'name' is required (non-empty string)")
+
+    snap = await sm.create(name, body)
+    return _slot_to_dict(snap)
 
 
 # ── metrics / capacity ─────────────────────────────────────────────────────
@@ -224,32 +245,74 @@ async def get_slot(name: str, request: Request) -> dict[str, object]:
 
 
 @router.delete("/{name}")
-async def delete_slot(name: str) -> dict[str, object]:
-    """Delete a slot. If the slot is running, it is stopped first."""
-    raise NotImplementedYet(f"delete_slot {name}: Phase 1")
+async def delete_slot(name: str, request: Request) -> dict[str, object]:
+    """Delete a slot. If the slot is running, it is stopped first.
+
+    Built-in slots (primary/embed/stt/tts) cannot be deleted — the
+    SlotManager raises a typed error which the envelope middleware
+    surfaces as 4xx.
+    """
+    sm = _get_slot_manager(request)
+    await sm.delete(name)
+    return {"name": name, "deleted": True}
 
 
 @router.get("/{name}/config")
-async def get_slot_config(name: str) -> dict[str, object]:
-    raise NotImplementedYet(f"get_slot_config {name}: Phase 1")
+async def get_slot_config(name: str, request: Request) -> dict[str, object]:
+    """Return the slot's TOML config as a dict."""
+    sm = _get_slot_manager(request)
+    cfg = await sm.get_config(name)
+    return cfg
 
 
 @router.put("/{name}/config")
-async def update_slot_config(name: str) -> dict[str, object]:
-    """Update a slot's config. Body: partial SlotConfig (Phase 1)."""
-    raise NotImplementedYet(f"update_slot_config {name}: Phase 1")
+async def update_slot_config(name: str, request: Request) -> dict[str, object]:
+    """Update a slot's config. Body: partial SlotConfig (shallow merge)."""
+    sm = _get_slot_manager(request)
+    try:
+        body = await request.json()
+    except Exception as exc:
+        raise Hal0Error(
+            "request body must be valid JSON",
+            details={"error": str(exc)},
+        ) from exc
+    if not isinstance(body, dict):
+        raise Hal0Error("request body must be a JSON object")
+    snap = await sm.update_config(name, body)
+    return _slot_to_dict(snap)
 
 
 @router.patch("/{name}/defaults")
-async def update_slot_defaults(name: str) -> dict[str, object]:
-    """Update slot defaults (ctx_size, temperature, etc.)."""
-    raise NotImplementedYet(f"update_slot_defaults {name}: Phase 1")
+async def update_slot_defaults(name: str, request: Request) -> dict[str, object]:
+    """Update slot defaults (ctx_size, temperature, etc.).
+
+    Convenience wrapper over update_config — body keys merge into the
+    slot's [model] sub-table rather than the top level.
+    """
+    sm = _get_slot_manager(request)
+    try:
+        body = await request.json()
+    except Exception as exc:
+        raise Hal0Error("request body must be valid JSON", details={"error": str(exc)}) from exc
+    if not isinstance(body, dict):
+        raise Hal0Error("request body must be a JSON object")
+    snap = await sm.update_config(name, {"model": body})
+    return _slot_to_dict(snap)
 
 
 @router.post("/{name}/backend")
-async def set_slot_backend(name: str) -> dict[str, object]:
+async def set_slot_backend(name: str, request: Request) -> dict[str, object]:
     """Switch a slot's backend (e.g., vulkan → rocm)."""
-    raise NotImplementedYet(f"set_slot_backend {name}: Phase 1")
+    sm = _get_slot_manager(request)
+    try:
+        body = await request.json()
+    except Exception as exc:
+        raise Hal0Error("request body must be valid JSON", details={"error": str(exc)}) from exc
+    backend = body.get("backend") if isinstance(body, dict) else None
+    if not isinstance(backend, str) or not backend.strip():
+        raise Hal0Error("'backend' is required in request body")
+    snap = await sm.update_config(name, {"backend": backend})
+    return _slot_to_dict(snap)
 
 
 # ── lifecycle ──────────────────────────────────────────────────────────────
@@ -311,13 +374,107 @@ async def swap_slot(name: str, request: Request) -> dict[str, object]:
 
 
 @router.get("/{name}/logs")
-async def slot_logs(name: str) -> dict[str, object]:
-    raise NotImplementedYet(f"slot_logs {name}: Phase 2 (journalctl-backed)")
+async def slot_logs(name: str, request: Request, lines: int = 200) -> dict[str, object]:
+    """Return the last ``lines`` of this slot's journal output.
+
+    Best-effort: on hosts without systemd or where the slot has never
+    started, returns an empty string with a hint. The UI tolerates that
+    (renders "No logs available") rather than treating it as an error.
+    """
+    import asyncio as _asyncio
+    import shutil
+
+    sm = _get_slot_manager(request)
+    # Validate slot exists so unknown names get the typed slot.not_found
+    # envelope instead of an empty 200.
+    await sm.status(name)
+
+    if shutil.which("journalctl") is None:
+        return {"name": name, "logs": "", "hint": "journalctl not available on this host"}
+
+    cmd = [
+        "journalctl",
+        "-u",
+        f"hal0-slot@{name}.service",
+        "-n",
+        str(max(1, min(int(lines or 200), 5000))),
+        "--no-pager",
+        "-o",
+        "short-iso",
+    ]
+    proc = await _asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=_asyncio.subprocess.PIPE,
+        stderr=_asyncio.subprocess.PIPE,
+    )
+    try:
+        stdout, _ = await _asyncio.wait_for(proc.communicate(), timeout=5.0)
+    except _asyncio.TimeoutError:
+        with contextlib_suppress():
+            proc.kill()
+        return {"name": name, "logs": "", "hint": "journalctl timed out"}
+    return {"name": name, "logs": stdout.decode("utf-8", errors="replace")}
+
+
+def contextlib_suppress():
+    """Local helper so the import isn't pulled in just for one suppress."""
+    import contextlib
+
+    return contextlib.suppress(ProcessLookupError, OSError)
 
 
 @router.get("/{name}/logs/stream")
-async def slot_logs_stream(name: str) -> dict[str, object]:
-    raise NotImplementedYet(f"slot_logs_stream {name}: Phase 2 (journalctl-backed)")
+async def slot_logs_stream(name: str, request: Request) -> StreamingResponse:
+    """SSE stream that tails this slot's journal output line-by-line.
+
+    Best-effort: gracefully exits when journalctl is missing or the slot
+    has no journal entries yet. Client disconnects close the subprocess.
+    """
+    import asyncio as _asyncio
+    import shutil
+
+    sm = _get_slot_manager(request)
+    await sm.status(name)  # 404 fast if unknown
+
+    async def event_source() -> Any:
+        if shutil.which("journalctl") is None:
+            yield 'event: error\ndata: {"message":"journalctl unavailable"}\n\n'
+            return
+        cmd = [
+            "journalctl",
+            "-u",
+            f"hal0-slot@{name}.service",
+            "-f",
+            "-n",
+            "0",
+            "--output=cat",
+            "--no-pager",
+        ]
+        proc = await _asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=_asyncio.subprocess.PIPE,
+            stderr=_asyncio.subprocess.DEVNULL,
+        )
+        try:
+            assert proc.stdout is not None
+            async for raw in proc.stdout:
+                line = raw.decode("utf-8", errors="replace").rstrip("\n")
+                if not line:
+                    continue
+                yield f"data: {json.dumps(line)}\n\n"
+        except asyncio.CancelledError:
+            raise
+        finally:
+            with contextlib_suppress():
+                proc.kill()
+            with contextlib_suppress():
+                await proc.wait()
+
+    return StreamingResponse(
+        event_source(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 # ── state ──────────────────────────────────────────────────────────────────

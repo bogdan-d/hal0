@@ -701,6 +701,14 @@ class SlotManager:
     def last_used(self, slot_name: str) -> float | None:
         return self._last_used.get(slot_name)
 
+    async def get_config(self, slot_name: str) -> dict[str, Any]:
+        """Return the slot's TOML config as a plain dict (read-only view).
+
+        Public counterpart to ``_load_slot_config``: same semantics, but
+        callable from API routes without reaching past the underscore.
+        """
+        return await self._load_slot_config(slot_name)
+
     # ── private helpers ──────────────────────────────────────────────────────
 
     async def _load_slot_config(self, slot_name: str) -> dict[str, Any]:
