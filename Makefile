@@ -1,18 +1,36 @@
-.PHONY: help install dev test test-unit test-integration lint fmt typecheck ui-install ui-dev ui-build clean
+.PHONY: help install dev test test-unit test-integration release-test release-test-report \
+        lint fmt typecheck ui-install ui-dev ui-build clean
+
+# ── hal0-test LXC connection knobs (release-gate) ───────────────────────────
+# Override on the command line, e.g.:
+#   make release-test HAL0_TEST_HOST=10.0.1.231 HAL0_TEST_SSH_KEY=~/.ssh/other
+HAL0_TEST_HOST    ?= 10.0.1.230
+HAL0_TEST_USER    ?= root
+HAL0_TEST_SSH_KEY ?= ~/.ssh/thinmint
+# Unique-per-run slot prefix so concurrent agents don't collide on the
+# shared LXC. Falls back to "local-$$" when not run from CI.
+HAL0_TEST_PREFIX  ?= ci-h-$(if $(GITHUB_RUN_ID),$(GITHUB_RUN_ID),local-$$$$)
+HAL0_TEST_REPORT  ?= tests/release-gate-report.json
 
 help:
 	@echo "hal0 — common dev tasks"
 	@echo ""
-	@echo "  make install         Install python package in editable mode with dev extras"
-	@echo "  make dev             Run hal0-api with --reload"
-	@echo "  make test            Run unit tests"
-	@echo "  make lint            Ruff check"
-	@echo "  make fmt             Ruff format"
-	@echo "  make typecheck       Mypy"
-	@echo "  make ui-install      Install UI deps"
-	@echo "  make ui-dev          Vite dev server"
-	@echo "  make ui-build        Production UI build"
-	@echo "  make clean           Remove caches"
+	@echo "  Local"
+	@echo "    make install              Install python package in editable mode with dev extras"
+	@echo "    make dev                  Run hal0-api with --reload"
+	@echo "    make test                 Run unit tests (tier α, ~3s, every commit)"
+	@echo "    make test-integration     Run integration tests (tier β, needs systemd + template unit)"
+	@echo "    make lint                 Ruff check"
+	@echo "    make fmt                  Ruff format"
+	@echo "    make typecheck            Mypy"
+	@echo "    make ui-install           Install UI deps"
+	@echo "    make ui-dev               Vite dev server"
+	@echo "    make ui-build             Production UI build"
+	@echo "    make clean                Remove caches"
+	@echo ""
+	@echo "  Release-gate (tier γ, hal0-test LXC at $(HAL0_TEST_HOST))"
+	@echo "    make release-test         Run full NPU + ROCm + Vulkan matrix over SSH"
+	@echo "    make release-test-report  Pretty-print $(HAL0_TEST_REPORT)"
 
 install:
 	pip install -e ".[dev]"
@@ -20,10 +38,39 @@ install:
 dev:
 	uvicorn hal0.api:app --reload --host 127.0.0.1 --port 8080
 
+# ── Test tiers (PLAN §10) ────────────────────────────────────────────────────
+# α — unit. Pure pytest. No systemd, no docker. ~3s.
+# β — integration. Real hal0-slot@.service + container. ~10 min in CI.
+# γ — release-gate. NPU + ROCm + Vulkan on hal0-test LXC. Not per-commit.
+
 test: test-unit
 
 test-unit:
-	pytest tests/ -v
+	pytest tests/ -v -m "not integration"
+
+test-integration:
+	@if ! systemctl list-unit-files hal0-slot@.service --no-legend >/dev/null 2>&1; then \
+	    echo "!  hal0-slot@.service template not installed."; \
+	    echo "   Run 'sudo bash installer/install.sh --no-start' or"; \
+	    echo "   'bash installer/install.sh --dev --no-start' first."; \
+	    exit 1; \
+	fi
+	pytest tests/slots/test_integration.py -v -m integration
+
+release-test:
+	HAL0_TEST_HOST="$(HAL0_TEST_HOST)" \
+	HAL0_TEST_USER="$(HAL0_TEST_USER)" \
+	HAL0_TEST_SSH_KEY="$(HAL0_TEST_SSH_KEY)" \
+	HAL0_TEST_PREFIX="$(HAL0_TEST_PREFIX)" \
+	HAL0_TEST_REPORT="$(HAL0_TEST_REPORT)" \
+	bash scripts/release-test.sh
+
+release-test-report:
+	@if [ ! -f "$(HAL0_TEST_REPORT)" ]; then \
+	    echo "!  $(HAL0_TEST_REPORT) not found. Run 'make release-test' first."; \
+	    exit 1; \
+	fi
+	@python3 scripts/release-test-report.py "$(HAL0_TEST_REPORT)"
 
 lint:
 	ruff check src tests

@@ -1,0 +1,159 @@
+name: Integration (tier β)
+
+# Slot integration tests on a fresh ubuntu-latest runner.  Builds the
+# Vulkan toolbox image (CPU baseline — no GPU on the runner), pulls a
+# tiny GGUF, installs the hal0-slot@.service template via
+# installer/install.sh, and runs the gated cases in
+# tests/slots/test_integration.py.
+#
+# Wall-clock budget: ≤12 min/run (PLAN §10.2).  The toolbox build is
+# layer-cached against GHA so successive runs hit ~3-4 min when
+# Dockerfiles are unchanged.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - "src/hal0/**"
+      - "tests/slots/**"
+      - "packaging/**"
+      - "installer/**"
+      - ".github/workflows/integration.yml"
+
+concurrency:
+  group: integration-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  slot-integration:
+    name: Slot integration (Vulkan-CPU baseline)
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+
+    env:
+      # Smallest production-quality GGUF that exercises the full slot
+      # lifecycle without exhausting the runner's tmpfs.
+      HF_REPO: Qwen/Qwen2.5-0.5B-Instruct-GGUF
+      HF_FILE: qwen2.5-0.5b-instruct-q4_k_m.gguf
+      MODEL_ID: qwen3-0.5b-q4_k_m
+      HAL0_CI_SLOT: ci-test
+      HAL0_CI_MODEL: qwen3-0.5b-q4_k_m
+      MODEL_CACHE_DIR: /tmp/hal0-ci-models
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install hal0 (editable + dev extras)
+        run: |
+          python -m venv .venv
+          . .venv/bin/activate
+          pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Verify Docker on runner
+        run: |
+          docker version
+          docker info --format '{{.ServerVersion}}'
+
+      - name: Set up Docker Buildx (for layer caching)
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build hal0-toolbox-vulkan (CPU baseline)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: packaging/toolbox/vulkan.Dockerfile
+          tags: hal0-toolbox-vulkan:ci
+          push: false
+          load: true
+          cache-from: type=gha,scope=toolbox-vulkan-ci
+          cache-to: type=gha,scope=toolbox-vulkan-ci,mode=max
+
+      - name: Smoke-test toolbox image (CPU llama.cpp)
+        run: |
+          # The runner has no GPU; the Vulkan binary should still launch
+          # against the llvmpipe software rasteriser or fall back to CPU.
+          # We accept any non-error exit from --help as proof-of-life.
+          docker run --rm hal0-toolbox-vulkan:ci /bin/bash -c \
+            'which llama-server && llama-server --help >/dev/null'
+
+      - name: Cache model GGUF
+        id: model-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.MODEL_CACHE_DIR }}
+          key: hf-${{ env.HF_REPO }}-${{ env.HF_FILE }}-v1
+
+      - name: Download model GGUF
+        if: steps.model-cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p "${MODEL_CACHE_DIR}"
+          curl -fsSL -o "${MODEL_CACHE_DIR}/${HF_FILE}" \
+            "https://huggingface.co/${HF_REPO}/resolve/main/${HF_FILE}"
+
+      - name: Install hal0 (dev install, no auto-start)
+        # Lays down /etc/systemd/system/hal0-slot@.service + python entry
+        # points so the integration tests can talk to systemd directly.
+        run: sudo bash installer/install.sh --no-start
+        env:
+          HAL0_NO_PROBE: "1"
+
+      - name: Seed model into hal0 registry
+        run: |
+          sudo mkdir -p /var/lib/hal0/models /var/lib/hal0/registry
+          sudo cp "${MODEL_CACHE_DIR}/${HF_FILE}" "/var/lib/hal0/models/${MODEL_ID}.gguf"
+          sudo tee "/var/lib/hal0/registry/${MODEL_ID}.toml" >/dev/null <<TOML
+          id = "${MODEL_ID}"
+          path = "/var/lib/hal0/models/${MODEL_ID}.gguf"
+          provider = "llama-server"
+          context_size = 512
+          TOML
+
+      - name: Pin local toolbox image
+        run: |
+          # The slot manager reads HAL0_TOOLBOX_IMAGE_VULKAN to override
+          # the manifest digest. Point it at the locally-built CI image.
+          sudo mkdir -p /etc/hal0
+          echo "HAL0_TOOLBOX_IMAGE_VULKAN=hal0-toolbox-vulkan:ci" \
+              | sudo tee -a /etc/hal0/api.env
+
+      - name: Confirm hal0-slot@.service template is visible to systemd
+        run: |
+          sudo systemctl daemon-reload
+          systemctl list-unit-files hal0-slot@.service --no-legend
+
+      - name: Run integration tests
+        # The tests' module-level skipif now checks
+        # `systemctl list-unit-files hal0-slot@.service` and will collect
+        # all three cases on this runner.
+        run: |
+          . .venv/bin/activate
+          sudo --preserve-env=PATH,VIRTUAL_ENV,HAL0_CI_SLOT,HAL0_CI_MODEL \
+              .venv/bin/pytest tests/slots/test_integration.py -v -m integration
+
+      - name: Capture journald on failure
+        if: failure()
+        run: |
+          sudo journalctl -u 'hal0-api*' --no-pager -n 500 > journal-api.log || true
+          sudo journalctl -u 'hal0-slot@*' --no-pager -n 1000 > journal-slot.log || true
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-logs
+          path: |
+            journal-api.log
+            journal-slot.log
+          if-no-files-found: ignore

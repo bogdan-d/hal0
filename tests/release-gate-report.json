@@ -1,0 +1,58 @@
+{
+  "_schema": "hal0.release-gate-report.v1",
+  "_comment": "Baseline release-gate report. Overwritten on every 'make release-test' run. Until the first real run, this file documents the expected shape and seeds the pre-flight check in scripts/release-check.sh — which fails the release ritual if the report is missing or stale (>24h old).",
+  "generated": 0,
+  "host": "10.0.1.230",
+  "prefix": "baseline",
+  "summary": {
+    "total": 7,
+    "pass": 0,
+    "fail": 0,
+    "skip": 7,
+    "deferred": 0
+  },
+  "rows": [
+    {
+      "name": "vulkan",
+      "status": "skip",
+      "duration_ms": 0,
+      "detail": "baseline placeholder — run 'make release-test' to produce a real row"
+    },
+    {
+      "name": "rocm",
+      "status": "skip",
+      "duration_ms": 0,
+      "detail": "baseline placeholder — run 'make release-test' to produce a real row"
+    },
+    {
+      "name": "flm",
+      "status": "skip",
+      "duration_ms": 0,
+      "detail": "baseline placeholder — run 'make release-test' to produce a real row"
+    },
+    {
+      "name": "moonshine",
+      "status": "skip",
+      "duration_ms": 0,
+      "detail": "baseline placeholder — run 'make release-test' to produce a real row"
+    },
+    {
+      "name": "kokoro",
+      "status": "skip",
+      "duration_ms": 0,
+      "detail": "baseline placeholder — run 'make release-test' to produce a real row"
+    },
+    {
+      "name": "updater",
+      "status": "skip",
+      "duration_ms": 0,
+      "detail": "baseline placeholder — run 'make release-test' to produce a real row"
+    },
+    {
+      "name": "openwebui",
+      "status": "skip",
+      "duration_ms": 0,
+      "detail": "baseline placeholder — run 'make release-test' to produce a real row"
+    }
+  ]
+}
