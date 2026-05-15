@@ -1,0 +1,212 @@
+name: Toolbox images
+
+# Build, sign (cosign keyless via GitHub OIDC), and publish the hal0
+# toolbox images.  Triggered on push to main and on manual dispatch.
+#
+# Publish target: ghcr.io/<owner>/hal0-toolbox-<name>:{v1, sha-<git-sha>}.
+# Owner resolves to ${{ github.repository_owner }} — see PLAN.md §17 risk
+# note: until the `hal0-dev/` GH org is provisioned this lands under the
+# personal namespace.  Manifest digests are pinned post-publish.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "packaging/toolbox/**"
+      - ".github/workflows/toolbox.yml"
+  workflow_dispatch:
+    inputs:
+      images:
+        description: "Comma-separated subset (e.g. vulkan,moonshine). Empty = all."
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write    # required for cosign keyless
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_PREFIX: ${{ github.repository_owner }}/hal0-toolbox
+
+jobs:
+  build:
+    name: Build ${{ matrix.image }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: vulkan
+            dockerfile: packaging/toolbox/vulkan.Dockerfile
+            # vulkan builds on any runner; no host GPU needed at build time
+          - image: moonshine
+            dockerfile: packaging/toolbox/moonshine.Dockerfile
+          - image: kokoro
+            dockerfile: packaging/toolbox/kokoro.Dockerfile
+          - image: rocm
+            dockerfile: packaging/toolbox/rocm.Dockerfile
+            # rocm pulls a ~10GB base; allow a longer timeout below
+          - image: flm
+            dockerfile: packaging/toolbox/flm.Dockerfile
+            optional: "true"
+            # FLM compiles XRT + xdna-driver userspace + FastFlowLM from
+            # source. Slow build (~20-30 min). Marked optional — failure
+            # does not fail the workflow when triggered with the default
+            # input set (continue-on-error below).
+
+    steps:
+      - name: Filter images
+        id: filter
+        run: |
+          requested='${{ inputs.images }}'
+          if [ -z "$requested" ]; then
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          else
+            case ",$requested," in
+              *,${{ matrix.image }},*) echo "build=true"  >> "$GITHUB_OUTPUT" ;;
+              *)                       echo "build=false" >> "$GITHUB_OUTPUT" ;;
+            esac
+          fi
+
+      - name: Checkout
+        if: steps.filter.outputs.build == 'true'
+        uses: actions/checkout@v4
+
+      - name: Free up runner disk
+        if: steps.filter.outputs.build == 'true' && matrix.image == 'rocm'
+        run: |
+          # ROCm base + build artefacts blow past the default 14GB free.
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /opt/hostedtoolcache/CodeQL || true
+          docker image prune -af || true
+
+      - name: Set up Docker Buildx
+        if: steps.filter.outputs.build == 'true'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: steps.filter.outputs.build == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute tags
+        if: steps.filter.outputs.build == 'true'
+        id: tags
+        run: |
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+          NAME="${REGISTRY}/${IMAGE_PREFIX}-${{ matrix.image }}"
+          # Always tag :v1 and :sha-<short>; on PR/branch builds we'd
+          # also add :branch-<name> but this workflow only fires on main.
+          {
+            echo "name=${NAME}"
+            echo "tag_v1=${NAME}:v1"
+            echo "tag_sha=${NAME}:sha-${SHORT_SHA}"
+            echo "short_sha=${SHORT_SHA}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build & push
+        if: steps.filter.outputs.build == 'true'
+        id: build
+        continue-on-error: ${{ matrix.optional == 'true' }}
+        timeout-minutes: ${{ matrix.image == 'flm' && 60 || (matrix.image == 'rocm' && 45 || 30) }}
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          push: true
+          tags: |
+            ${{ steps.tags.outputs.tag_v1 }}
+            ${{ steps.tags.outputs.tag_sha }}
+          provenance: true
+          sbom: true
+          cache-from: type=gha,scope=toolbox-${{ matrix.image }}
+          cache-to: type=gha,scope=toolbox-${{ matrix.image }},mode=max
+
+      - name: Install cosign
+        if: steps.filter.outputs.build == 'true' && steps.build.outcome == 'success'
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign image (keyless)
+        if: steps.filter.outputs.build == 'true' && steps.build.outcome == 'success'
+        env:
+          COSIGN_EXPERIMENTAL: "true"
+          DIGEST: ${{ steps.build.outputs.digest }}
+          NAME: ${{ steps.tags.outputs.name }}
+        run: |
+          # The digest pins both tags to the same content; sign once.
+          cosign sign --yes "${NAME}@${DIGEST}"
+
+      - name: Emit digest artefact
+        if: steps.filter.outputs.build == 'true' && steps.build.outcome == 'success'
+        run: |
+          mkdir -p _digests
+          cat > "_digests/${{ matrix.image }}.json" <<JSON
+          {
+            "name": "${{ matrix.image }}",
+            "image": "${{ steps.tags.outputs.tag_v1 }}",
+            "digest": "${{ steps.build.outputs.digest }}",
+            "sha": "${{ github.sha }}",
+            "ref": "${{ github.ref }}"
+          }
+          JSON
+
+      - name: Upload digest artefact
+        if: steps.filter.outputs.build == 'true' && steps.build.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: digest-${{ matrix.image }}
+          path: _digests/${{ matrix.image }}.json
+          if-no-files-found: error
+
+  manifest:
+    name: Aggregate manifest.json
+    needs: build
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download digest artefacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: digest-*
+          path: _digests
+          merge-multiple: true
+
+      - name: Patch manifest.json
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          manifest_path = Path("manifest.json")
+          manifest = json.loads(manifest_path.read_text())
+          toolbox_images = manifest.setdefault("toolbox_images", {})
+
+          digests_dir = Path("_digests")
+          if digests_dir.is_dir():
+              for f in sorted(digests_dir.glob("*.json")):
+                  data = json.loads(f.read_text())
+                  name = data["name"]
+                  entry = toolbox_images.setdefault(name, {})
+                  entry["tag"] = data["image"]
+                  entry["digest"] = data["digest"]
+                  print(f"pinned {name}: {data['digest']}")
+
+          manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+          PY
+
+      - name: Show manifest
+        run: cat manifest.json
+
+      - name: Upload patched manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: manifest-pinned
+          path: manifest.json
