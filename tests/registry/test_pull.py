@@ -7,7 +7,6 @@ redirect handling, and partial downloads / cancellation.
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import os
 from pathlib import Path
@@ -16,16 +15,12 @@ import httpx
 import pytest
 
 from hal0.registry.pull import (
-    PullError,
-    PullInvalidSource,
-    PullJob,
     _sanitise_id,
     hf_download_url,
     make_job,
     run_pull,
 )
 from hal0.registry.store import ModelRegistry
-
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 

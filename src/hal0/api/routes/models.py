@@ -20,7 +20,6 @@ from fastapi.responses import StreamingResponse
 from hal0.api.middleware.error_codes import Hal0Error
 from hal0.registry.curated import get_curated
 from hal0.registry.pull import (
-    PullError,
     PullInvalidSource,
     PullJob,
     PullJobNotFound,
@@ -171,9 +170,7 @@ async def delete_model(model_id: str, request: Request) -> dict[str, object]:
     return {"id": model_id, "deleted": bool(removed)}
 
 
-def _resolve_pull_source(
-    request: Request, model_id: str
-) -> tuple[str, str]:
+def _resolve_pull_source(request: Request, model_id: str) -> tuple[str, str]:
     """Resolve the (hf_repo, hf_file) tuple for a pull.
 
     Priority:
@@ -296,7 +293,7 @@ async def pull_stream(model_id: str, request: Request) -> StreamingResponse:
             event = job.progress_event
             try:
                 await asyncio.wait_for(event.wait(), timeout=5.0)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 # Keep-alive — surfaces stuck downloads without closing
                 # the stream.
                 yield f"data: {json.dumps(job.as_dict())}\n\n"

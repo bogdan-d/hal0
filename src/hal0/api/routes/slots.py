@@ -119,8 +119,7 @@ def _synthesize_slots_from_upstreams(request: Request) -> list[dict[str, Any]]:
                 "last_used_model": last_used.get(u.name) or None,
                 "_synthetic": True,
                 "_synthetic_reason": (
-                    "Backed by remote upstream; install a local slot of the "
-                    "same name to take over."
+                    "Backed by remote upstream; install a local slot of the same name to take over."
                 ),
             }
         )
@@ -184,7 +183,7 @@ async def create_slot(request: Request) -> dict[str, object]:
 def _local_throughput_tps(request: Request, window_s: float = 5.0) -> float:
     """Compute current tokens/sec from the rolling tps_events window.
 
-    Rate is ``tokens / (last_event_ts − first_event_ts_in_window)`` rather
+    Rate is ``tokens / (last_event_ts - first_event_ts_in_window)`` rather
     than ``tokens / window_s`` so short bursts read at their real rate
     instead of being smeared across the full lookback. Decays to 0 once
     all events age out.
@@ -428,7 +427,7 @@ async def slot_logs(name: str, request: Request, lines: int = 200) -> dict[str, 
     )
     try:
         stdout, _ = await _asyncio.wait_for(proc.communicate(), timeout=5.0)
-    except _asyncio.TimeoutError:
+    except TimeoutError:
         with contextlib_suppress():
             proc.kill()
         return {"name": name, "logs": "", "hint": "journalctl timed out"}

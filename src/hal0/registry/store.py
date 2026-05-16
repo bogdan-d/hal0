@@ -36,8 +36,8 @@ from typing import Any
 
 import tomli_w
 
-from hal0.errors import Hal0Error
 from hal0.config import paths
+from hal0.errors import Hal0Error
 from hal0.registry.model import Model
 
 log = logging.getLogger(__name__)

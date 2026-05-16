@@ -110,14 +110,8 @@ class ComfyUIProvider(Provider):
         slot_cfg: dict[str, Any],
         model_info: dict[str, Any],
     ) -> dict[str, str]:
-        port = (
-            slot_cfg.get("port") or slot_cfg.get("slot", {}).get("port") or _DEFAULT_PORT
-        )
-        backend = (
-            slot_cfg.get("backend")
-            or slot_cfg.get("slot", {}).get("backend")
-            or "rocm"
-        )
+        port = slot_cfg.get("port") or slot_cfg.get("slot", {}).get("port") or _DEFAULT_PORT
+        backend = slot_cfg.get("backend") or slot_cfg.get("slot", {}).get("backend") or "rocm"
         # model_info["path"] is the on-disk checkpoint path. The actual
         # filename gets picked up by the workflow translator (see
         # comfyui_workflows.build_workflow's ckpt_filename arg). We pass

@@ -183,7 +183,9 @@ def test_image_ref_env_var_override(
     provider: LlamaServerProvider, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """HAL0_TOOLBOX_IMAGE_<BACKEND> env var overrides the default map."""
-    monkeypatch.setenv("HAL0_TOOLBOX_IMAGE_VULKAN", "ghcr.io/example/hal0-toolbox-vulkan@sha256:abc")
+    monkeypatch.setenv(
+        "HAL0_TOOLBOX_IMAGE_VULKAN", "ghcr.io/example/hal0-toolbox-vulkan@sha256:abc"
+    )
     ref = provider.image_ref({"backend": "vulkan"})
     assert ref == "ghcr.io/example/hal0-toolbox-vulkan@sha256:abc"
 

@@ -53,17 +53,20 @@ def test_auth_disabled_protected_route_open(client: TestClient) -> None:
 # ── HAL0_AUTH_ENABLED=1 — public routes still open ────────────────────────────
 
 
-@pytest.mark.parametrize("path", [
-    "/api/status",
-    "/api/health/system",
-    "/api/metrics",
-    "/api/features",
-    "/api/install/state",
-    "/api/config/urls",
-    "/api/auth/status",
-    "/api/auth/login",
-    "/v1/models",
-])
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/status",
+        "/api/health/system",
+        "/api/metrics",
+        "/api/features",
+        "/api/install/state",
+        "/api/config/urls",
+        "/api/auth/status",
+        "/api/auth/login",
+        "/v1/models",
+    ],
+)
 def test_public_routes_bypass_auth(auth_app: TestClient, path: str) -> None:
     response = auth_app.get(path)
     # All public routes return 2xx (or 4xx for content reasons), never 401.
@@ -75,15 +78,18 @@ def test_public_routes_bypass_auth(auth_app: TestClient, path: str) -> None:
 # ── HAL0_AUTH_ENABLED=1 — protected routes require credentials ────────────────
 
 
-@pytest.mark.parametrize("path", [
-    "/api/slots",
-    "/api/models",
-    "/api/hardware",
-    "/api/logs",
-    "/api/settings",
-    "/api/providers",
-    "/api/install/curated-models",  # mixed router; this is protected
-])
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/slots",
+        "/api/models",
+        "/api/hardware",
+        "/api/logs",
+        "/api/settings",
+        "/api/providers",
+        "/api/install/curated-models",  # mixed router; this is protected
+    ],
+)
 def test_protected_routes_require_auth(auth_app: TestClient, path: str) -> None:
     response = auth_app.get(path)
     assert response.status_code == 401, (
@@ -203,15 +209,11 @@ def test_revoked_token_returns_401(auth_app: TestClient) -> None:
     store: TokenStore = auth_app.app.state.token_store
     tok, raw = store.create(label="bridge", scope="all")
     # First call: works.
-    assert auth_app.get(
-        "/api/slots", headers={"Authorization": f"Bearer {raw}"}
-    ).status_code == 200
+    assert auth_app.get("/api/slots", headers={"Authorization": f"Bearer {raw}"}).status_code == 200
     # Revoke.
     store.revoke(tok.id)
     # Second call: 401 invalid.
-    response = auth_app.get(
-        "/api/slots", headers={"Authorization": f"Bearer {raw}"}
-    )
+    response = auth_app.get("/api/slots", headers={"Authorization": f"Bearer {raw}"})
     assert response.status_code == 401
     assert response.json()["error"]["code"] == "auth.invalid"
 

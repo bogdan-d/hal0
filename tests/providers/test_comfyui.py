@@ -306,7 +306,9 @@ async def test_infer_surfaces_workflow_error(provider: ComfyUIProvider) -> None:
             "status": {
                 "status_str": "error",
                 "completed": False,
-                "messages": [["execution_error", {"node_id": "4", "exception_message": "ckpt missing"}]],
+                "messages": [
+                    ["execution_error", {"node_id": "4", "exception_message": "ckpt missing"}]
+                ],
             },
             "outputs": {},
         }

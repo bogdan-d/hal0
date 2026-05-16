@@ -43,9 +43,7 @@ def test_curated_image_entries_have_workflow_metadata() -> None:
             continue
         assert m.capability == "image", f"{m.id}: capability must be 'image'"
         assert m.model_class, f"{m.id}: model_class is required for image entries"
-        assert m.comfyui_subdir, (
-            f"{m.id}: comfyui_subdir is required (drives pull-path routing)"
-        )
+        assert m.comfyui_subdir, f"{m.id}: comfyui_subdir is required (drives pull-path routing)"
         assert m.hf_file.endswith(".safetensors"), (
             f"{m.id}: image entries currently ship as safetensors"
         )
@@ -93,9 +91,7 @@ def test_final_path_routes_to_comfyui_subdir(tmp_hal0_home: str) -> None:
 def test_final_path_falls_back_to_default_layout(tmp_hal0_home: str) -> None:
     """Without comfyui_subdir, the legacy /var/lib/hal0/models layout wins."""
     p = _final_path_for_entry("qwen3-4b", "qwen3-4b.gguf", comfyui_subdir=None)
-    expected = (
-        Path(tmp_hal0_home) / "var-lib" / "hal0" / "models" / "qwen3-4b" / "qwen3-4b.gguf"
-    )
+    expected = Path(tmp_hal0_home) / "var-lib" / "hal0" / "models" / "qwen3-4b" / "qwen3-4b.gguf"
     assert p == expected
 
 

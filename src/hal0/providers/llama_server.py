@@ -31,12 +31,10 @@ from typing import Any
 import httpx
 
 from hal0.errors import Hal0Error
+from hal0.providers._gpu import resolve_gpu_group_ids as _resolve_gpu_group_ids
 from hal0.providers.base import ContainerSpec, Provider
 
 log = logging.getLogger(__name__)
-
-
-from hal0.providers._gpu import resolve_gpu_group_ids as _resolve_gpu_group_ids
 
 # ── Toolbox image refs ─────────────────────────────────────────────────────────
 # Per PLAN.md §12 the hal0 toolbox images are published under

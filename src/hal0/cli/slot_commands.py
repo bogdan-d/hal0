@@ -19,7 +19,6 @@ from hal0.cli._shared import (
     _api_unreachable,
     api_delete,
     api_get,
-    api_patch,
     api_post,
     api_put,
     die,
@@ -247,9 +246,7 @@ def slot_create(
     except CliApiError as exc:
         die(str(exc))
         return
-    console.print(
-        f"Created slot [bold]{name}[/bold] on port {snap.get('port')} (model={model})"
-    )
+    console.print(f"Created slot [bold]{name}[/bold] on port {snap.get('port')} (model={model})")
 
 
 @app.command("edit")

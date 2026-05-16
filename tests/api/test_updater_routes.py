@@ -168,9 +168,7 @@ def test_channel_get_returns_stable_default(isolated_client: TestClient) -> None
     assert r.json() == {"channel": "stable"}
 
 
-def test_channel_put_persists_to_hal0_toml(
-    isolated_client: TestClient, tmp_hal0_home: str
-) -> None:
+def test_channel_put_persists_to_hal0_toml(isolated_client: TestClient, tmp_hal0_home: str) -> None:
     """PUT /api/updates/channel writes telemetry.channel into hal0.toml."""
     r = isolated_client.put("/api/updates/channel", json={"channel": "nightly"})
     assert r.status_code == 200, r.text

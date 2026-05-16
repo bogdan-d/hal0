@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from pydantic import ValidationError
 
 from hal0.registry.curated import (
     CURATED_BY_ID,
@@ -41,7 +42,7 @@ def test_get_curated_hit_and_miss() -> None:
 
 def test_curated_model_validates_required_fields() -> None:
     """The Pydantic model rejects missing required fields."""
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         CuratedModel(id="test")  # type: ignore[call-arg]
 
 

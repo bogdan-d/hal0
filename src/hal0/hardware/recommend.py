@@ -22,7 +22,6 @@ from typing import Any
 
 from hal0.config.schema import HardwareInfo
 
-
 # Curated chat models suitable for the primary slot, ordered from
 # largest-context / most capable down to the smallest. We pick the
 # largest model whose ``vram_gb_min`` fits the detected hardware. All
@@ -151,8 +150,7 @@ def recommend_primary_slot(hw: HardwareInfo) -> dict[str, Any]:
         "_meta": {
             "rationale_backend": backend_why,
             "rationale_model": (
-                f"{model_id}: largest curated chat model fitting "
-                f"~{budget_gb:.1f} GB budget"
+                f"{model_id}: largest curated chat model fitting ~{budget_gb:.1f} GB budget"
             ),
             "vram_budget_gb": round(budget_gb, 1),
         },

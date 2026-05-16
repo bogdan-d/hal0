@@ -8,7 +8,6 @@ write, not the HTTP streaming itself (that's tested separately in
 
 from __future__ import annotations
 
-import asyncio
 import time
 import tomllib
 from collections.abc import Iterator
@@ -22,7 +21,6 @@ from fastapi.testclient import TestClient
 from hal0.api import create_app
 from hal0.registry import pull as pull_module
 from hal0.registry.pull import PullJob
-
 
 # ── shared fixtures ─────────────────────────────────────────────────────────
 
@@ -204,9 +202,7 @@ def test_pick_default_defaults_slot_to_primary(
     fake_run_pull: list[dict[str, Any]],
 ) -> None:
     """Body without ``slot`` falls back to ``primary``."""
-    r = client_isolated.post(
-        "/api/install/pick-default", json={"model_id": "qwen3-4b"}
-    )
+    r = client_isolated.post("/api/install/pick-default", json={"model_id": "qwen3-4b"})
     assert r.status_code == 200, r.text
     assert r.json()["slot"] == "primary"
 
@@ -220,7 +216,7 @@ def test_pick_default_preserves_existing_slot_port_and_backend(
     slot_dir = Path(tmp_hal0_home) / "etc" / "hal0" / "slots"
     slot_dir.mkdir(parents=True, exist_ok=True)
     (slot_dir / "primary.toml").write_text(
-        "name = \"primary\"\nport = 9999\nbackend = \"rocm\"\nprovider = \"llama-server\"\n",
+        'name = "primary"\nport = 9999\nbackend = "rocm"\nprovider = "llama-server"\n',
         encoding="utf-8",
     )
 

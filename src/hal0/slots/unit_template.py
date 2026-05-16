@@ -183,9 +183,7 @@ def _render_from_spec(
     if spec.network_mode:
         argv.append(f"--network {spec.network_mode}")
     for host_path, container_path in spec.mounts:
-        argv.append(
-            f"-v {_quote_for_systemd(host_path)}:{_quote_for_systemd(container_path)}"
-        )
+        argv.append(f"-v {_quote_for_systemd(host_path)}:{_quote_for_systemd(container_path)}")
     for device in spec.devices:
         argv.append(f"--device {_quote_for_systemd(device)}")
     for group in spec.group_add:

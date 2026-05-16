@@ -54,9 +54,7 @@ def test_create_token_returns_raw_value_once(
     raw = body["token"]
 
     # The raw token works for auth on the next call.
-    me = auth_app.get(
-        "/api/auth/me", headers={"Authorization": f"Bearer {raw}"}
-    )
+    me = auth_app.get("/api/auth/me", headers={"Authorization": f"Bearer {raw}"})
     assert me.status_code == 200
     assert me.json()["identity"] == "openwebui-bridge"
 
@@ -151,9 +149,7 @@ def test_list_tokens_returns_metadata_only(
 # ── DELETE /api/auth/tokens/{id} ─────────────────────────────────────────────
 
 
-def test_revoke_token(
-    auth_app: TestClient, admin_headers: dict[str, str]
-) -> None:
+def test_revoke_token(auth_app: TestClient, admin_headers: dict[str, str]) -> None:
     create = auth_app.post(
         "/api/auth/tokens",
         json={"label": "victim", "scope": "all"},
@@ -162,26 +158,18 @@ def test_revoke_token(
     token_id = create.json()["id"]
     raw = create.json()["token"]
 
-    response = auth_app.delete(
-        f"/api/auth/tokens/{token_id}", headers=admin_headers
-    )
+    response = auth_app.delete(f"/api/auth/tokens/{token_id}", headers=admin_headers)
     assert response.status_code == 200
     assert response.json()["revoked"] == token_id
 
     # Re-using the raw token now 401s.
-    me = auth_app.get(
-        "/api/auth/me", headers={"Authorization": f"Bearer {raw}"}
-    )
+    me = auth_app.get("/api/auth/me", headers={"Authorization": f"Bearer {raw}"})
     assert me.status_code == 401
     assert me.json()["error"]["code"] == "auth.invalid"
 
 
-def test_revoke_unknown_id_404(
-    auth_app: TestClient, admin_headers: dict[str, str]
-) -> None:
-    response = auth_app.delete(
-        "/api/auth/tokens/notarealid", headers=admin_headers
-    )
+def test_revoke_unknown_id_404(auth_app: TestClient, admin_headers: dict[str, str]) -> None:
+    response = auth_app.delete("/api/auth/tokens/notarealid", headers=admin_headers)
     assert response.status_code == 404
     assert response.json()["error"]["code"] == "auth.token_not_found"
 

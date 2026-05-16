@@ -18,9 +18,9 @@ from pathlib import Path
 import pytest
 
 from hal0.auth.tokens import (
+    SCHEMA_VERSION,
     DuplicateLabel,
     InvalidScope,
-    SCHEMA_VERSION,
     TokenNotFound,
     TokenStore,
     TokenStoreError,
@@ -38,20 +38,21 @@ def test_auth_enabled_default_off(monkeypatch: pytest.MonkeyPatch) -> None:
     assert auth_enabled() is False
 
 
-@pytest.mark.parametrize("val,expected", [
-    ("1", True),
-    ("true", True),
-    ("True", True),
-    ("yes", True),
-    ("on", True),
-    ("0", False),
-    ("false", False),
-    ("", False),
-    ("nope", False),
-])
-def test_auth_enabled_env_parse(
-    monkeypatch: pytest.MonkeyPatch, val: str, expected: bool
-) -> None:
+@pytest.mark.parametrize(
+    "val,expected",
+    [
+        ("1", True),
+        ("true", True),
+        ("True", True),
+        ("yes", True),
+        ("on", True),
+        ("0", False),
+        ("false", False),
+        ("", False),
+        ("nope", False),
+    ],
+)
+def test_auth_enabled_env_parse(monkeypatch: pytest.MonkeyPatch, val: str, expected: bool) -> None:
     monkeypatch.setenv("HAL0_AUTH_ENABLED", val)
     assert auth_enabled() is expected
 
@@ -87,7 +88,7 @@ def test_verify_round_trip(store: TokenStore) -> None:
 
 
 def test_verify_wrong_secret(store: TokenStore) -> None:
-    tok, raw = store.create(label="bridge", scope="all")
+    _tok, raw = store.create(label="bridge", scope="all")
     # Tamper with the secret half but keep the id half so we hit the
     # right hash slot before failing argon2 verify.
     prefix, _, _secret = raw.rpartition(".")
@@ -101,15 +102,18 @@ def test_verify_unknown_id(store: TokenStore) -> None:
     assert store.verify("hal0_deadbeef.somesecret") is None
 
 
-@pytest.mark.parametrize("malformed", [
-    "",
-    "no-prefix",
-    "Bearer hal0_abc.def",  # the strip happens in the middleware, not here
-    "hal0_",
-    "hal0_abc",
-    "hal0_abcde123",  # no '.'
-    "hal0_short.x",  # id too short
-])
+@pytest.mark.parametrize(
+    "malformed",
+    [
+        "",
+        "no-prefix",
+        "Bearer hal0_abc.def",  # the strip happens in the middleware, not here
+        "hal0_",
+        "hal0_abc",
+        "hal0_abcde123",  # no '.'
+        "hal0_short.x",  # id too short
+    ],
+)
 def test_verify_malformed(store: TokenStore, malformed: str) -> None:
     store.create(label="bridge", scope="all")
     assert store.verify(malformed) is None
@@ -167,14 +171,14 @@ def test_reload_picks_up_external_edits(store: TokenStore) -> None:
     store.create(label="initial", scope="all")
     # Simulate an out-of-band write that adds a row.
     contents = store.path.read_text(encoding="utf-8")
-    extra = '''
+    extra = """
 [[tokens]]
 id = "deadbeef"
 label = "external"
 hash = "$argon2id$v=19$m=65536,t=3,p=4$AAAA$BBBB"
 scope = "v1-only"
 created_at = "2026-05-15T10:00:00Z"
-'''
+"""
     store.path.write_text(contents + extra, encoding="utf-8")
 
     # Without reload, the in-memory cache is stale.

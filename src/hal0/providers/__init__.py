@@ -48,10 +48,7 @@ def get_provider(name: str) -> Provider:
     try:
         return _PROVIDERS[name]
     except KeyError as exc:
-        raise KeyError(
-            f"no provider registered for {name!r}; "
-            f"known: {sorted(_PROVIDERS)}"
-        ) from exc
+        raise KeyError(f"no provider registered for {name!r}; known: {sorted(_PROVIDERS)}") from exc
 
 
 __all__ = [
