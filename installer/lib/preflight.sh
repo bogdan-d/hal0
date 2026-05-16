@@ -84,10 +84,23 @@ preflight_docker() {
 preflight_disk() {
     local min_gb="${1:-${HAL0_DISK_MIN_GB:-20}}"
     local target="${2:-${HAL0_DISK_TARGET:-/var/lib}}"
-    # Fall back to /tmp when /var/lib is absent (containerised doctor runs).
-    if [[ ! -d "${target}" ]]; then
-        target="/tmp"
+    # The installer calls us with the *eventual* target (e.g.
+    # /var/lib/hal0), which doesn't exist yet on a fresh host. df only
+    # works on extant paths, so walk up to the deepest existing
+    # ancestor before measuring. This still measures the right device
+    # because /var/lib/hal0 will land on /var/lib's filesystem.
+    local probe="${target}"
+    while [[ -n "${probe}" && ! -d "${probe}" ]]; do
+        local parent
+        parent="$(dirname "${probe}")"
+        [[ "${parent}" == "${probe}" ]] && break   # hit / and still missing
+        probe="${parent}"
+    done
+    if [[ ! -d "${probe}" ]]; then
+        warn "disk: could not find an existing ancestor of ${target} to probe; skipping"
+        return 1
     fi
+    target="${probe}"
     local avail_kb
     avail_kb="$(df -Pk "${target}" 2>/dev/null | awk 'NR==2 {print $4}')"
     if [[ -z "${avail_kb}" ]]; then
