@@ -75,6 +75,18 @@ _SENTINEL_PROMPT: str = "ping"
 # How long systemctl operations get before we treat them as hung.
 _SYSTEMCTL_TIMEOUT_S: float = 30.0
 
+# TIER1: Push-driven failure detector.  While a slot is in a "live" state
+# (READY / SERVING / IDLE) a background task polls ``systemctl is-active``
+# every _FAIL_WATCH_INTERVAL_S seconds.  When the unit unexpectedly dies
+# (OOM, segfault, mid-warmup pull failure, …) the watcher flips state to
+# ERROR and emits the SSE frame within ~1s of detection, instead of
+# waiting for the next ``status()`` poll or for ``_await_ready``'s 180s
+# grace to expire.  See task #11.
+_FAIL_WATCH_INTERVAL_S: float = 2.0
+_FAIL_WATCH_LIVE_STATES: frozenset[SlotState] = frozenset(
+    {SlotState.READY, SlotState.SERVING, SlotState.IDLE}
+)
+
 
 # ── Slot snapshot ────────────────────────────────────────────────────────────
 
@@ -143,6 +155,10 @@ class SlotManager:
         self._subscribers: list[asyncio.Queue[SlotStateRecord]] = []
         # Idle-tracking — last request timestamp per slot.
         self._last_used: dict[str, float] = {}
+        # TIER1: per-slot background tasks that poll systemctl is-active and
+        # push a READY→ERROR transition the instant the unit dies.  Keyed by
+        # slot name; only present while the slot is in a live state.
+        self._fail_watchers: dict[str, asyncio.Task[None]] = {}
 
     # ── helpers ──────────────────────────────────────────────────────────────
 
@@ -246,6 +262,10 @@ class SlotManager:
             "slot.transition", extra={"slot": name, "from": current.value, "to": to_state.value}
         )
         await self._broadcast(record)
+        # TIER1: spawn/cancel the push-driven fail-watcher to match the new
+        # state.  Done after broadcast so the SSE frame for the transition
+        # itself lands before any watcher-induced follow-up frame.
+        self._update_fail_watcher(name, to_state)
         return record
 
     async def _broadcast(self, record: SlotStateRecord) -> None:
@@ -285,6 +305,100 @@ class SlotManager:
         finally:
             with contextlib.suppress(ValueError):
                 self._subscribers.remove(queue)
+
+    # ── fail-watcher (push-driven failure detector) ──────────────────────────
+
+    def _update_fail_watcher(self, name: str, new_state: SlotState) -> None:
+        """Spawn or cancel the per-slot fail-watcher to match ``new_state``.
+
+        Live states (READY/SERVING/IDLE) → ensure a watcher task is running.
+        Any other state → cancel the watcher if present.
+
+        Self-cancellation is a no-op: when the watcher itself fires the
+        transition to ERROR, we let it return naturally rather than calling
+        ``task.cancel()`` on the currently-executing coroutine (which would
+        raise CancelledError on the await it just completed).
+        """
+        if new_state in _FAIL_WATCH_LIVE_STATES:
+            existing = self._fail_watchers.get(name)
+            if existing is not None and not existing.done():
+                return
+            try:
+                self._fail_watchers[name] = asyncio.create_task(
+                    self._fail_watch_loop(name),
+                    name=f"hal0-slot-fail-watch-{name}",
+                )
+            except RuntimeError:
+                # No running loop (sync-context test of _transition with
+                # force=True called outside asyncio). Skip — the watcher
+                # only matters when the slot is actually live in an event
+                # loop.
+                log.debug("slot.fail_watch_no_loop", extra={"slot": name})
+            return
+
+        existing = self._fail_watchers.pop(name, None)
+        if existing is None or existing.done():
+            return
+        try:
+            current_task = asyncio.current_task()
+        except RuntimeError:
+            current_task = None
+        if existing is current_task:
+            # Watcher self-cancel via its own transition — let it finish.
+            return
+        existing.cancel()
+
+    async def _fail_watch_loop(self, slot_name: str) -> None:
+        """Poll ``systemctl is-active`` and flip to ERROR on unit death.
+
+        Runs as a background task while the slot is in READY/SERVING/IDLE.
+        Detection latency = up to one poll interval (~2s).  Exits cleanly
+        once the slot leaves the live-state set, by self-cancel via the
+        ERROR transition, or via outer ``task.cancel()``.
+        """
+        try:
+            while True:
+                await asyncio.sleep(_FAIL_WATCH_INTERVAL_S)
+                # First gate: did the slot leave live-state from underneath
+                # us?  ``_update_fail_watcher`` already cancels in that case
+                # but this defends against the race where the watcher wakes
+                # before the cancel lands.
+                current = self._current_state(slot_name)
+                if current not in _FAIL_WATCH_LIVE_STATES:
+                    return
+                try:
+                    active = await self._is_active(slot_name)
+                except Exception as exc:
+                    # systemctl failure is unusual — log and keep polling.
+                    log.warning(
+                        "slot.fail_watch_is_active_failed",
+                        extra={"slot": slot_name, "error": str(exc)},
+                    )
+                    continue
+                if active:
+                    continue
+                # Unit went inactive/failed while we believed it was live.
+                # Re-check state once more — load/unload may have moved us
+                # legitimately during the is-active call.
+                current = self._current_state(slot_name)
+                if current not in _FAIL_WATCH_LIVE_STATES:
+                    return
+                try:
+                    await self._transition(
+                        slot_name,
+                        SlotState.ERROR,
+                        message="systemd unit died unexpectedly",
+                        force=True,
+                    )
+                except Exception as exc:
+                    log.warning(
+                        "slot.fail_watch_transition_failed",
+                        extra={"slot": slot_name, "error": str(exc)},
+                    )
+                return
+        except asyncio.CancelledError:
+            # Normal shutdown path — slot left live-state cleanly.
+            raise
 
     # ── systemctl wrapper ────────────────────────────────────────────────────
 
@@ -911,9 +1025,7 @@ class SlotManager:
                                 body = {}
                             if isinstance(body, dict) and body.get("model_loaded"):
                                 return
-                            last_error = (
-                                f"/health 200 but model_loaded != true (body={body!r})"
-                            )
+                            last_error = f"/health 200 but model_loaded != true (body={body!r})"
                         else:
                             last_error = f"/health HTTP {resp.status_code}"
                     else:
