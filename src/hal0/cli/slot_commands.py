@@ -28,13 +28,68 @@ app = typer.Typer(help="Manage inference slots.")
 console = Console()
 
 
-class SlotBackend(StrEnum):
-    """Backends valid for a slot (mirrors PLAN.md §1 provider list)."""
+class SlotProvider(StrEnum):
+    """Providers valid for a slot (mirrors PLAN.md §1 provider list).
+
+    A *provider* is the inference engine binary that serves the slot
+    (e.g. llama-server, flm). This is distinct from a slot's *hardware*
+    backend (vulkan / rocm / cpu) which targets the compute device.
+    """
 
     llama_server = "llama-server"
     flm = "flm"
     moonshine = "moonshine"
     kokoro = "kokoro"
+
+
+# Back-compat alias — older code/docs referenced ``SlotBackend`` for what
+# is semantically the provider. Keep the name importable so external
+# callers don't break; new code should reference ``SlotProvider``.
+SlotBackend = SlotProvider
+
+
+class SlotHardware(StrEnum):
+    """Hardware backends valid for a slot (mirrors SlotConfig.backend).
+
+    See ``hal0.config.schema._VALID_BACKENDS``. ``vulkan`` works on any
+    Vulkan-capable GPU (AMD/NVIDIA/Intel); ``rocm`` requires AMD with
+    ROCm; ``cpu`` is the fallback.
+    """
+
+    vulkan = "vulkan"
+    rocm = "rocm"
+    cpu = "cpu"
+
+
+def _detect_default_hardware() -> str:
+    """Pick a sane default hardware backend from /etc/hal0/hardware.json.
+
+    Falls back to ``"vulkan"`` when the probe file is missing or
+    unreadable — that's the broadest match for AMD/NVIDIA/Intel GPUs and
+    preserves the historical hardcoded default for users without a probe.
+    """
+    try:
+        from hal0.config import paths as _paths
+    except ImportError:
+        return "vulkan"
+    try:
+        raw = _paths.hardware_json().read_text()
+    except OSError:
+        return "vulkan"
+    try:
+        data = jsonlib.loads(raw)
+    except ValueError:
+        return "vulkan"
+    gpus = data.get("gpus") or []
+    if not gpus:
+        return "cpu"
+    g = gpus[0] if isinstance(gpus[0], dict) else {}
+    vendor = (g.get("vendor") or "").lower()
+    if vendor == "amd" and g.get("compute_capable"):
+        return "rocm"
+    if g.get("vulkan_capable") or vendor in ("amd", "nvidia", "intel"):
+        return "vulkan"
+    return "cpu"
 
 
 _STATE_STYLES = {
@@ -200,12 +255,31 @@ def slot_logs(
 @app.command("create")
 def slot_create(
     name: str = typer.Argument(..., help="Slot name (e.g. primary, embed, stt)"),
-    backend: SlotBackend = typer.Option(
+    provider: SlotProvider = typer.Option(
         "llama-server",
+        "--provider",
+        help="Inference provider (engine) for the slot.",
+        case_sensitive=False,
+    ),
+    hardware: SlotHardware | None = typer.Option(
+        None,
+        "--hardware",
+        help=(
+            "Hardware backend: vulkan | rocm | cpu. "
+            "Default: auto-detected from /etc/hal0/hardware.json (vulkan if no probe)."
+        ),
+        case_sensitive=False,
+    ),
+    backend: str | None = typer.Option(
+        None,
         "--backend",
         "-b",
-        help="Provider backend for the slot.",
-        case_sensitive=False,
+        help=(
+            "[DEPRECATED] alias for --provider. "
+            "Note: this flag historically named the provider, NOT the hardware "
+            "backend. Use --provider / --hardware instead."
+        ),
+        hidden=True,
     ),
     model: str = typer.Option(..., "--model", "-m", help="Initial model ref to assign."),
     port: int | None = typer.Option(
@@ -222,10 +296,30 @@ def slot_create(
     url = _api_base()
     if _api_unreachable(url):
         raise typer.Exit(1)
+
+    # Back-compat: --backend was historically the provider name. Translate
+    # with a deprecation warning so existing scripts keep working but the
+    # user is nudged toward the corrected flags.
+    if backend is not None:
+        console.print(
+            "[yellow]warning:[/yellow] --backend is deprecated and was always the "
+            "provider name, not the hardware backend; use --provider instead.",
+            highlight=False,
+        )
+        try:
+            provider = SlotProvider(backend)
+        except ValueError:
+            die(
+                f"--backend {backend!r} is not a valid provider; "
+                f"choose from {[p.value for p in SlotProvider]}"
+            )
+            return
+
+    hw = hardware.value if hardware is not None else _detect_default_hardware()
     body: dict[str, Any] = {
         "name": name,
-        "backend": "vulkan",  # backend in the SlotConfig sense (hardware target)
-        "provider": str(backend),
+        "backend": hw,  # SlotConfig.backend = hardware target (vulkan/rocm/cpu/...)
+        "provider": str(provider),
         "model": {"default": model, "context_size": ctx_size},
     }
     if port is not None:
@@ -255,24 +349,58 @@ def slot_edit(
     model: str | None = typer.Option(None, "--model", "-m"),
     port: int | None = typer.Option(None, "--port", "-p", min=1024, max=65535),
     ctx_size: int | None = typer.Option(None, "--ctx-size", min=128),
-    backend: SlotBackend | None = typer.Option(None, "--backend", "-b", case_sensitive=False),
+    provider: SlotProvider | None = typer.Option(
+        None, "--provider", case_sensitive=False, help="Change the slot's inference provider."
+    ),
+    hardware: SlotHardware | None = typer.Option(
+        None,
+        "--hardware",
+        case_sensitive=False,
+        help="Change the slot's hardware backend (vulkan | rocm | cpu).",
+    ),
+    backend: str | None = typer.Option(
+        None,
+        "--backend",
+        "-b",
+        hidden=True,
+        help="[DEPRECATED] alias for --provider (historic, see `slot create --help`).",
+    ),
 ) -> None:
     """Update one or more slot config fields (PUT /api/slots/{name}/config)."""
     url = _api_base()
     if _api_unreachable(url):
         raise typer.Exit(1)
-    if model is None and port is None and ctx_size is None and backend is None:
+
+    # Back-compat: --backend mapped to provider historically.
+    if backend is not None:
+        console.print(
+            "[yellow]warning:[/yellow] --backend is deprecated and was always the "
+            "provider name, not the hardware backend; use --provider instead.",
+            highlight=False,
+        )
+        try:
+            provider = SlotProvider(backend) if provider is None else provider
+        except ValueError:
+            die(
+                f"--backend {backend!r} is not a valid provider; "
+                f"choose from {[p.value for p in SlotProvider]}"
+            )
+            return
+
+    if model is None and port is None and ctx_size is None and provider is None and hardware is None:
         console.print(
             "[bold yellow]No fields provided.[/bold yellow]  "
-            "Pass at least one of --model, --port, --ctx-size, --backend."
+            "Pass at least one of --model, --port, --ctx-size, --provider, --hardware."
         )
         raise typer.Exit(code=2)
 
     payload: dict[str, Any] = {}
     if port is not None:
         payload["port"] = port
-    if backend is not None:
-        payload["provider"] = str(backend)
+    if provider is not None:
+        payload["provider"] = str(provider)
+    if hardware is not None:
+        payload["backend"] = hardware.value
     if model is not None or ctx_size is not None:
         try:
             cfg = api_get(f"/api/slots/{name}/config")
