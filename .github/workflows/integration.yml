@@ -17,6 +17,7 @@ on:
     paths:
       - "src/hal0/**"
       - "tests/slots/**"
+      - "tests/openwebui/**"
       - "packaging/**"
       - "installer/**"
       - ".github/workflows/integration.yml"
@@ -156,4 +157,72 @@ jobs:
           path: |
             journal-api.log
             journal-slot.log
+          if-no-files-found: ignore
+
+  openwebui-prewire-smoke:
+    # Proves the bundled OpenWebUI install actually talks to hal0:
+    # writes /etc/hal0/openwebui.env via env_writer, boots
+    # ghcr.io/open-webui/open-webui:main against a real hal0-api
+    # subprocess, polls /api/models until OpenWebUI advertises the
+    # hal0-served model.  See tests/openwebui/test_prewire_smoke.py.
+    name: OpenWebUI prewire smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Independent of slot-integration — they don't share state and the
+    # OpenWebUI image pull dominates wall-clock, so running them in
+    # parallel cuts critical path.
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install hal0 (editable + dev extras)
+        run: |
+          python -m venv .venv
+          . .venv/bin/activate
+          pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Verify Docker on runner
+        run: |
+          docker version
+          docker info --format '{{.ServerVersion}}'
+
+      - name: Pre-pull OpenWebUI image
+        # Cache the heavy layer step outside the pytest timeout so a
+        # slow registry pull doesn't get billed against the test.
+        run: docker pull ghcr.io/open-webui/open-webui:main
+
+      - name: Run OpenWebUI prewire smoke test
+        run: |
+          . .venv/bin/activate
+          pytest tests/openwebui/test_prewire_smoke.py -v -m integration
+
+      - name: Capture container logs on failure
+        if: failure()
+        run: |
+          # Catch any lingering openwebui smoke container — the fixture
+          # tears them down on success but a hard pytest fail (timeout,
+          # SIGKILL) can leak one.
+          docker ps -a --filter "name=hal0-openwebui-smoke-" --format '{{.ID}} {{.Names}}' \
+              | tee leaked-containers.txt || true
+          for cid in $(docker ps -aq --filter "name=hal0-openwebui-smoke-"); do
+              docker logs --tail 500 "$cid" > "openwebui-$cid.log" 2>&1 || true
+              docker rm -f "$cid" || true
+          done
+
+      - name: Upload OpenWebUI logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: openwebui-smoke-logs
+          path: |
+            openwebui-*.log
+            leaked-containers.txt
           if-no-files-found: ignore
