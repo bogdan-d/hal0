@@ -55,7 +55,13 @@ ARG AMDGPU_TARGETS="gfx1100;gfx1151"
 # every ROCm component the PyTorch ROCm wheel needs at runtime. The
 # alternative (rocm-terminal) doesn't ship hipblaslt / miopen which Flux
 # and SDXL both need for fused attention.
-FROM rocm/dev-ubuntu-24.04:6.4.4-complete AS runtime
+#
+# Switched from :6.4.4-complete to plain :6.4.4 — the -complete variant
+# adds ~8 GB of dev toolchain (clang/llvm/debuggers) we don't use at
+# runtime. Cuts the base from ~15 GB extracted to ~6 GB, which is the
+# difference between "fits on ubuntu-latest GHA runner" and "ENOSPC".
+# hipblaslt + miopen + the rocBLAS family are still in the slim variant.
+FROM rocm/dev-ubuntu-24.04:6.4.4 AS runtime
 
 ARG COMFYUI_REF
 ARG AMDGPU_TARGETS

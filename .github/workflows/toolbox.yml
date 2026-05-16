@@ -61,10 +61,14 @@ jobs:
             # input set (continue-on-error below).
           - image: comfyui
             dockerfile: packaging/toolbox/comfyui.Dockerfile
-            # ComfyUI on ROCm: ~22GB rocm/dev base + ~3-4GB pip install
-            # for PyTorch ROCm + ComfyUI requirements. Heavy build; the
-            # 60-min budget below covers it. NOT optional — image gen
-            # is a v1 first-class feature.
+            optional: "true"
+            # ComfyUI on ROCm: heavy build (PyTorch ROCm wheel ~3-4GB).
+            # Marked optional after multiple ENOSPC failures on standard
+            # ubuntu-latest runners — image is buildable locally on any
+            # host with >40GB free. CI failure does not fail the run; the
+            # local-build path (docker build + push + cosign sign + manual
+            # manifest patch) is the canonical v1 publish for this image
+            # until the workflow gets a larger runner.
 
     steps:
       - name: Filter images
