@@ -498,8 +498,8 @@ const QUANTS = ['Q4_K_M', 'Q5_K_M', 'Q8_0', 'F16', 'BF16']
                     :disabled="pulling"
                     @click="pullCurated(preset)"
                   >
-                    <span v-if="pullProgress[preset.id]" class="spinner" aria-hidden="true" />
-                    {{ pullProgress[preset.id] ? 'Pulling…' : 'Pull' }}
+                    <span v-if="jobFor(preset.id)?.inFlight.value" class="spinner" aria-hidden="true" />
+                    {{ jobFor(preset.id)?.inFlight.value ? 'Pulling…' : 'Pull' }}
                   </button>
                 </div>
               </div>
