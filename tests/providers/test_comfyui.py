@@ -78,8 +78,12 @@ def test_start_cmd_emits_required_flags(
 
 
 def test_image_ref_is_hal0ai_comfyui(provider: ComfyUIProvider) -> None:
-    assert provider.image_ref({}) == _HAL0_COMFYUI_IMAGE
+    ref = provider.image_ref({})
+    assert ref.startswith("ghcr.io/hal0ai/hal0-toolbox-comfyui")
     assert _HAL0_COMFYUI_IMAGE.startswith("ghcr.io/hal0ai/hal0-toolbox-comfyui")
+    assert ref == _HAL0_COMFYUI_IMAGE or ref.startswith(
+        f"{_HAL0_COMFYUI_IMAGE.split(':', 1)[0]}@sha256:"
+    )
 
 
 def test_image_ref_slot_cfg_override_wins(provider: ComfyUIProvider) -> None:
