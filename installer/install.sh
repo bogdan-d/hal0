@@ -237,8 +237,13 @@ if [[ "${AUTH_MODE}" == "basic" ]]; then
                 # mirror in a v0.3 follow-up. For the POC, surface the
                 # missing-binary path so an operator can apt install caddy
                 # by hand and re-run.
-                apt-get install -y caddy 2>/dev/null || warn \
-                    "apt couldn't find 'caddy' — install per https://caddyserver.com/docs/install#debian-ubuntu-raspbian and re-run"
+                APT_ERR="$(mktemp)"
+                if ! apt-get install -y caddy 2>"${APT_ERR}"; then
+                    warn "apt failed to install caddy:"
+                    sed 's/^/    /' "${APT_ERR}" >&2
+                    warn "Install per https://caddyserver.com/docs/install#debian-ubuntu-raspbian and re-run."
+                fi
+                rm -f "${APT_ERR}"
             elif command -v pacman >/dev/null; then
                 info "installing caddy via pacman"
                 pacman -S --noconfirm caddy
