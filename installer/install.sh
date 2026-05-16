@@ -222,6 +222,18 @@ if [[ ! -x "${HAL0_BIN}" ]]; then
 fi
 info "hal0 cli: ${HAL0_BIN}"
 
+# Symlink onto PATH so `hal0` works in any new shell. Skip in --dev (dev tree
+# stays self-contained); /usr/local/bin is on default PATH for bash/zsh/fish
+# and survives upgrades because it points at the venv shim, not a copy.
+if [[ "${DEV_MODE}" -eq 0 ]]; then
+    HAL0_PATH_LINK="${HAL0_PATH_LINK:-/usr/local/bin/hal0}"
+    if ln -sfn "${HAL0_BIN}" "${HAL0_PATH_LINK}" 2>/dev/null; then
+        info "linked ${HAL0_PATH_LINK} → ${HAL0_BIN}"
+    else
+        warn "could not link ${HAL0_PATH_LINK} (check permissions); add ${VENV_DIR}/bin to PATH manually"
+    fi
+fi
+
 ui_step "Dashboard UI"
 
 UI_DIR="${REPO_ROOT}/ui"

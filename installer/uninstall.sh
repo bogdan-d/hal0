@@ -119,6 +119,15 @@ else
     info "/usr/lib/hal0 not present"
 fi
 
+# ── PATH symlink ──────────────────────────────────────────────────────────────
+HAL0_PATH_LINK="${HAL0_PATH_LINK:-/usr/local/bin/hal0}"
+if [[ -L "${HAL0_PATH_LINK}" ]] || [[ -f "${HAL0_PATH_LINK}" ]]; then
+    rm -f "${HAL0_PATH_LINK}"
+    info "Removed ${HAL0_PATH_LINK}"
+else
+    info "${HAL0_PATH_LINK} not present"
+fi
+
 # ── Data dirs ─────────────────────────────────────────────────────────────────
 step "Data directories"
 
