@@ -40,7 +40,7 @@ command on any modern Linux box.
 hal0/
 ├── src/hal0/         # Python package (FastAPI API + slot manager + CLI)
 ├── ui/               # Vue 3 + Tailwind 4 dashboard
-├── installer/        # install.sh + systemd unit templates
+├── installer/        # install.sh (systemd unit templates live in packaging/systemd/)
 ├── tests/            # pytest suite
 ├── docs/             # architecture, install, slot docs
 └── PLAN.md           # v1 roadmap
