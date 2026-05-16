@@ -6,6 +6,12 @@ The release manifest is a single JSON file served per channel at:
 https://releases.hal0.dev/{stable|nightly}.json
 ```
 
+A path-based fallback URL (`https://hal0.dev/releases/{channel}.json`)
+serves the same file — both resolve to `public/releases/*.json` in the
+[hal0ai/hal0-web](https://github.com/hal0ai/hal0-web) repo via a
+Cloudflare Pages `_redirects` rewrite. See that repo's `README.md`
+("Release manifest hosting") for the CF Pages + DNS setup.
+
 `hal0 update --check` (CLI) and `GET /api/updates/check` (API) both fetch
 this file, validate it against the schema below, and compare
 `version` against `hal0.__version__`. `hal0 update` (no `--check`)
@@ -15,6 +21,26 @@ extracts to `/usr/lib/hal0-<version>/`, and atomically swaps the
 
 The publisher (the `release.yml` GitHub Actions workflow) produces this
 file post-build; the runtime consumer is `hal0.updater.Updater.apply()`.
+
+### Smoke check
+
+```sh
+# Fetch + pretty-print the live stable manifest
+curl -s https://releases.hal0.dev/stable.json | jq .
+
+# Verify cache + CORS headers are wired up by Cloudflare Pages
+curl -sI https://releases.hal0.dev/stable.json | grep -iE 'cache-control|access-control'
+
+# Path-based fallback
+curl -s https://hal0.dev/releases/stable.json | jq -r '.version, .channel, .digest_sha256'
+```
+
+Until `release.yml` ships, the live manifest is a placeholder
+(`_placeholder: true`, version `0.0.0`, all-zeros `digest_sha256`). It
+parses cleanly through `ReleaseManifest.model_validate` so
+`hal0 update --check` succeeds and reports "no update available", but
+any attempt to `apply()` it will fail at the cosign-verify step —
+intentional, since there is no real signed artifact behind it yet.
 
 ## Schema
 
@@ -130,9 +156,20 @@ When `hal0.dev` exists and the `release.yml` workflow runs, it must:
    `signer_identity` in the manifest must anchor exactly to that
    identity (`^https://github.com/<org>/<repo>/.github/workflows/release.yml@refs/tags/v<ver>$`).
 4. Publish `hal0-<version>.tar.gz` + `.sig` as release assets.
-5. POST/commit the new `stable.json` or `nightly.json` to whatever
-   serves `releases.hal0.dev`. Stable releases supersede the prior
-   `stable.json` atomically — the updater fetches whatever's there.
+5. POST/commit the new `stable.json` or `nightly.json` to
+   [hal0ai/hal0-web](https://github.com/hal0ai/hal0-web) under
+   `public/releases/{channel}.json` — Cloudflare Pages auto-deploys
+   the change to `releases.hal0.dev` (and the path-based fallback
+   `hal0.dev/releases/`). Two acceptable mechanisms:
+   - **PR flow** (preferred for `stable`): `release.yml` opens a PR
+     against `hal0ai/hal0-web` updating only `public/releases/stable.json`,
+     gated on a human approve before merge.
+   - **Direct push** (acceptable for `nightly`): a deploy key with
+     write scope limited to `public/releases/nightly.json` lets the
+     workflow commit straight to `master`, no PR.
+   Either way, the file replaces the prior manifest atomically; the
+   updater fetches whatever's there with a `max-age=60` cache window
+   set by `public/_headers`.
 6. Patch `toolbox_images.<name>.digest` with the sha256 content digests
    from the toolbox build (`toolbox.yml` already does this for
    `manifest.json`; mirror that block into the release manifest so an
