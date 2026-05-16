@@ -3,8 +3,17 @@
 #
 # Usage:
 #   sudo bash uninstall.sh             # stops services, prompts before deleting data
-#   sudo bash uninstall.sh --keep-data # leaves /etc/hal0 and /var/lib/hal0 intact
-#   HAL0_FORCE=1 sudo bash uninstall.sh # no confirmation prompt
+#   sudo bash uninstall.sh --keep-data # leaves config/state intact
+#   sudo bash uninstall.sh --force     # skip confirmation prompt
+#        bash uninstall.sh --dev       # remove dev-mode tree under $PWD/.hal0ai
+#   HAL0_FORCE=1 sudo bash uninstall.sh # equivalent to --force
+#
+# Env overrides:
+#   HAL0_PREFIX        installation root (default /opt/hal0; --dev defaults
+#                      to $PWD/.hal0ai). When set, --dev path layout is used
+#                      so the uninstall mirrors the matching install.sh run.
+#   HAL0_PATH_LINK     PATH symlink to remove (default /usr/local/bin/hal0;
+#                      ignored in --dev mode)
 
 set -euo pipefail
 IFS=$'\n\t'
@@ -25,25 +34,51 @@ die()   { error "$*"; exit 1; }
 
 # ── Parse flags ───────────────────────────────────────────────────────────────
 KEEP_DATA=0
+DEV_MODE=0
 HAL0_FORCE="${HAL0_FORCE:-0}"
 
 for arg in "$@"; do
     case "$arg" in
         --keep-data) KEEP_DATA=1 ;;
         --force)     HAL0_FORCE=1 ;;
+        --dev)       DEV_MODE=1 ;;
         --help|-h)
-            printf 'Usage: uninstall.sh [--keep-data] [--force]\n'
-            printf '  --keep-data  preserve /etc/hal0 and /var/lib/hal0\n'
-            printf '  --force      skip data-deletion confirmation prompt\n'
-            printf '  HAL0_FORCE=1 env var is equivalent to --force\n'
+            cat <<'EOF'
+Usage: uninstall.sh [--keep-data] [--force] [--dev]
+  --keep-data  preserve config + state directories
+  --force      skip data-deletion confirmation prompt
+  --dev        remove the dev-mode tree under $PWD/.hal0ai (or $HAL0_PREFIX);
+               no systemd / system-user / PATH-symlink operations performed.
+               Required to undo `install.sh --dev` without clobbering a host
+               install.
+  HAL0_FORCE=1 env var is equivalent to --force
+  HAL0_PREFIX  override install root (default /opt/hal0, or $PWD/.hal0ai
+               when --dev). Path layout always mirrors install.sh.
+EOF
             exit 0
             ;;
         *) warn "Unknown flag: $arg (ignored)" ;;
     esac
 done
 
-# ── Root check ────────────────────────────────────────────────────────────────
-if [[ "$(id -u)" -ne 0 ]]; then
+# ── Compute paths (mirrors install.sh:89-100) ─────────────────────────────────
+if [[ "${DEV_MODE}" -eq 1 ]]; then
+    PREFIX="${HAL0_PREFIX:-${PWD}/.hal0ai}"
+    ETC_DIR="${PREFIX}/etc/hal0"
+    VAR_DIR="${PREFIX}/var/lib/hal0"
+    UNIT_DIR="${PREFIX}/etc/systemd/system"
+    LIB_DIR="${PREFIX}/usr/lib/hal0"
+    info "Dev mode — all paths under ${PREFIX}"
+else
+    PREFIX="${HAL0_PREFIX:-/opt/hal0}"
+    ETC_DIR="/etc/hal0"
+    VAR_DIR="/var/lib/hal0"
+    UNIT_DIR="/etc/systemd/system"
+    LIB_DIR="/usr/lib/hal0"
+fi
+
+# ── Root check (system mode only) ─────────────────────────────────────────────
+if [[ "${DEV_MODE}" -eq 0 && "$(id -u)" -ne 0 ]]; then
     if command -v sudo &>/dev/null; then
         exec sudo bash "$0" "$@"
     else
@@ -53,49 +88,53 @@ fi
 
 trap 'error "Uninstall failed at line ${LINENO}."; exit 1' ERR
 
-# ── Stop + disable units ──────────────────────────────────────────────────────
-step "Stopping services"
+# ── Stop + disable units (system mode only) ───────────────────────────────────
+if [[ "${DEV_MODE}" -eq 0 ]]; then
+    step "Stopping services"
 
-UNITS=(hal0-api hal0-openwebui)
+    UNITS=(hal0-api hal0-openwebui hal0-caddy)
 
-# Discover any running slot instances
-while IFS= read -r UNIT; do
-    UNITS+=("${UNIT%.service}")
-done < <(systemctl list-units --type=service --all --no-legend 2>/dev/null \
-    | awk '{print $1}' | grep '^hal0-slot@' || true)
+    # Discover any running slot instances
+    while IFS= read -r UNIT; do
+        UNITS+=("${UNIT%.service}")
+    done < <(systemctl list-units --type=service --all --no-legend 2>/dev/null \
+        | awk '{print $1}' | grep '^hal0-slot@' || true)
 
-for UNIT in "${UNITS[@]}"; do
-    if systemctl is-active "${UNIT}" &>/dev/null 2>&1; then
-        if systemctl stop "${UNIT}"; then
-            info "Stopped ${UNIT}"
+    for UNIT in "${UNITS[@]}"; do
+        if systemctl is-active "${UNIT}" &>/dev/null 2>&1; then
+            if systemctl stop "${UNIT}"; then
+                info "Stopped ${UNIT}"
+            else
+                warn "Could not stop ${UNIT} (may already be stopped)"
+            fi
         else
-            warn "Could not stop ${UNIT} (may already be stopped)"
+            info "${UNIT} not running"
         fi
-    else
-        info "${UNIT} not running"
-    fi
-    if systemctl is-enabled "${UNIT}" &>/dev/null 2>&1; then
-        if systemctl disable "${UNIT}"; then
-            info "Disabled ${UNIT}"
-        else
-            warn "Could not disable ${UNIT}"
+        if systemctl is-enabled "${UNIT}" &>/dev/null 2>&1; then
+            if systemctl disable "${UNIT}"; then
+                info "Disabled ${UNIT}"
+            else
+                warn "Could not disable ${UNIT}"
+            fi
         fi
-    fi
-done
+    done
 
-# Stop OpenWebUI container explicitly in case docker didn't get the memo
-if docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^hal0-openwebui$'; then
-    docker stop hal0-openwebui &>/dev/null || true
-    info "Stopped Docker container hal0-openwebui"
+    # Stop OpenWebUI container explicitly in case docker didn't get the memo
+    if docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^hal0-openwebui$'; then
+        docker stop hal0-openwebui &>/dev/null || true
+        info "Stopped Docker container hal0-openwebui"
+    fi
+else
+    step "Skipping systemd / docker stop (dev mode)"
 fi
 
 # ── Remove unit files ─────────────────────────────────────────────────────────
 step "Removing systemd units"
 
-UNIT_DIR="/etc/systemd/system"
 for UNIT_FILE in \
     "${UNIT_DIR}/hal0-api.service" \
     "${UNIT_DIR}/hal0-openwebui.service" \
+    "${UNIT_DIR}/hal0-caddy.service" \
     "${UNIT_DIR}/hal0-slot@.service"
 do
     if [[ -f "${UNIT_FILE}" ]]; then
@@ -106,26 +145,30 @@ do
     fi
 done
 
-systemctl daemon-reload
-info "systemctl daemon-reload done"
-
-# ── Remove code ───────────────────────────────────────────────────────────────
-step "Removing /usr/lib/hal0"
-
-if [[ -d /usr/lib/hal0 ]] || [[ -L /usr/lib/hal0/current ]]; then
-    rm -rf /usr/lib/hal0
-    info "Removed /usr/lib/hal0"
-else
-    info "/usr/lib/hal0 not present"
+if [[ "${DEV_MODE}" -eq 0 ]]; then
+    systemctl daemon-reload
+    info "systemctl daemon-reload done"
 fi
 
-# ── PATH symlink ──────────────────────────────────────────────────────────────
-HAL0_PATH_LINK="${HAL0_PATH_LINK:-/usr/local/bin/hal0}"
-if [[ -L "${HAL0_PATH_LINK}" ]] || [[ -f "${HAL0_PATH_LINK}" ]]; then
-    rm -f "${HAL0_PATH_LINK}"
-    info "Removed ${HAL0_PATH_LINK}"
+# ── Remove code ───────────────────────────────────────────────────────────────
+step "Removing ${LIB_DIR}"
+
+if [[ -d "${LIB_DIR}" ]] || [[ -L "${LIB_DIR}/current" ]]; then
+    rm -rf "${LIB_DIR}"
+    info "Removed ${LIB_DIR}"
 else
-    info "${HAL0_PATH_LINK} not present"
+    info "${LIB_DIR} not present"
+fi
+
+# ── PATH symlink (system mode only) ───────────────────────────────────────────
+if [[ "${DEV_MODE}" -eq 0 ]]; then
+    HAL0_PATH_LINK="${HAL0_PATH_LINK:-/usr/local/bin/hal0}"
+    if [[ -L "${HAL0_PATH_LINK}" ]] || [[ -f "${HAL0_PATH_LINK}" ]]; then
+        rm -f "${HAL0_PATH_LINK}"
+        info "Removed ${HAL0_PATH_LINK}"
+    else
+        info "${HAL0_PATH_LINK} not present"
+    fi
 fi
 
 # ── Data dirs ─────────────────────────────────────────────────────────────────
@@ -133,15 +176,15 @@ step "Data directories"
 
 if [[ "${KEEP_DATA}" -eq 1 ]]; then
     warn "Keeping data dirs (--keep-data):"
-    warn "  /etc/hal0      — config"
-    warn "  /var/lib/hal0  — models, registry, openwebui state"
+    warn "  ${ETC_DIR}      — config"
+    warn "  ${VAR_DIR}  — models, registry, openwebui state"
     warn "Re-run install.sh to restore services using this data."
 else
     # Confirmation unless forced
     if [[ "${HAL0_FORCE}" -ne 1 ]]; then
         printf '\n%s%sWARNING:%s This will delete:\n' "${RED}" "${BOLD}" "${RESET}"
-        printf '  /etc/hal0      (config + slot definitions)\n'
-        printf '  /var/lib/hal0  (models, registry, openwebui state)\n\n'
+        printf '  %s      (config + slot definitions)\n' "${ETC_DIR}"
+        printf '  %s  (models, registry, openwebui state)\n\n' "${VAR_DIR}"
         printf 'Type %sDELETE%s to confirm, or Ctrl-C to cancel: ' "${BOLD}" "${RESET}"
         read -r CONFIRM
         if [[ "${CONFIRM}" != "DELETE" ]]; then
@@ -150,7 +193,7 @@ else
         fi
     fi
 
-    for DATA_DIR in /etc/hal0 /var/lib/hal0; do
+    for DATA_DIR in "${ETC_DIR}" "${VAR_DIR}"; do
         if [[ -d "${DATA_DIR}" ]]; then
             rm -rf "${DATA_DIR}"
             info "Removed ${DATA_DIR}"
@@ -160,21 +203,40 @@ else
     done
 fi
 
-# ── System user ───────────────────────────────────────────────────────────────
-step "System user"
-
-if id hal0 &>/dev/null 2>&1; then
-    if userdel hal0; then
-        info "Removed system user hal0"
+# ── Dev-mode tree cleanup ─────────────────────────────────────────────────────
+# After removing the FHS-mirror subdirs, drop the now-empty PREFIX itself so
+# `install.sh --dev` can be re-run cleanly. Only do this if PREFIX is otherwise
+# empty (don't blow away unrelated user files that happened to share the dir).
+if [[ "${DEV_MODE}" -eq 1 && -d "${PREFIX}" ]]; then
+    # Remove obvious leftover dirs first
+    for D in "${PREFIX}/etc" "${PREFIX}/var" "${PREFIX}/usr" "${PREFIX}/.venv"; do
+        [[ -d "${D}" ]] && rm -rf "${D}" && info "Removed ${D}"
+    done
+    if [[ -z "$(ls -A "${PREFIX}" 2>/dev/null)" ]]; then
+        rmdir "${PREFIX}"
+        info "Removed empty ${PREFIX}"
     else
-        warn "Could not remove hal0 user"
+        warn "${PREFIX} not empty — leaving in place"
     fi
-else
-    info "System user hal0 not present"
+fi
+
+# ── System user (system mode only) ────────────────────────────────────────────
+if [[ "${DEV_MODE}" -eq 0 ]]; then
+    step "System user"
+
+    if id hal0 &>/dev/null 2>&1; then
+        if userdel hal0; then
+            info "Removed system user hal0"
+        else
+            warn "Could not remove hal0 user"
+        fi
+    else
+        info "System user hal0 not present"
+    fi
 fi
 
 # ── Done ──────────────────────────────────────────────────────────────────────
 printf '\n%s%shal0 uninstalled.%s\n' "${GREEN}" "${BOLD}" "${RESET}"
 if [[ "${KEEP_DATA}" -eq 1 ]]; then
-    printf '  Config + data preserved in /etc/hal0 and /var/lib/hal0.\n\n'
+    printf '  Config + data preserved in %s and %s.\n\n' "${ETC_DIR}" "${VAR_DIR}"
 fi
