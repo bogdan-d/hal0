@@ -19,20 +19,19 @@
 set -euo pipefail
 IFS=$'\n\t'
 
-if [[ -t 1 ]]; then
-    RED=$'\033[0;31m'; YEL=$'\033[1;33m'; GRN=$'\033[0;32m'; BLU=$'\033[0;36m'
-    BOLD=$'\033[1m';   DIM=$'\033[2m';    RST=$'\033[0m'
-else
-    RED=; YEL=; GRN=; BLU=; BOLD=; DIM=; RST=
-fi
-info()  { printf "${GRN}✔${RST}  %s\n" "$*"; }
-warn()  { printf "${YEL}!${RST}  %s\n" "$*" >&2; }
-err()   { printf "${RED}✗${RST}  %s\n" "$*" >&2; }
-# CURRENT_STEP is read by the ERR trap to surface step-specific
-# recovery hints. step() updates it; trap below dispatches on it.
-CURRENT_STEP=""
-step()  { CURRENT_STEP="$*"; printf "\n${BOLD}── %s${RST}\n" "$*"; }
-die()   { err "$*"; exit 1; }
+# Shared UI helpers — banner, step counter, spinner, boxed summary, plus
+# info / warn / err / die. ui_step maintains CURRENT_STEP for the ERR
+# trap below. Honors HAL0_PLAIN=1 and NO_COLOR=1 for non-fancy terms.
+# shellcheck source=lib/ui.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/ui.sh"
+
+# Re-runnable pre-flight checks (preflight_systemd / preflight_python /
+# preflight_docker / preflight_disk / preflight_ports / preflight_all).
+# Sourcing only loads the functions — the installer dispatches the
+# subset it cares about below. `hal0 doctor` shells the same file in
+# executable mode to run preflight_all post-install.
+# shellcheck source=lib/preflight.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/preflight.sh"
 
 # Poll `systemctl is-active` for up to `timeout` seconds. Returns 0 the
 # moment the unit reports active, 1 on timeout. Use instead of a flat
@@ -98,6 +97,19 @@ fi
 VENV_DIR="${PREFIX}/.venv"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+# Step total — base 8, +1 for the optional Auth setup, +1 for the
+# Auth self-test that runs after Caddy starts. Kept here so editors who
+# add or remove a ui_step bump the visible counter in the same diff.
+UI_STEP_TOTAL=8
+if [[ "${AUTH_MODE}" == "basic" && "${DEV_MODE}" -eq 0 ]]; then
+    UI_STEP_TOTAL=$((UI_STEP_TOTAL + 1))           # "Auth (Caddy …)"
+    if [[ "${NO_START}" -eq 0 ]]; then
+        UI_STEP_TOTAL=$((UI_STEP_TOTAL + 1))       # "Auth self-test"
+    fi
+fi
+
+ui_banner
+
 trap 'err "install failed at line ${LINENO} during: ${CURRENT_STEP:-pre-init}"
     case "${CURRENT_STEP}" in
         "Python environment")
@@ -114,7 +126,7 @@ trap 'err "install failed at line ${LINENO} during: ${CURRENT_STEP:-pre-init}"
     esac
     exit 1' ERR
 
-step "Pre-flight checks"
+ui_step "Pre-flight checks"
 
 if [[ "${DEV_MODE}" -eq 0 && "$(id -u)" -ne 0 ]]; then
     if command -v sudo >/dev/null; then
@@ -129,30 +141,31 @@ if [[ "${DEV_MODE}" -eq 0 && "$(id -u)" -ne 0 ]]; then
     fi
 fi
 
-if [[ "${DEV_MODE}" -eq 0 ]] && ! command -v systemctl >/dev/null; then
-    die "systemd not found — hal0 v1 requires systemd"
-fi
 info "system: $(uname -srm)"
 
-if ! command -v "${PY}" >/dev/null; then
-    die "python interpreter '${PY}' not found — install with 'apt install python3 python3-venv'"
-fi
-PY_VER="$(${PY} -c 'import sys; print(".".join(map(str, sys.version_info[:2])))')"
-info "python: ${PY} (${PY_VER})"
-
-if [[ ! "${PY_VER}" =~ ^3\.(11|12|13|14)$ ]]; then
-    warn "hal0 is tested on Python 3.11–3.14; ${PY_VER} may not work."
+# Systemd is hard-required outside dev mode; preflight_systemd just
+# reports presence, so we wrap it in the dev-mode skip and turn its
+# non-zero return into a die().
+if [[ "${DEV_MODE}" -eq 0 ]]; then
+    preflight_systemd || die "systemd not found — hal0 v1 requires systemctl on PATH"
 fi
 
-# Soft Docker check — not fatal so the API can come up on hosts that'll
-# install Docker later. Slot loads will fail loudly when launched.
-if command -v docker >/dev/null && docker info >/dev/null 2>&1; then
-    info "docker: $(docker version --format '{{.Server.Version}}' 2>/dev/null || echo unknown)"
-else
-    warn "docker is not available — slot launches will fail until it is installed"
+# preflight_python returns 1 when python is missing OR the version is
+# outside 3.11–3.14 (it logs an `err` / `warn` itself). The installer
+# only treats *missing* python as fatal — a wrong-version warning is OK
+# because pip may still work. We disambiguate by re-checking PATH.
+if ! preflight_python; then
+    if ! command -v "${PY}" >/dev/null 2>&1; then
+        die "python interpreter '${PY}' not found — install with 'apt install python3 python3-venv'"
+    fi
+    # Version warning already printed; keep going.
 fi
 
-step "Filesystem layout"
+# preflight_docker is soft (always returns 0 with a warning when
+# Docker is absent), so we don't need to guard the call.
+preflight_docker
+
+ui_step "Filesystem layout"
 
 mkdir -p \
     "${PREFIX}" \
@@ -165,7 +178,7 @@ mkdir -p \
     "${UNIT_DIR}"
 info "directories under ${PREFIX}, ${ETC_DIR}, ${VAR_DIR}"
 
-step "Python environment"
+ui_step "Python environment"
 
 if [[ ! -d "${VENV_DIR}" ]]; then
     "${PY}" -m venv "${VENV_DIR}"
@@ -175,32 +188,39 @@ PIP="${VENV_DIR}/bin/pip"
 HAL0_BIN="${VENV_DIR}/bin/hal0"
 
 # Refresh pip + install hal0 in editable mode pointing at this checkout.
-${PIP} install --upgrade pip setuptools wheel >/dev/null
-${PIP} install -e "${REPO_ROOT}" >/dev/null
-info "installed hal0 from ${REPO_ROOT}"
+# ui_spinner_run drops the >/dev/null — the spinner shows the live tail
+# of pip's output, and on failure replays the last 50 lines on stderr.
+ui_spinner_run "Upgrading pip / setuptools / wheel" \
+    "${PIP}" install --upgrade pip setuptools wheel
+ui_spinner_run "Installing hal0 from ${REPO_ROOT}" \
+    "${PIP}" install -e "${REPO_ROOT}"
 
 if [[ ! -x "${HAL0_BIN}" ]]; then
     die "hal0 binary not produced at ${HAL0_BIN} — check pip install output"
 fi
 info "hal0 cli: ${HAL0_BIN}"
 
-step "Dashboard UI"
+ui_step "Dashboard UI"
 
-UI_DIR="${REPO_DIR}/ui"
+UI_DIR="${REPO_ROOT}/ui"
 UI_DIST="${UI_DIR}/dist"
 if [[ -f "${UI_DIST}/index.html" ]]; then
     info "ui/dist already built — left alone"
 elif command -v npm >/dev/null 2>&1; then
-    info "building ui/dist (npm install + npm run build)"
-    (cd "${UI_DIR}" && npm install --no-audit --no-fund --silent && npm run build --silent) \
-        || die "ui build failed — check ${UI_DIR}/npm-debug.log"
+    # Two phases — install can dominate first-boot time, build is steady.
+    # Wrap each so the user sees what npm is doing instead of staring at
+    # a blank line for several minutes.
+    ui_spinner_run "Installing dashboard npm packages" \
+        bash -c "cd '${UI_DIR}' && npm install --no-audit --no-fund"
+    ui_spinner_run "Building dashboard (npm run build)" \
+        bash -c "cd '${UI_DIR}' && npm run build"
     info "wrote ${UI_DIST}"
 else
     warn "npm not found — dashboard at :${HAL0_PORT}/ will return 404 until you build the UI"
     warn "  install Node 20 LTS, then: cd ${UI_DIR} && npm install && npm run build"
 fi
 
-step "Configuration"
+ui_step "Configuration"
 
 HAL0_TOML="${ETC_DIR}/hal0.toml"
 if [[ ! -f "${HAL0_TOML}" ]]; then
@@ -259,7 +279,7 @@ if [[ "${AUTH_MODE}" == "basic" ]]; then
         warn "--auth=basic with --dev is unsupported (no system Caddy install); skipping auth setup"
         AUTH_MODE="off"
     else
-        step "Auth (Caddy basic_auth + Bearer)"
+        ui_step "Auth (Caddy basic_auth + Bearer)"
 
         # Caddy install — Debian/Ubuntu via apt, Arch/CachyOS via pacman.
         # Anything else falls through with a manual-install hint.
@@ -428,7 +448,7 @@ else
     warn "failed to write openwebui.env — OpenWebUI may not start"
 fi
 
-step "Systemd units"
+ui_step "Systemd units"
 
 API_UNIT="${UNIT_DIR}/hal0-api.service"
 cat > "${API_UNIT}" <<EOF
@@ -483,12 +503,16 @@ fi
 # The unit also has ExecStartPre=docker pull (idempotent), so a missed
 # background pull never breaks correctness — only first-boot latency.
 if [[ "${DEV_MODE}" -eq 0 && "${NO_START}" -eq 0 ]] && command -v docker >/dev/null && docker info >/dev/null 2>&1; then
-    info "pulling ghcr.io/open-webui/open-webui:main in the background"
+    # Background the actual pull, but spin briefly so the user sees we
+    # kicked it off. The hal0-openwebui unit also has ExecStartPre=docker
+    # pull (idempotent), so missing this background pull only costs first
+    # -boot latency, not correctness.
     (docker pull ghcr.io/open-webui/open-webui:main >/dev/null 2>&1 || true) &
     disown
+    ui_spinner_run "Pulling ghcr.io/open-webui/open-webui:main in background" sleep 3
 fi
 
-step "Hardware probe"
+ui_step "Hardware probe"
 
 if [[ -z "${HAL0_NO_PROBE:-}" ]]; then
     HAL0_HOME_FOR_PROBE=""
@@ -507,7 +531,7 @@ else
     warn "skipping probe (HAL0_NO_PROBE=1)"
 fi
 
-step "Service start"
+ui_step "Service start"
 
 if [[ "${DEV_MODE}" -eq 1 || "${NO_START}" -eq 1 ]]; then
     warn "not starting services automatically (dev / --no-start)."
@@ -557,7 +581,7 @@ else
         # self-signed cert; we only run this when HAL0_ADMIN_PASSWORD
         # is still set in scope (it is — the read happens earlier in
         # this same --auth=basic block and there is no `unset`).
-        step "Auth self-test"
+        ui_step "Auth self-test"
         if [[ -n "${HAL0_ADMIN_PASSWORD:-}" ]]; then
             if curl -ksSf --max-time 10 \
                     -u "${HAL0_ADMIN_USER}:${HAL0_ADMIN_PASSWORD}" \
@@ -576,26 +600,36 @@ fi
 HOST="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
 [[ -z "${HOST}" ]] && HOST=localhost
 
-printf '\n%shal0 installed.%s\n\n' "${BOLD}${GRN}" "${RST}"
-printf '  CLI:        %s%s%s\n' "${BLU}" "${HAL0_BIN}" "${RST}"
-printf '  Config:     %s%s%s\n' "${BLU}" "${ETC_DIR}" "${RST}"
-printf '  Data:       %s%s%s\n' "${BLU}" "${VAR_DIR}" "${RST}"
+# Build the summary lines into an array, then hand off to ui_box. Lines
+# are pre-padded so the column layout reads cleanly inside the box.
+SUMMARY_LINES=(
+    "$(printf 'CLI         %s%s%s' "${BLU}" "${HAL0_BIN}" "${RST}")"
+    "$(printf 'Config      %s%s%s' "${BLU}" "${ETC_DIR}" "${RST}")"
+    "$(printf 'Data        %s%s%s' "${BLU}" "${VAR_DIR}" "${RST}")"
+)
 if [[ "${DEV_MODE}" -eq 0 && "${NO_START}" -eq 0 ]]; then
     if [[ "${AUTH_MODE}" == "basic" ]]; then
         HOSTNAME_FOR_DISPLAY="${HAL0_HOSTNAME:-hal0.local}"
-        printf '  Dashboard:  %shttps://%s/%s\n' "${BLU}" "${HOSTNAME_FOR_DISPLAY}" "${RST}"
-        printf '  Chat:       %shttps://%s/chat/%s\n' "${BLU}" "${HOSTNAME_FOR_DISPLAY}" "${RST}"
-        printf '  Auth:       %sbasic_auth (admin: %s) + Bearer tokens at /api/auth/tokens%s\n' "${DIM}" "${HAL0_ADMIN_USER:-admin}" "${RST}"
-        printf '  Logs:       %sjournalctl -fu hal0-caddy hal0-api hal0-openwebui%s\n' "${DIM}" "${RST}"
+        SUMMARY_LINES+=(
+            "$(printf 'Dashboard   %shttps://%s/%s' "${BLU}" "${HOSTNAME_FOR_DISPLAY}" "${RST}")"
+            "$(printf 'Chat        %shttps://%s/chat/%s' "${BLU}" "${HOSTNAME_FOR_DISPLAY}" "${RST}")"
+            "$(printf 'Auth        %sbasic_auth (admin: %s) + Bearer at /api/auth/tokens%s' "${DIM}" "${HAL0_ADMIN_USER:-admin}" "${RST}")"
+            "$(printf 'Logs        %sjournalctl -fu hal0-caddy hal0-api hal0-openwebui%s' "${DIM}" "${RST}")"
+        )
     else
-        printf '  Dashboard:  %shttp://%s:%s%s\n' "${BLU}" "${HOST}" "${HAL0_PORT}" "${RST}"
-        printf '  Chat:       %shttp://%s:3001%s\n' "${BLU}" "${HOST}" "${RST}"
-        printf '  Logs:       %sjournalctl -fu hal0-api%s\n' "${DIM}" "${RST}"
+        SUMMARY_LINES+=(
+            "$(printf 'Dashboard   %shttp://%s:%s%s' "${BLU}" "${HOST}" "${HAL0_PORT}" "${RST}")"
+            "$(printf 'Chat        %shttp://%s:3001%s' "${BLU}" "${HOST}" "${RST}")"
+            "$(printf 'Logs        %sjournalctl -fu hal0-api%s' "${DIM}" "${RST}")"
+        )
     fi
 fi
-printf '\n  Next steps:\n'
-printf '    %shal0 status%s          – system + slot summary\n' "${BOLD}" "${RST}"
-printf '    %shal0 slot list%s       – list configured slots\n' "${BOLD}" "${RST}"
-printf '    %shal0 model list%s      – list known models\n' "${BOLD}" "${RST}"
-printf '    %shal0 config show%s     – inspect /etc/hal0/hal0.toml\n' "${BOLD}" "${RST}"
-printf '\n'
+SUMMARY_LINES+=(
+    ""
+    "$(printf '%sNext steps:%s' "${BOLD}" "${RST}")"
+    "$(printf '  %shal0 status%s         system + slot summary' "${BOLD}" "${RST}")"
+    "$(printf '  %shal0 slot list%s      list configured slots' "${BOLD}" "${RST}")"
+    "$(printf '  %shal0 model list%s     list known models' "${BOLD}" "${RST}")"
+    "$(printf '  %shal0 config show%s    inspect %s/hal0.toml' "${BOLD}" "${RST}" "${ETC_DIR}")"
+)
+ui_box "hal0 is ready" "${SUMMARY_LINES[@]}"
