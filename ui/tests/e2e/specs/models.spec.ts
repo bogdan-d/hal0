@@ -6,12 +6,31 @@
  * assign it to the primary slot via the row's "Assign…" dropdown,
  * then delete it.
  *
- * Note: the UI's HF-pull flow at /models doesn't surface SSE progress
- * inline (only the FirstRun wizard does). The "watch progress" beat
- * in the brief reduces here to: the modal closes, a toast fires, the
- * row appears.
+ * Wire shapes targeted (Wave-3 — see usePullJob.js):
+ *   POST   /api/models/{encodeURIComponent(id)}/pull
+ *     body: {hf_url, quant}
+ *     200:  {job_id, model_id}
+ *   GET    /api/models/{id}/pull/stream            text/event-stream
+ *   GET    /api/models/{id}/pull/status            for reattach (n/a here)
+ *   DELETE /api/models/{encodeURIComponent(id)}    204
+ *   POST   /api/slots/{name}/load                  body: {model: id}
+ *
+ * HF ids carry slashes and case (e.g. `Qwen/Qwen3-4B-GGUF`). Models.vue
+ * optimistically inserts a row with that exact id as both `id` and
+ * `name`, so the row text contains the path and the DELETE / load
+ * payloads carry the case-preserving id verbatim.
+ *
+ * Note: the UI's HF-pull flow at /models doesn't surface inline SSE
+ * progress in the modal (FirstRun owns the progress beat). The "watch
+ * progress" beat in the brief reduces here to: modal closes, toast
+ * fires, the row appears, and the in-flight `usePullJob` is
+ * functional (we mock the stream as an empty 200 stream so the
+ * EventSource opens without exploding).
  */
 import { test, expect, json } from '../fixtures/apiMock'
+
+const HF_ID = 'Qwen/Qwen3-4B-GGUF'
+const ENC = encodeURIComponent(HF_ID)  // 'Qwen%2FQwen3-4B-GGUF'
 
 test('pulls a custom HF model, assigns it to primary, deletes it', async ({
   page,
@@ -28,40 +47,39 @@ test('pulls a custom HF model, assigns it to primary, deletes it', async ({
     status: 'offline',
   })
 
-  // /api/models/pull — Models.vue's flow uses the haloai-style singular
-  // endpoint for both curated and HF pulls. We side-effect: append a
-  // new row to mockState.models keyed off the HF repo path.
-  await page.route('**/api/models/pull', (route) => {
-    const body = JSON.parse(route.request().postData() || '{}')
-    const id = body.hf_url
-      ? body.hf_url.split('/').pop().toLowerCase()
-      : body.model_id || `m-${mockState.models.length + 1}`
-    mockState.models.push({
-      id,
-      name: body.hf_url || id,
-      size_gb: 3.0,
-      architecture: 'llama',
-      quant: body.quant ?? 'Q4_K_M',
-    })
-    return json(route, { ok: true, model_id: id })
+  // POST /api/models/{enc-id}/pull — the shipped wire. Body carries
+  // {hf_url, quant}; the URL path carries the encoded id. Models.vue
+  // does its own optimistic row insert on success, so the mock only
+  // needs to ack with a job_id; the EventSource stream is fulfilled
+  // separately so `usePullJob.attachStream` doesn't throw.
+  let lastPullBody: any = null
+  await page.route(new RegExp(`/api/models/${ENC}/pull$`), (route) => {
+    if (route.request().method() !== 'POST') return json(route, {})
+    lastPullBody = JSON.parse(route.request().postData() || '{}')
+    return json(route, { job_id: 'job-1', model_id: HF_ID })
   })
+  await page.route(new RegExp(`/api/models/${ENC}/pull/stream$`), (route) =>
+    route.fulfill({ status: 200, contentType: 'text/event-stream', body: '' }),
+  )
+  // reattachInFlightPulls hits /pull/status for every row on mount; we
+  // load the page before any row exists, but safe to mock for
+  // defense-in-depth against subsequent navigations.
+  await page.route(new RegExp(`/api/models/${ENC}/pull/status$`), (route) =>
+    json(route, { state: 'idle' }),
+  )
 
-  // DELETE/PUT/GET /api/models/<id> — narrow the glob so it does
-  // not intercept /api/models/pull (which is handled above).
-  await page.route(/\/api\/models\/(?!pull$)[^/]+$/, (route) => {
+  // DELETE /api/models/{enc-id} — case-preserving, slash-encoded. The
+  // backend cascades slot.model = null; mirror that so the spec's
+  // post-delete assertion is meaningful. Also intercept GET on the
+  // same path to keep the apiMock catch-all from getting first dibs.
+  await page.route(new RegExp(`/api/models/${ENC}$`), (route) => {
     if (route.request().method() === 'DELETE') {
-      const url = new URL(route.request().url())
-      const id = decodeURIComponent(url.pathname.split('/').pop()!)
-      mockState.models = mockState.models.filter((m) => m.id !== id)
-      // The UI doesn't cascade-clear slot.model on delete; the
-      // backend would. Mirror that here so the spec's slot-default-
-      // cleared assertion is meaningful.
       for (const s of mockState.status.slots) {
-        if (s.model === id) s.model = null
+        if (s.model === HF_ID) s.model = null
       }
       return route.fulfill({ status: 204 })
     }
-    return json(route, mockState.models[0] || {})
+    return json(route, {})
   })
 
   // /api/slots/<name>/load — record the model that was loaded.
@@ -80,19 +98,22 @@ test('pulls a custom HF model, assigns it to primary, deletes it', async ({
   await page.getByRole('button', { name: /^Pull model$/ }).click()
   await expect(page.locator('#pull-title')).toBeVisible()
   await page.getByRole('tab', { name: /HuggingFace/ }).click()
-  await page.locator('#hf-url').fill('Qwen/Qwen3-4B-GGUF')
+  await page.locator('#hf-url').fill(HF_ID)
   await page.locator('#quant').selectOption('Q4_K_M')
 
   const pullReq = page.waitForRequest(
-    (r) => r.url().endsWith('/api/models/pull') && r.method() === 'POST',
+    (r) => r.url().endsWith(`/api/models/${ENC}/pull`) && r.method() === 'POST',
   )
   await page.locator('[aria-labelledby="pull-title"]')
     .getByRole('button', { name: /^Pull model$/ })
     .click()
   await pullReq
+  expect(lastPullBody?.hf_url).toBe(HF_ID)
+  expect(lastPullBody?.quant).toBe('Q4_K_M')
 
-  // Modal closes after the pull and the row appears. The row text
-  // includes the mock-side `name` (the HF repo path) plus the id.
+  // Modal closes after the pull and the optimistic row appears. The
+  // row text contains the HF repo path (Models.vue:148-153 inserts
+  // {id: hf_url, name: hf_url, _pending: true}).
   await expect(page.locator('#pull-title')).toBeHidden()
   const row = page.locator('tr', { hasText: 'Qwen3-4B-GGUF' })
   await expect(row).toBeVisible()
@@ -104,10 +125,10 @@ test('pulls a custom HF model, assigns it to primary, deletes it', async ({
   await row.locator('select.assign-select').selectOption('primary')
   await assignResp
 
-  expect(lastLoadBody?.model).toBe('qwen3-4b-gguf')
+  expect(lastLoadBody?.model).toBe(HF_ID)
   expect(
     mockState.status.slots.find((s) => s.name === 'primary')?.model,
-  ).toBe('qwen3-4b-gguf')
+  ).toBe(HF_ID)
 
   // Refresh status from the page so the UI's "Used by" cell updates.
   await page.evaluate(async () => {
@@ -118,11 +139,10 @@ test('pulls a custom HF model, assigns it to primary, deletes it', async ({
 
   // ── Delete the model ─────────────────────────────────────────
   const deleteReq = page.waitForRequest(
-    (r) => /\/api\/models\/qwen3-4b-gguf$/.test(r.url()) && r.method() === 'DELETE',
+    (r) => r.url().endsWith(`/api/models/${ENC}`) && r.method() === 'DELETE',
   )
-  // The delete button's aria-label is `Delete <name>` where <name>
-  // is the model's display name (the HF repo path here).
-  await row.getByRole('button', { name: /Delete Qwen\/Qwen3-4B-GGUF/i }).click()
+  // Delete button's aria-label is `Delete <name>` (Models.vue:444).
+  await row.getByRole('button', { name: `Delete ${HF_ID}` }).click()
   // ConfirmDialog: when 1 slot uses the model, no type-to-confirm —
   // a single "Delete model" button does it.
   await page.getByRole('button', { name: /^Delete model$/ }).click()
