@@ -51,15 +51,11 @@ class _RecordingCtx:
 
     async def __aenter__(self) -> None:
         self._manager.events.append(("enter", self._slot_name))
-        self._manager._counts[self._slot_name] = (
-            self._manager._counts.get(self._slot_name, 0) + 1
-        )
+        self._manager._counts[self._slot_name] = self._manager._counts.get(self._slot_name, 0) + 1
 
     async def __aexit__(self, *_: Any) -> None:
         self._manager.events.append(("exit", self._slot_name))
-        self._manager._counts[self._slot_name] = (
-            self._manager._counts.get(self._slot_name, 1) - 1
-        )
+        self._manager._counts[self._slot_name] = self._manager._counts.get(self._slot_name, 1) - 1
 
 
 def _make_dispatcher(
