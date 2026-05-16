@@ -114,6 +114,11 @@ fi
 
 trap 'err "install failed at line ${LINENO} during: ${CURRENT_STEP:-pre-init}"
     case "${CURRENT_STEP}" in
+        "Pre-flight checks")
+            warn "Recovery: free space under ${VAR_DIR:-/var/lib/hal0} (need ≥20 GB),"
+            warn "         or stop the process holding the port and rerun."
+            warn "         Set HAL0_PORT=<other> to bind a different API port;"
+            warn "         OpenWebUI :3001 is hardcoded in the systemd unit." ;;
         "Python environment")
             warn "Recovery: scroll up to the pip output for the real error."
             warn "         Retry with HAL0_PYTHON=python3.12 sudo bash install.sh" ;;
@@ -166,6 +171,21 @@ fi
 # preflight_docker is soft (always returns 0 with a warning when
 # Docker is absent), so we don't need to guard the call.
 preflight_docker
+
+# Disk + port-collision checks only matter for the live install — dev
+# mode lays files under $PWD/.hal0ai and never binds 8080/3001. We
+# aggregate both check results (so the operator sees *both* failures
+# in one run instead of fixing disk → rerun → discover port) and then
+# trip a bare `false` so the ERR trap fires with the contextual
+# "Pre-flight checks" recovery hint above.
+if [[ "${DEV_MODE}" -eq 0 ]]; then
+    pf_rc=0
+    preflight_disk 20 "${VAR_DIR}"            || pf_rc=$?
+    preflight_ports "${HAL0_PORT}" 3001       || pf_rc=$?
+    if (( pf_rc != 0 )); then
+        false
+    fi
+fi
 
 ui_step "Filesystem layout"
 
@@ -521,13 +541,52 @@ if [[ -z "${HAL0_NO_PROBE:-}" ]]; then
     if [[ "${DEV_MODE}" -eq 1 ]]; then
         HAL0_HOME_FOR_PROBE="${PREFIX}"
     fi
+    # Inline Python: probe → write hardware.json → emit 4 hardware cards
+    # → (if no slots/primary.toml exists yet) render one from
+    # recommend_primary_slot() so the operator has a sensible default
+    # waiting after `hal0 model pull <id>`. PRIMARY_TOML is exported so
+    # the heredoc doesn't need to know the dev-mode prefix.
+    PRIMARY_TOML="${ETC_DIR}/slots/primary.toml" \
     HAL0_HOME="${HAL0_HOME_FOR_PROBE}" "${VENV_DIR}/bin/python" - <<'PY'
-from hal0.hardware.probe import HardwareProbe
+import os
+from pathlib import Path
+
+from hal0.hardware.probe import HardwareProbe, format_cards
+from hal0.hardware.recommend import recommend_primary_slot
+
 p = HardwareProbe()
 info = p.probe()
 out = p.write(info)
 print(f"  wrote {out}")
-print(f"  ram_mb={info.ram_mb}  unified={info.unified_memory_mb}  gpus={len(info.gpus)}  npu={info.npu.present}")
+for line in format_cards(info):
+    print(line)
+
+# Pre-populate slots/primary.toml if absent. Idempotent: never overwrite
+# an operator-edited file. Disabled by default — they pull a model and
+# flip enabled = true when ready.
+target = Path(os.environ["PRIMARY_TOML"])
+if target.exists():
+    print(f"  {target} exists — left alone")
+else:
+    rec = recommend_primary_slot(info)
+    meta = rec.pop("_meta", {})
+    import tomli_w  # hal0 install dep, always available here
+    target.parent.mkdir(parents=True, exist_ok=True)
+    header = (
+        "# hal0 primary slot — recommended for this hardware.\n"
+        "# Created by install.sh on first install. Edit freely; the\n"
+        "# installer will not overwrite this file on subsequent runs.\n"
+        "#\n"
+        f"# Backend rationale: {meta.get('rationale_backend', '')}\n"
+        f"# Model rationale:   {meta.get('rationale_model', '')}\n"
+        f"# Memory budget:     ~{meta.get('vram_budget_gb', '?')} GB\n"
+        "#\n"
+        "# Next: `hal0 model pull " + rec['model']['default'] + "`\n"
+        "#       then flip enabled = true and `systemctl start hal0-slot@primary`\n"
+        "\n"
+    )
+    target.write_text(header + tomli_w.dumps(rec))
+    print(f"  wrote {target}  (backend={rec['backend']} model={rec['model']['default']})")
 PY
 else
     warn "skipping probe (HAL0_NO_PROBE=1)"
