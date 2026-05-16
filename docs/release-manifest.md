@@ -79,14 +79,20 @@ If `cosign` is not on `PATH` the updater raises a typed error
 (`system.update_cosign_missing`) with install hints. It does **not**
 fall back to unsigned acceptance.
 
-### Documented gap: `HAL0_UPDATE_SKIP_COSIGN`
+### Pre-release escape hatch: `HAL0_UPDATE_SKIP_COSIGN`
 
 For the Phase-2 prototype + LXC smoke (PLAN §17 risk #2 — "prototype in
 phase 2 against a throwaway release, not phase 5"), setting
 `HAL0_UPDATE_SKIP_COSIGN=1` bypasses the verify step with a loud WARN
-log. This gap **must close before v1 ships** — the production install
-path on `hal0.dev` must produce a real GH-Actions-signed artifact, and
-the env var must be removed (or hard-fail) in `release/v1.0.0`.
+log.
+
+The env var is **gated to dev (`0.x`) and pre-release builds** (any
+version containing a `-` such as `1.0.0-rc1`, `1.0.0-dev`). On stable
+v1+ tags it is silently ignored — the updater logs
+`updater.cosign_skip_ignored_on_stable` and proceeds with mandatory
+verification. There is no operator override on stable: if you need to
+bypass cosign on a stable build, you have to either downgrade the
+binary to a pre-release build or fix your cosign install.
 
 ## Filesystem effects of `apply()`
 

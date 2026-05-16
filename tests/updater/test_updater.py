@@ -36,7 +36,9 @@ from hal0.updater import (
 )
 from hal0.updater.updater import (
     _atomic_symlink_swap,
+    _cosign_skip,
     _current_symlink,
+    _is_pre_release,
     _parse_manifest,
     _previous_record,
     _versioned_install_dir,
@@ -510,3 +512,46 @@ def test_check_uses_per_channel_url(
     info_nightly = asyncio.run(Updater(channel="nightly").check())
     assert info_stable.channel == "stable"
     assert info_nightly.channel == "nightly"
+
+
+# ── HAL0_UPDATE_SKIP_COSIGN gate (pre-release only) ──────────────────────────
+
+
+@pytest.mark.parametrize(
+    "version,expected",
+    [
+        ("0.0.0", True),
+        ("0.1.0", True),
+        ("0.99.0", True),
+        ("1.0.0-rc1", True),
+        ("1.0.0-dev", True),
+        ("2.3.4-rc.5", True),
+        ("1.0.0", False),
+        ("1.2.3", False),
+        ("2.0.0", False),
+    ],
+)
+def test_is_pre_release(version: str, expected: bool) -> None:
+    """0.x and any version with a hyphen are pre-release; bare 1+ is stable."""
+    assert _is_pre_release(version) is expected
+
+
+def test_cosign_skip_honored_on_pre_release(monkeypatch: pytest.MonkeyPatch) -> None:
+    """On a pre-release build, HAL0_UPDATE_SKIP_COSIGN=1 disables verification."""
+    monkeypatch.setattr("hal0.__version__", "1.0.0-rc1")
+    monkeypatch.setenv("HAL0_UPDATE_SKIP_COSIGN", "1")
+    assert _cosign_skip() is True
+
+
+def test_cosign_skip_ignored_on_stable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """On stable v1+, HAL0_UPDATE_SKIP_COSIGN=1 is silently dropped."""
+    monkeypatch.setattr("hal0.__version__", "1.0.0")
+    monkeypatch.setenv("HAL0_UPDATE_SKIP_COSIGN", "1")
+    assert _cosign_skip() is False
+
+
+def test_cosign_skip_false_when_env_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No env, no skip — regardless of build channel."""
+    monkeypatch.setattr("hal0.__version__", "1.0.0-rc1")
+    monkeypatch.delenv("HAL0_UPDATE_SKIP_COSIGN", raising=False)
+    assert _cosign_skip() is False
