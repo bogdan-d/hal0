@@ -28,8 +28,24 @@ fi
 info()  { printf "${GRN}✔${RST}  %s\n" "$*"; }
 warn()  { printf "${YEL}!${RST}  %s\n" "$*" >&2; }
 err()   { printf "${RED}✗${RST}  %s\n" "$*" >&2; }
-step()  { printf "\n${BOLD}── %s${RST}\n" "$*"; }
+# CURRENT_STEP is read by the ERR trap to surface step-specific
+# recovery hints. step() updates it; trap below dispatches on it.
+CURRENT_STEP=""
+step()  { CURRENT_STEP="$*"; printf "\n${BOLD}── %s${RST}\n" "$*"; }
 die()   { err "$*"; exit 1; }
+
+# Poll `systemctl is-active` for up to `timeout` seconds. Returns 0 the
+# moment the unit reports active, 1 on timeout. Use instead of a flat
+# `sleep N; is-active` so slow first boots (OpenWebUI pulling images,
+# Caddy provisioning TLS) don't get falsely flagged as failures.
+wait_active() {
+    local unit="$1" timeout="${2:-15}" deadline=$((SECONDS+timeout))
+    while (( SECONDS < deadline )); do
+        systemctl is-active --quiet "${unit}" && return 0
+        sleep 0.5
+    done
+    return 1
+}
 
 DEV_MODE=0
 NO_START=0
@@ -77,7 +93,21 @@ fi
 VENV_DIR="${PREFIX}/.venv"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-trap 'err "install failed at line ${LINENO}. See output above."; exit 1' ERR
+trap 'err "install failed at line ${LINENO} during: ${CURRENT_STEP:-pre-init}"
+    case "${CURRENT_STEP}" in
+        "Python environment")
+            warn "Recovery: scroll up to the pip output for the real error."
+            warn "         Retry with HAL0_PYTHON=python3.12 sudo bash install.sh" ;;
+        "Service start")
+            warn "Recovery: journalctl -u hal0-api -n 60" ;;
+        Auth*)
+            warn "Recovery: rerun with HAL0_ADMIN_USER=... HAL0_ADMIN_PASSWORD=... set,"
+            warn "         or drop --auth=basic to install in the trusted-LAN posture." ;;
+        "Hardware probe")
+            warn "Recovery: rerun with HAL0_NO_PROBE=1 and file an issue with"
+            warn "         /etc/hal0/hardware.json (if present) attached." ;;
+    esac
+    exit 1' ERR
 
 step "Pre-flight checks"
 
@@ -479,8 +509,7 @@ if [[ "${DEV_MODE}" -eq 1 || "${NO_START}" -eq 1 ]]; then
     warn "  start manually: ${HAL0_BIN} serve --host 0.0.0.0 --port ${HAL0_PORT}"
 else
     systemctl enable --now hal0-api
-    sleep 1
-    if systemctl is-active --quiet hal0-api; then
+    if wait_active hal0-api 15; then
         info "hal0-api is running"
     else
         warn "hal0-api failed to start; check 'journalctl -u hal0-api -n 40'"
@@ -491,8 +520,7 @@ else
         # OpenWebUI can take a moment to come up while it pulls the
         # image / initialises its sqlite db. Don't fail the installer
         # on a slow first boot; just surface the status.
-        sleep 2
-        if systemctl is-active --quiet hal0-openwebui; then
+        if wait_active hal0-openwebui 30; then
             info "hal0-openwebui is running (chat at :3001)"
         else
             warn "hal0-openwebui not yet active; check 'journalctl -u hal0-openwebui -n 40'"
