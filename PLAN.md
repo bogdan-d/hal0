@@ -19,19 +19,28 @@ home installs, OpenAI-compatible inference, bundled OpenWebUI chat.
 - **Core inference platform**
   - OpenAI-compatible API (`/v1/chat/completions`, `/v1/embeddings`,
     `/v1/rerankings`, `/v1/audio/transcriptions`, `/v1/audio/speech`,
-    `/v1/models`)
+    `/v1/images/generations`, `/v1/models`)
   - Slot lifecycle (load / unload / restart / swap / spawn / terminate)
     on `hal0-slot@.service` template units
   - Model registry, downloads, assignment to slots
   - Dispatcher: registry-aware routing with cold-cache prefetch and
     upstream fallback
-  - Provider abstraction with **four** providers in v1:
+  - Provider abstraction with **five** providers in v1:
     - `llama.cpp` (Vulkan default, ROCm opt-in) — chat / embed / rerank / vision
     - `flm` (AMD NPU, optional) — chat / embed / ASR multiplex
     - `moonshine` (STT) — CPU/Vulkan, OpenAI-compatible
     - `kokoro` (TTS) — CPU/Vulkan
+    - `comfyui` (ROCm) — image gen, OpenAI-compatible `/v1/images/generations`
+      (shipped ahead of schedule via Team K, 2026-05-15 — `1a8a480`, `76b7f8b`)
   - External-LLM upstreams (OpenRouter, Anthropic, OpenAI, custom
     OpenAI-compatible)
+- **Auth + reverse proxy** (shipped ahead of schedule via Team J,
+  2026-05-15 — `ba79427`, `f62902c`)
+  - Default install posture `--auth=off`; opt-in `--auth=basic` brings
+    up a Caddy reverse proxy with basic_auth on the dashboard, bearer
+    tokens on `/v1/*`, OpenWebUI SSO via trusted-header
+  - `hal0.local` reachable on the LAN (mDNS via avahi); HTTPS via
+    Caddy's internal CA or Let's Encrypt when a public hostname is set
 - **Dashboard UI** (Vue 3 + Pinia + Tailwind 4)
   - 9 views: Dashboard, Slots, Models, Hardware, Logs, Settings,
     Providers, FirstRun, plus a not-found / error shell
@@ -67,10 +76,8 @@ home installs, OpenAI-compatible inference, bundled OpenWebUI chat.
 
 - Memory subsystem
 - MCP support
-- Kyuzo image generation (ComfyUI provider)
 - Benchmarks UI + Presets UI
 - AUR PKGBUILD + Ubuntu PPA
-- Caddy reverse proxy + auth + `hal0.local` mDNS
 - Light mode toggle
 
 ### Strip (gone for good unless re-justified)
@@ -361,6 +368,22 @@ Delete entirely (source + folder):
 `HAL0_CHANNEL`, `HAL0_AUTO_PULL`, `HAL0_INSTALL_DIR`, `HAL0_PORT`,
 `HAL0_OPENWEBUI_PORT`.
 
+### Installer overhaul (shipped 2026-05-15)
+
+The installer got a UX pass that lands in v1:
+
+- ASCII banner + step counter + sodium-amber spinner with last-line
+  tail (`86befb1` — `lib/ui.sh` with banner / step / spinner / box)
+- Preflight extracted to `lib/preflight.sh` with contextual ERR-trap
+  recovery hints (`c392859`); disk check walks up to the deepest
+  existing ancestor before failing (`a34293d`)
+- Hardware cards rendered inline from `format_cards()`, primary slot
+  pre-populated from `recommend_primary_slot()` (`c865547`, `13a0764`)
+- `hal0 doctor` subcommand for re-runnable pre-flight after install
+  (`c16422b`)
+- Post-auth self-test that round-trips through Caddy (`f59bbf1`)
+- "Wow finish": live hello, QR code, reachability summary (`f10c99d`)
+
 ### First-run wizard (dashboard route)
 
 Triggers when `/var/lib/hal0/models/` is empty. Page asks:
@@ -504,10 +527,18 @@ v1 images:
 - `ghcr.io/hal0ai/hal0-toolbox-flm:v1` (NPU)
 - `ghcr.io/hal0ai/hal0-toolbox-moonshine:v1`
 - `ghcr.io/hal0ai/hal0-toolbox-kokoro:v1`
+- `ghcr.io/hal0ai/hal0-toolbox-comfyui:v1` (image gen, ROCm — added via
+  Team K)
 
 Each tagged + signed (cosign). hal0 release manifest references specific
 image digests, so an update pulls the exact images known-good for that
 hal0 version. Old images retained for rollback.
+
+**Manifest digest status (2026-05-15):** `manifest.json` now pins real
+sha256 digests for vulkan, rocm, moonshine, kokoro, and comfyui
+(`3449b2c chore(manifest): pin comfyui digest + refresh others`). The
+`flm` digest stays `null` until that toolbox publishes successfully;
+the runtime falls back to pulling by tag with a warning in that case.
 
 When kyuz0 PRs land, mirror back to upstream and re-converge.
 
