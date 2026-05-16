@@ -490,10 +490,138 @@ class HardwareProbe:
         return target
 
 
+# ── Card rendering ────────────────────────────────────────────────────────────
+#
+# format_cards() turns a HardwareInfo into 4 single-line summary cards
+# suitable for the installer's "Hardware probe" step. Pure presentation —
+# kept here rather than in config/schema.py so the Pydantic model stays
+# free of stdout / ANSI concerns.
+
+# Sodium amber #FFB000 — same accent ui.sh uses (256-color 214). Match
+# the bash side so the installer's visual language stays consistent
+# across step → cards → final box.
+_AMBER = "\033[38;5;214m"
+_DIM = "\033[2m"
+_RST = "\033[0m"
+
+
+def _plain_mode() -> bool:
+    """Mirror installer/lib/ui.sh degradation rules.
+
+    Active when HAL0_PLAIN=1, NO_COLOR is set (per https://no-color.org),
+    or when stdout is not a TTY (CI logs, piped output).
+    """
+    import sys
+
+    if os.environ.get("HAL0_PLAIN") == "1":
+        return True
+    if os.environ.get("NO_COLOR"):
+        return True
+    return not sys.stdout.isatty()
+
+
+def _gb(mb: int) -> str:
+    """Format MiB as 'N GB' for cards (1024-based; matches dashboard)."""
+    if mb <= 0:
+        return "—"
+    return f"{round(mb / 1024)} GB"
+
+
+def format_cards(info: HardwareInfo, *, plain: bool | None = None) -> list[str]:
+    """Render a HardwareInfo as 4 single-line cards (CPU / GPU / NPU / DISK).
+
+    Each card is two padded columns plus a description, e.g.::
+
+      ■  CPU   AMD Ryzen 7 PRO 8745HS              8c · 16t
+      ■  GPU   Radeon 890M (Strix Halo)            UMA · 96 GB unified
+      ■  NPU   AMD NPU (XDNA, amdxdna)             present
+      ■  DISK  /var/lib/hal0                       412 GB free
+
+    A leading '■' (ASCII '*' in plain mode) is amber-coloured. Absent
+    components render muted: "GPU   none detected" and "NPU   —".
+
+    Parameters
+    ----------
+    info:
+        A populated HardwareInfo from HardwareProbe.probe().
+    plain:
+        Override the auto-detected plain mode (None = auto via env / TTY).
+
+    Returns
+    -------
+    list[str]
+        Four card lines, no trailing newline. Caller joins with '\\n'.
+    """
+    plain = _plain_mode() if plain is None else plain
+    a = "" if plain else _AMBER
+    d = "" if plain else _DIM
+    r = "" if plain else _RST
+    glyph = "*" if plain else "■"
+
+    def card(label: str, name: str, desc: str, *, muted: bool = False) -> str:
+        # 5-char label column ("CPU  ", "GPU  ", "NPU  ", "DISK "), then
+        # 36-char name column, then a free-form description. The name
+        # column gets truncated rather than overflowing into desc.
+        name = (name or "—")[:36].ljust(36)
+        if muted:
+            return f"  {d}{glyph}  {label:<5} {name}  {desc}{r}"
+        return f"  {a}{glyph}{r}  {label:<5} {name}  {d}{desc}{r}"
+
+    # CPU
+    cpu_name = info.cpu_model or "unknown"
+    cpu_desc = f"{info.cpu_cores}c · {info.cpu_threads}t · {_gb(info.ram_mb)} RAM"
+    cpu_line = card("CPU", cpu_name, cpu_desc)
+
+    # GPU — pick the first detected; flag UMA when unified == ram (i.e.
+    # AMD iGPU sharing the host pool). Discrete GPUs report vram_mb that
+    # isn't part of unified_memory_mb.
+    if not info.gpus:
+        gpu_line = card("GPU", "none detected", "", muted=True)
+    else:
+        g = info.gpus[0]
+        bits = []
+        if g.vram_mb > 0:
+            # Strix Halo etc.: the "vram" pool is GTT shared with system
+            # RAM. Show "UMA · N GB unified" so users don't worry the
+            # dashboard double-counts.
+            if g.vendor == "amd" and info.unified_memory_mb >= info.ram_mb * 0.95:
+                bits.append(f"UMA · {_gb(info.unified_memory_mb)} unified")
+            else:
+                bits.append(f"{_gb(g.vram_mb)} VRAM")
+        if g.compute_capable:
+            # Vendor-specific compute name. nvidia-smi presence implies
+            # CUDA; AMD uses ROCm. Anything else falls back to a generic
+            # "compute" label rather than mis-attributing CUDA.
+            if g.vendor == "nvidia":
+                bits.append("CUDA")
+            elif g.vendor == "amd":
+                bits.append("ROCm")
+            else:
+                bits.append("compute")
+        elif g.vulkan_capable:
+            bits.append("Vulkan")
+        gpu_line = card("GPU", g.name or g.vendor or "unknown", " · ".join(bits) or "detected")
+
+    # NPU
+    if info.npu.present:
+        npu_desc = f"{info.npu.driver}" if info.npu.driver else "present"
+        npu_line = card("NPU", info.npu.name or info.npu.vendor or "NPU", npu_desc)
+    else:
+        npu_line = card("NPU", "—", "", muted=True)
+
+    # Disk — show the var-lib path + free space; the installer step ran
+    # disk_free_mb against /var/lib/hal0 (or its parent on a fresh install).
+    disk_path = "/var/lib/hal0"
+    disk_line = card("DISK", disk_path, f"{_gb(info.disk_free_mb)} free")
+
+    return [cpu_line, gpu_line, npu_line, disk_line]
+
+
 __all__ = [
     "GPUInfo",
     "HardwareInfo",
     "HardwareProbe",
     "HardwareProbeError",
     "NPUInfo",
+    "format_cards",
 ]
