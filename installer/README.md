@@ -5,39 +5,52 @@ Non-interactive installer for hal0 — the open-source home AI inference platfor
 ## Quick start
 
 ```sh
-# Standard install (requires root/sudo, systemd, Docker, x86_64, ≥20GB free)
-curl -fsSL https://hal0.dev/install | bash
-
-# Or from the repo:
+# From a clone of this repo:
 sudo bash installer/install.sh
 ```
 
+> **Phase 1 only.** The one-liner `curl -fsSL https://hal0.dev/install | bash`
+> will ship once the `hal0.dev/install` endpoint is wired; until then,
+> `git clone` + `sudo bash` is the supported entry point.
+
 ## What the installer does
 
-1. **Pre-flight checks** — systemd present, x86_64, Docker accessible, ≥20GB free in `/var/lib`, ports 8080 and 3001 not in use.
-2. **System user** — creates `hal0` system user (no shell, no home).
-3. **FHS layout** — creates `/usr/lib/hal0/`, `/etc/hal0/slots/`, `/var/lib/hal0/` and subdirs.
-4. **Installs hal0** — copies Python package + UI dist into `/usr/lib/hal0/0.0.0-dev/`, symlinks `current →` that dir.
-5. **Config defaults** — writes `/etc/hal0/hal0.toml`, `api.env`, `openwebui.env`, and slot skeletons for `primary`, `embed`, `stt`, `tts`. Existing files are **never clobbered** on re-run.
-6. **systemd units** — copies `hal0-api.service`, `hal0-openwebui.service`, `hal0-slot@.service` to `/etc/systemd/system/`, reloads daemon, enables and starts `hal0-api` + `hal0-openwebui`.
-7. **Prints URLs** and next steps.
+1. **Pre-flight checks** — confirms Python 3.11–3.14 is on `$PATH`, systemd is present (skipped in `--dev`), and probes for Docker (a soft warning if missing; slot launches will fail until it's installed).
+2. **Privilege model** — runs as `root` (re-execs under `sudo` if needed). The slot template runs the toolbox containers as root by design — the container itself is the sandbox boundary, not the host user. Override with `HAL0_USER=...` if you want a different unit user, but the default is intentional.
+3. **Layout** — creates `/opt/hal0/` (code + venv), `/etc/hal0/{,slots}` (config), `/var/lib/hal0/{models,registry,slots,openwebui,cache}` (state). In `--dev` everything lands under `$PWD/.hal0ai/` instead.
+4. **Installs hal0** — creates a venv at `/opt/hal0/.venv/` and `pip install -e`'s the checkout into it. There is no versioned install dir or `current` symlink yet — the venv tracks the checkout in editable mode.
+5. **Builds the dashboard UI** — runs `npm install && npm run build` in `ui/` if `ui/dist/` is missing and `npm` is available. Skipped (with a warning) when `npm` is absent.
+6. **Config defaults** — writes `/etc/hal0/hal0.toml`, `api.env`, `openwebui.env` (rendered by `hal0.openwebui.env_writer`), and slot skeletons for `primary`, `embed`, `stt`, `tts`. Existing files are **never clobbered** on re-run.
+7. **systemd units** — writes `hal0-api.service`, copies `hal0-openwebui.service` and `hal0-slot@.service` from `packaging/systemd/` to `/etc/systemd/system/`, reloads the daemon, enables and starts `hal0-api` + `hal0-openwebui` (unless `--no-start`).
+8. **Hardware probe + final summary** — prints detected backends and reachable URLs. Skip the probe with `HAL0_NO_PROBE=1`.
 
 The installer is **idempotent** — safe to re-run after a partial failure or to update configuration defaults.
 
 ## Environment variables
 
+These are the variables `installer/install.sh` actually reads:
+
 | Variable | Default | Description |
 |---|---|---|
-| `HAL0_CHANNEL` | `stable` | Update channel (`stable` or `nightly`) |
-| `HAL0_AUTO_PULL` | `0` | Pull toolbox + OpenWebUI images on install (Phase 2) |
-| `HAL0_INSTALL_DIR` | `/usr/lib/hal0` | Override code installation directory |
+| `HAL0_PREFIX` | `/opt/hal0` (or `$PWD/.hal0ai` in `--dev`) | Installation root (venv + code) |
 | `HAL0_PORT` | `8080` | hal0 API port |
-| `HAL0_OPENWEBUI_PORT` | `3001` | OpenWebUI port |
+| `HAL0_USER` | `root` | systemd unit user (see §What the installer does) |
+| `HAL0_PYTHON` | `python3` | Python interpreter used to build the venv |
+| `HAL0_NO_PROBE` | _(unset)_ | Set to `1` to skip the hardware probe at the end |
+| `HAL0_TOOLBOX_IMAGE_VULKAN` | _(unset)_ | Override the Vulkan toolbox image ref written into `api.env` |
+| `HAL0_TOOLBOX_IMAGE_ROCM` | _(unset)_ | Override the ROCm toolbox image ref written into `api.env` |
+| `HAL0_HOSTNAME` | `hal0.local` | `--auth=basic` only: public hostname used in the Caddyfile |
+| `HAL0_TLS_EMAIL` | `admin@$HAL0_HOSTNAME` | `--auth=basic` only: contact email for Let's Encrypt (when not `tls internal`) |
+| `HAL0_ADMIN_USER` | _(prompted)_ | `--auth=basic` only: admin username for Caddy basic_auth |
+| `HAL0_ADMIN_PASSWORD` | _(prompted)_ | `--auth=basic` only: admin password (hashed by `caddy hash-password`) |
+| `HAL0_OPENWEBUI_PORT` † | `3001` | OpenWebUI host port — **dev mode only** |
+
+† `HAL0_OPENWEBUI_PORT` is honored by `scripts/dev-bootstrap.sh` (the dev-mode launcher). The installed `hal0-openwebui.service` hardcodes `:3001`; to change it post-install, edit `/etc/systemd/system/hal0-openwebui.service` and reload.
 
 Example:
 
 ```sh
-HAL0_PORT=9090 HAL0_OPENWEBUI_PORT=3002 sudo bash installer/install.sh
+HAL0_PORT=9090 sudo bash installer/install.sh
 ```
 
 ## Authentication (`--auth=basic`)
