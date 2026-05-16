@@ -114,13 +114,50 @@ sudo systemctl restart hal0-api hal0-openwebui
 
 ## Dev mode (`--dev`)
 
-Runs the full installer logic but lays everything under `$PWD/hal0-home` instead of FHS paths. systemd units are **not** installed or enabled — they are written to `$PWD/hal0-home/etc/systemd/system/` for inspection only.
+Runs the full installer logic but lays everything under `$PWD/.hal0ai/` instead of FHS paths. systemd units are **not** installed or enabled — they are written to `$PWD/.hal0ai/etc/systemd/system/` for inspection only.
 
 ```sh
 bash installer/install.sh --dev
 ```
 
 Use `scripts/dev-bootstrap.sh` to actually start services during development.
+
+### `--dev` mode limitations
+
+`--dev` is a contributor convenience, not a runtime path. The installer writes the same systemd units (`hal0-api.service`, `hal0-slot@.service`, `hal0-openwebui.service`) into the dev tree, but it does **not** register them with the host's systemd. Concretely:
+
+- Units land in `$PWD/.hal0ai/etc/systemd/system/`.
+- The host's `systemctl` only searches `/etc/systemd/system/` and `/usr/lib/systemd/system/`, so it cannot see them.
+- Any flow that ends in `systemctl start hal0-slot@<name>` will fail with:
+
+  ```
+  Failed to start hal0-slot@primary.service: Unit hal0-slot@primary.service not found.
+  ```
+
+  In particular, `hal0 slot create && hal0 slot load` cannot bring a slot up in `--dev`.
+
+Two ways to resolve this, depending on what you're trying to do:
+
+1. **Just do a real install.** This is the supported runtime path:
+
+   ```sh
+   sudo bash installer/install.sh
+   ```
+
+   Real install puts units under `/etc/systemd/system/`, runs `systemctl daemon-reload`, and `hal0 slot load` works end-to-end.
+
+2. **Or link the dev units into the system search path.** Keeps the dev tree as the source of truth, but tells the host systemd where to find the units:
+
+   ```sh
+   sudo systemctl link "$PWD/.hal0ai/etc/systemd/system/hal0-slot@.service"
+   sudo systemctl link "$PWD/.hal0ai/etc/systemd/system/hal0-api.service"
+   sudo systemctl link "$PWD/.hal0ai/etc/systemd/system/hal0-openwebui.service"
+   sudo systemctl daemon-reload
+   ```
+
+   After that, `hal0 slot create && hal0 slot load` works against the dev tree. Edits to the linked unit files take effect after another `systemctl daemon-reload`.
+
+The installer prints the same warning block at the end of every `--dev` run as a reminder. Tracked under harness finding #6 / task #24.
 
 ## Uninstall
 
