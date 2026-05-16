@@ -19,6 +19,7 @@ need a live systemd to exercise the lifecycle.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 from collections.abc import Iterator
 from pathlib import Path
@@ -465,10 +466,8 @@ async def test_state_stream_subscriber_cleaned_up_on_close(
         # Cancel the pending __anext__ so closing the generator doesn't
         # raise from a still-awaiting queue.get().
         next_task.cancel()
-        try:
+        with contextlib.suppress(asyncio.CancelledError, StopAsyncIteration):
             await next_task
-        except (asyncio.CancelledError, StopAsyncIteration):
-            pass
         await agen.aclose()
         assert len(sm._subscribers) == before, (
             f"subscriber leaked: {len(sm._subscribers)} (was {before})"

@@ -18,9 +18,9 @@ from pathlib import Path
 import pytest
 
 from hal0.auth.tokens import (
+    SCHEMA_VERSION,
     DuplicateLabel,
     InvalidScope,
-    SCHEMA_VERSION,
     TokenNotFound,
     TokenStore,
     TokenStoreError,
@@ -87,7 +87,7 @@ def test_verify_round_trip(store: TokenStore) -> None:
 
 
 def test_verify_wrong_secret(store: TokenStore) -> None:
-    tok, raw = store.create(label="bridge", scope="all")
+    _tok, raw = store.create(label="bridge", scope="all")
     # Tamper with the secret half but keep the id half so we hit the
     # right hash slot before failing argon2 verify.
     prefix, _, _secret = raw.rpartition(".")

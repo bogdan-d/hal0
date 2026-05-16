@@ -10,9 +10,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 import structlog
-from fastapi import FastAPI
-
-from fastapi import Depends
+from fastapi import Depends, FastAPI
 
 from hal0 import __version__
 from hal0.api.middleware import error_codes, request_id
@@ -377,6 +375,7 @@ def _mount_dashboard(app: FastAPI) -> None:
     """
     import os
     from pathlib import Path
+
     from fastapi.responses import FileResponse, Response
     from fastapi.staticfiles import StaticFiles
 

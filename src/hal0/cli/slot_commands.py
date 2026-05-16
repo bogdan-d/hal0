@@ -19,7 +19,6 @@ from hal0.cli._shared import (
     _api_unreachable,
     api_delete,
     api_get,
-    api_patch,
     api_post,
     api_put,
     die,

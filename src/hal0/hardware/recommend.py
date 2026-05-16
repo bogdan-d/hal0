@@ -22,7 +22,6 @@ from typing import Any
 
 from hal0.config.schema import HardwareInfo
 
-
 # Curated chat models suitable for the primary slot, ordered from
 # largest-context / most capable down to the smallest. We pick the
 # largest model whose ``vram_gb_min`` fits the detected hardware. All

@@ -32,8 +32,8 @@ from typing import Any
 import httpx
 import structlog
 
-from hal0.errors import Hal0Error
 from hal0.config import paths as _paths
+from hal0.errors import Hal0Error
 
 log = structlog.get_logger(__name__)
 

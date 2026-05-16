@@ -118,7 +118,6 @@ def _local_live_stats(request: Request) -> dict[str, Any]:
     plus a ``gpu_util`` fraction. Returned values may be ``None`` when a
     counter isn't available on this host (e.g. no AMD/NVIDIA GPU).
     """
-    import asyncio
 
     stats = getattr(request.app.state, "hardware_stats", None)
     if stats is None:

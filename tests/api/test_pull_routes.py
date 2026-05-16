@@ -8,7 +8,6 @@ write, not the HTTP streaming itself (that's tested separately in
 
 from __future__ import annotations
 
-import asyncio
 import time
 import tomllib
 from collections.abc import Iterator
@@ -22,7 +21,6 @@ from fastapi.testclient import TestClient
 from hal0.api import create_app
 from hal0.registry import pull as pull_module
 from hal0.registry.pull import PullJob
-
 
 # ── shared fixtures ─────────────────────────────────────────────────────────
 

@@ -34,6 +34,7 @@ stays intact if the process dies mid-rename.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import secrets
 import time
@@ -374,13 +375,11 @@ class TokenStore:
             if not verify_password(tok.hash, secret):
                 return None
             tok.last_used_at = _now_iso()
-            try:
+            # Don't let a metadata-write failure 401 a valid token —
+            # the request can still be served; the timestamp is a
+            # convenience, not a security boundary.
+            with contextlib.suppress(TokenStoreError):
                 self._save()
-            except TokenStoreError:
-                # Don't let a metadata-write failure 401 a valid token —
-                # the request can still be served; the timestamp is a
-                # convenience, not a security boundary.
-                pass
             return tok
         return None
 
@@ -415,14 +414,14 @@ def _utcnow_unix() -> float:
 
 
 __all__ = [
+    "SCHEMA_VERSION",
+    "VALID_SCOPES",
     "DuplicateLabel",
     "InvalidScope",
-    "SCHEMA_VERSION",
     "Token",
     "TokenNotFound",
     "TokenStore",
     "TokenStoreError",
-    "VALID_SCOPES",
     "auth_enabled",
     "default_token_store_path",
     "get_or_create_store",

@@ -307,11 +307,11 @@ async def require_admin(
 
 
 __all__ = [
+    "PUBLIC_PATHS",
     "AuthForbidden",
     "AuthIdentity",
     "AuthInvalid",
     "AuthRequired",
-    "PUBLIC_PATHS",
     "require_admin",
     "require_token",
     "require_token_unless_public",

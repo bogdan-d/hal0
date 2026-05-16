@@ -88,7 +88,7 @@ async def _openwebui_is_active() -> bool:
         return False
     try:
         rc = await asyncio.wait_for(proc.wait(), timeout=2.0)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         proc.kill()
         return False
     return rc == 0

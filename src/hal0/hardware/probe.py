@@ -28,9 +28,9 @@ from pathlib import Path
 
 import structlog
 
-from hal0.errors import Hal0Error
 from hal0.config import paths as _paths
 from hal0.config.schema import GPUInfo, HardwareInfo, NPUInfo
+from hal0.errors import Hal0Error
 
 log = structlog.get_logger(__name__)
 
@@ -197,7 +197,7 @@ def _dmidecode_host_ram_mb() -> int | None:
                     total_mb += n * mult
     if total_mb <= 0:
         return None
-    return int(round(total_mb))
+    return round(total_mb)
 
 
 def _derive_unified_memory_mb(ram_mb: int, gpu: GPUInfo | None) -> int:
