@@ -73,7 +73,11 @@ def config_migrate() -> None:
 @app.command("validate")
 def config_validate() -> None:
     """Validate all config files against the current schema."""
-    from hal0.config.loader import load_hal0_config, load_providers, load_upstreams
+    from hal0.config.loader import (
+        load_hal0_config,
+        load_providers_config,
+        load_upstreams_config,
+    )
 
     problems: list[str] = []
     try:
@@ -81,11 +85,11 @@ def config_validate() -> None:
     except Exception as exc:
         problems.append(f"hal0.toml: {exc}")
     try:
-        load_upstreams()
+        load_upstreams_config()
     except Exception as exc:
         problems.append(f"upstreams.toml: {exc}")
     try:
-        load_providers()
+        load_providers_config()
     except Exception as exc:
         problems.append(f"providers.toml: {exc}")
     if problems:
