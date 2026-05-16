@@ -172,30 +172,33 @@ function cancel() {
   border: 1px solid var(--color-border);
   background: transparent;
   color: var(--color-fg-muted);
-  font-size: 13px;
+  font-family: var(--font-mono);
+  font-size: 12px;
   cursor: pointer;
-  transition: background 0.1s;
+  transition: border-color 0.15s, color 0.15s;
 }
-.btn-ghost:hover:not(:disabled) { background: var(--color-surface-2); color: var(--color-fg); }
+.btn-ghost:hover:not(:disabled) { border-color: var(--color-border-hi); color: var(--color-fg); }
 .btn-ghost:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .btn-action {
   padding: 7px 18px;
   border-radius: var(--radius);
   border: none;
-  background: var(--color-accent);
-  color: var(--color-bg);
-  font-size: 13px;
-  font-weight: 600;
+  background: var(--hal0-accent);
+  color: #000;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 500;
   cursor: pointer;
   display: flex;
   align-items: center;
   gap: 7px;
-  transition: opacity 0.1s;
+  transition: background 0.15s;
 }
-.btn-action:hover:not(:disabled) { opacity: 0.88; }
+.btn-action:hover:not(:disabled) { background: var(--hal0-accent-hover); }
 .btn-action:disabled { opacity: 0.45; cursor: not-allowed; }
-.btn-action.btn-danger { background: var(--color-danger); }
+.btn-action.btn-danger { background: var(--color-danger); color: #fff; }
+.btn-action.btn-danger:hover:not(:disabled) { background: color-mix(in oklch, var(--color-danger) 90%, #fff); }
 
 .spinner {
   width: 12px;

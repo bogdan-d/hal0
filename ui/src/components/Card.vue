@@ -2,7 +2,7 @@
 defineProps({
   /** Add extra padding inside */
   padded: { type: Boolean, default: true },
-  /** Visually highlight (e.g. active state) */
+  /** Visually highlight (e.g. active state) — amber inset rail like hal0-web's "Why hal0" featured card */
   highlight: { type: Boolean, default: false },
 })
 </script>
@@ -32,7 +32,7 @@ defineProps({
 }
 
 .card-highlight {
-  border-color: var(--color-accent);
-  box-shadow: 0 0 0 1px var(--color-accent-bg);
+  border-color: color-mix(in srgb, var(--hal0-accent) 40%, var(--color-border));
+  box-shadow: inset 3px 0 0 var(--hal0-accent);
 }
 </style>

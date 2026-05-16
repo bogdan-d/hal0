@@ -142,7 +142,7 @@ function onNavClick() {
     <!-- Slot count badge (footer) -->
     <div class="sidebar-status" :class="{ 'sidebar-status-collapsed': !open }">
       <span class="status-dot" :class="running > 0 ? 'live' : 'idle'" aria-hidden="true" />
-      <span v-if="open" class="status-text">
+      <span v-if="open" class="status-text" :class="{ live: running > 0 }">
         {{ running }}/{{ total }} slot{{ total !== 1 ? 's' : '' }} running
       </span>
     </div>
@@ -197,8 +197,12 @@ function onNavClick() {
   border-radius: var(--radius);
   color: var(--color-fg-muted);
   text-decoration: none;
-  font-size: 13px;
+  /* Mono-typographic nav, matching the marketing site's .hal0-nav items. */
+  font-family: var(--font-mono);
+  font-size: 12px;
   font-weight: 500;
+  font-feature-settings: 'zero' 1;
+  letter-spacing: -0.01em;
   position: relative;
   user-select: none;
   transition: background 0.1s, color 0.1s;
@@ -221,14 +225,20 @@ function onNavClick() {
   left: 0;
   top: 6px;
   bottom: 6px;
-  width: 2px;
+  width: 3px;
   border-radius: 0 2px 2px 0;
   background: var(--color-accent);
+  /* Faint amber halo so the rail reads as a lit filament, not a stripe. */
+  box-shadow: 0 0 12px -2px var(--hal0-accent);
 }
 
 .nav-item.external {
   color: var(--color-fg-faint);
   font-size: 12px;
+}
+
+.nav-item.external:hover .nav-label {
+  border-bottom: 1px solid color-mix(in srgb, var(--hal0-accent) 60%, transparent);
 }
 
 .nav-icon {
@@ -294,7 +304,8 @@ function onNavClick() {
 
 .status-dot.live {
   background: var(--color-success);
-  box-shadow: 0 0 8px -1px var(--color-success);
+  /* Brighter halo when slots are running; pair with status-text.live. */
+  box-shadow: 0 0 10px 0 var(--color-success);
 }
 
 .status-dot.idle {
@@ -304,7 +315,16 @@ function onNavClick() {
 .status-text {
   font-family: var(--font-mono);
   font-size: 10.5px;
+  /* Slashed zero so "0/3 slots running" reads in the wordmark's voice. */
+  font-feature-settings: 'zero' 1;
+  letter-spacing: 0.02em;
   color: var(--color-fg-faint);
   white-space: nowrap;
+  transition: color 0.2s, text-shadow 0.2s;
+}
+
+.status-text.live {
+  color: var(--color-fg-muted);
+  text-shadow: 0 0 8px var(--hal0-accent-glow);
 }
 </style>

@@ -411,7 +411,7 @@ const SLOT_TYPES = ['llama-server', 'flm', 'moonshine', 'kokoro']
 
 <template>
   <div class="slots-page">
-    <PageHeader title="Slots" subtitle="Inference slot lifecycle management">
+    <PageHeader eyebrow="Lifecycle" title="Slots" subtitle="Inference slot lifecycle management">
       <template #actions>
         <span class="kbd-hint" aria-hidden="true">Press <kbd>N</kbd> to create</span>
         <button class="btn-primary" type="button" @click="showCreate = true">
@@ -936,8 +936,8 @@ const SLOT_TYPES = ['llama-server', 'flm', 'moonshine', 'kokoro']
 }
 .btn-act:disabled { opacity: 0.45; cursor: not-allowed; }
 
-.btn-load { background: var(--color-accent); color: var(--color-bg); }
-.btn-load:hover:not(:disabled) { opacity: 0.88; }
+.btn-load { background: var(--hal0-accent); color: #000; font-family: var(--font-mono); font-weight: 500; }
+.btn-load:hover:not(:disabled) { background: var(--hal0-accent-hover); }
 
 .btn-sm { background: var(--color-surface-2); color: var(--color-fg-muted); border-color: var(--color-border); }
 .btn-sm:hover:not(:disabled) { background: var(--color-surface-3); color: var(--color-fg); }
@@ -1037,18 +1037,21 @@ const SLOT_TYPES = ['llama-server', 'flm', 'moonshine', 'kokoro']
 .btn-primary {
   display: flex; align-items: center; gap: 6px;
   padding: 7px 16px; border-radius: var(--radius);
-  background: var(--color-accent); color: var(--color-bg);
-  font-size: 13px; font-weight: 600; border: none; cursor: pointer;
+  background: var(--hal0-accent); color: #000;
+  font-family: var(--font-mono);
+  font-size: 12px; font-weight: 500; border: none; cursor: pointer;
+  transition: background 0.15s;
 }
-.btn-primary:hover:not(:disabled) { opacity: 0.88; }
+.btn-primary:hover:not(:disabled) { background: var(--hal0-accent-hover); }
 .btn-primary:disabled { opacity: 0.45; cursor: not-allowed; }
 
 .btn-ghost {
   padding: 7px 16px; border-radius: var(--radius);
   border: 1px solid var(--color-border); background: transparent;
-  color: var(--color-fg-muted); font-size: 13px; cursor: pointer;
+  color: var(--color-fg-muted); font-family: var(--font-mono); font-size: 12px; cursor: pointer;
+  transition: border-color 0.15s, color 0.15s;
 }
-.btn-ghost:hover:not(:disabled) { background: var(--color-surface-2); color: var(--color-fg); }
+.btn-ghost:hover:not(:disabled) { border-color: var(--color-border-hi); color: var(--color-fg); }
 .btn-ghost:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .kbd-hint { font-family: var(--font-mono); font-size: 11px; color: var(--color-fg-faint); }

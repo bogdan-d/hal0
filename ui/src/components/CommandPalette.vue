@@ -262,9 +262,9 @@ const kindLabel = { nav: 'NAV', action: 'ACT', slot: 'SLOT' }
   flex-shrink: 0;
 }
 .kind-chip[data-kind="action"] {
-  color: var(--color-warning);
-  border-color: color-mix(in oklch, var(--color-warning) 30%, transparent);
-  background: color-mix(in oklch, var(--color-warning) 8%, transparent);
+  color: var(--hal0-accent);
+  border-color: color-mix(in srgb, var(--hal0-accent) 35%, transparent);
+  background: color-mix(in srgb, var(--hal0-accent) 10%, transparent);
 }
 .kind-chip[data-kind="slot"] {
   color: var(--color-success);

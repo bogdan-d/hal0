@@ -290,9 +290,14 @@ const stepLabels = ['Pick model', 'License', 'Install', 'Done']
     <div class="wizard-card">
       <!-- Header -->
       <div class="wizard-head">
-        <div class="wizard-logo" aria-hidden="true">h0</div>
+        <div class="wizard-glow" aria-hidden="true"></div>
+        <span class="wizard-eyebrow">
+          <span class="wizard-eyebrow-dot" aria-hidden="true"></span>
+          First run · v1 pre-alpha
+        </span>
+        <div class="wizard-logo wordmark" aria-hidden="true">h0</div>
         <h1 class="wizard-title">Welcome to hal0</h1>
-        <p class="wizard-sub">Let's get your first model running.</p>
+        <p class="wizard-sub">Local AI for your home. Let's get your first model running.</p>
       </div>
 
       <!-- Step indicator -->
@@ -466,36 +471,82 @@ const stepLabels = ['Pick model', 'License', 'Install', 'Done']
 
 <style scoped>
 .wizard-page {
+  position: relative;
   display: flex;
   align-items: center;
   justify-content: center;
   min-height: 100%;
   padding: 32px 16px;
-  background: var(--color-bg);
+  background: var(--hal0-bg);
+  overflow: hidden;
+}
+.wizard-page::before {
+  content: '';
+  position: absolute;
+  inset: -20% -10% auto -10%;
+  height: 60%;
+  pointer-events: none;
+  background: radial-gradient(ellipse at center, var(--hal0-accent-glow), transparent 70%);
+  z-index: 0;
 }
 
 .wizard-card {
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
+  position: relative;
+  z-index: 1;
+  background: var(--hal0-bg-elevated);
+  border: 1px solid var(--hal0-border);
   border-radius: var(--radius-xl);
   width: min(580px, 100%);
   overflow: hidden;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.45);
 }
 
 .wizard-head {
+  position: relative;
   text-align: center;
-  padding: 32px 32px 24px;
-  border-bottom: 1px solid var(--color-border);
+  padding: 36px 32px 24px;
+  border-bottom: 1px solid var(--hal0-border);
+}
+.wizard-glow {
+  position: absolute;
+  inset: auto 0 -32px 0;
+  height: 64px;
+  pointer-events: none;
+  background: radial-gradient(ellipse at center, var(--hal0-accent-glow), transparent 70%);
+}
+.wizard-eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  margin-bottom: 18px;
+  padding: 4px 11px;
+  border-radius: 999px;
+  border: 1px solid var(--hal0-border);
+  background: var(--hal0-bg);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--hal0-fg-muted);
+}
+.wizard-eyebrow-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--hal0-accent);
+  box-shadow: 0 0 8px var(--hal0-accent);
 }
 .wizard-logo {
-  width: 48px; height: 48px; border-radius: 12px;
-  background: var(--color-accent);
-  color: var(--color-bg);
-  font-family: var(--font-mono); font-size: 18px; font-weight: 500;
-  display: grid; place-items: center; margin: 0 auto 16px;
+  width: 56px; height: 56px; border-radius: 14px;
+  background: var(--hal0-accent);
+  color: #000;
+  font-family: var(--hal0-font-display); font-size: 22px; font-weight: 700;
+  display: grid; place-items: center; margin: 0 auto 18px;
+  letter-spacing: -0.04em;
+  box-shadow: 0 0 32px color-mix(in srgb, var(--hal0-accent) 30%, transparent);
 }
-.wizard-title { font-size: 22px; font-weight: 600; color: var(--color-fg); margin: 0 0 6px; }
-.wizard-sub   { font-size: 14px; color: var(--color-fg-muted); margin: 0; }
+.wizard-title { font-size: 28px; font-weight: 600; color: var(--hal0-fg); margin: 0 0 8px; letter-spacing: -0.02em; }
+.wizard-sub   { font-size: 14px; color: var(--hal0-fg-muted); margin: 0; line-height: 1.5; }
 
 /* Steps */
 .steps {
@@ -516,7 +567,7 @@ const stepLabels = ['Pick model', 'License', 'Install', 'Done']
   width: 100%; height: 1px;
   background: var(--color-border);
 }
-.step-done + .step::before { background: var(--color-accent); }
+.step-done + .step::before { background: var(--hal0-accent); }
 .step-num {
   width: 22px; height: 22px; border-radius: 50%;
   background: var(--color-surface-2); border: 1px solid var(--color-border);
@@ -524,10 +575,10 @@ const stepLabels = ['Pick model', 'License', 'Install', 'Done']
   display: grid; place-items: center; font-family: var(--font-mono);
   position: relative; z-index: 1;
 }
-.step-active .step-num { border-color: var(--color-accent); color: var(--color-accent); background: var(--color-accent-bg); }
-.step-done .step-num   { background: var(--color-accent); color: var(--color-bg); border-color: var(--color-accent); }
-.step-label { font-size: 10.5px; color: var(--color-fg-faint); font-family: var(--font-mono); }
-.step-active .step-label { color: var(--color-accent); }
+.step-active .step-num { border-color: var(--hal0-accent); color: var(--hal0-accent); background: var(--color-accent-bg); box-shadow: 0 0 12px color-mix(in srgb, var(--hal0-accent) 35%, transparent); }
+.step-done .step-num   { background: var(--hal0-accent); color: #000; border-color: var(--hal0-accent); }
+.step-label { font-size: 10.5px; color: var(--color-fg-faint); font-family: var(--font-mono); text-transform: uppercase; letter-spacing: 0.06em; }
+.step-active .step-label { color: var(--hal0-accent); }
 
 /* Body */
 .wizard-body { padding: 24px 32px; display: flex; flex-direction: column; gap: 16px; }
@@ -540,17 +591,21 @@ const stepLabels = ['Pick model', 'License', 'Install', 'Done']
 /* Model list */
 .model-list { display: flex; flex-direction: column; gap: 8px; }
 .model-option {
-  border: 2px solid var(--color-border);
+  border: 1px solid var(--color-border);
   border-radius: var(--radius-lg);
   cursor: pointer;
-  transition: border-color 0.1s;
+  transition: border-color 0.15s, box-shadow 0.15s;
+  background: var(--color-surface);
 }
 .model-option:hover { border-color: var(--color-border-hi); }
-.model-option.selected { border-color: var(--color-accent); }
+.model-option.selected {
+  border-color: color-mix(in srgb, var(--hal0-accent) 45%, var(--color-border));
+  box-shadow: inset 3px 0 0 var(--hal0-accent);
+}
 .model-option-inner { padding: 12px 14px; }
 .model-option-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 4px; }
-.model-option-name { font-weight: 600; color: var(--color-fg); font-size: 13.5px; }
-.model-size-chip { font-family: var(--font-mono); font-size: 11px; padding: 2px 6px; border-radius: 4px; background: var(--color-surface-2); border: 1px solid var(--color-border); color: var(--color-fg-faint); }
+.model-option-name { font-family: var(--font-mono); font-weight: 600; color: var(--color-fg); font-size: 13.5px; }
+.model-size-chip { font-family: var(--font-mono); font-size: 10.5px; padding: 2px 7px; border-radius: 999px; background: color-mix(in srgb, var(--hal0-accent) 14%, transparent); border: 1px solid color-mix(in srgb, var(--hal0-accent) 35%, transparent); color: var(--hal0-accent); text-transform: uppercase; letter-spacing: 0.04em; font-feature-settings: 'zero' 1, 'ss02' 1; }
 .model-option-desc { font-size: 12px; color: var(--color-fg-muted); margin: 0 0 8px; }
 .model-option-meta { display: flex; gap: 6px; flex-wrap: wrap; }
 .meta-chip { font-family: var(--font-mono); font-size: 10.5px; padding: 2px 6px; border-radius: 4px; background: var(--color-surface-3); color: var(--color-fg-faint); border: 1px solid var(--color-border); }
@@ -585,15 +640,15 @@ const stepLabels = ['Pick model', 'License', 'Install', 'Done']
 /* License */
 .license-card { background: var(--color-surface-2); border: 1px solid var(--color-border); border-radius: var(--radius-lg); padding: 14px; }
 .license-text { font-size: 12.5px; color: var(--color-fg-muted); margin: 0 0 8px; line-height: 1.6; }
-.license-link { font-size: 12px; color: var(--color-accent); text-decoration: none; }
+.license-link { font-size: 12px; color: var(--hal0-accent); text-decoration: none; font-family: var(--font-mono); }
 .license-link:hover { text-decoration: underline; }
 .accept-label { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--color-fg-muted); cursor: pointer; }
 
 /* Progress */
 .progress-wrap { display: flex; align-items: center; gap: 12px; }
 .progress-bar { flex: 1; height: 8px; background: var(--color-surface-3); border-radius: 4px; overflow: hidden; }
-.progress-fill { height: 100%; background: var(--color-accent); border-radius: 4px; transition: width 0.3s ease; }
-.progress-pct { font-family: var(--font-mono); font-size: 12px; color: var(--color-fg-muted); min-width: 36px; text-align: right; }
+.progress-fill { height: 100%; background: var(--hal0-accent); border-radius: 4px; transition: width 0.3s ease; box-shadow: 0 0 12px color-mix(in srgb, var(--hal0-accent) 50%, transparent); }
+.progress-pct { font-family: var(--font-mono); font-size: 12px; color: var(--hal0-accent); min-width: 36px; text-align: right; font-feature-settings: 'zero' 1, 'ss02' 1, 'tnum' 1; }
 .progress-meta {
   display: flex;
   justify-content: space-between;
@@ -601,12 +656,13 @@ const stepLabels = ['Pick model', 'License', 'Install', 'Done']
   font-size: 11px;
   color: var(--color-fg-faint);
   gap: 12px;
+  font-feature-settings: 'zero' 1, 'ss02' 1, 'tnum' 1;
 }
 
 /* Done */
 .wizard-done { align-items: center; text-align: center; padding: 32px; }
-.done-icon { width: 56px; height: 56px; border-radius: 50%; background: color-mix(in oklch, var(--color-success) 15%, var(--color-surface)); border: 2px solid var(--color-success); color: var(--color-success); font-size: 24px; display: grid; place-items: center; }
-.done-title { font-size: 20px; font-weight: 600; color: var(--color-fg); margin: 0; }
+.done-icon { width: 56px; height: 56px; border-radius: 50%; background: color-mix(in srgb, var(--hal0-accent) 14%, var(--color-surface)); border: 2px solid var(--hal0-accent); color: var(--hal0-accent); font-size: 24px; display: grid; place-items: center; box-shadow: 0 0 32px color-mix(in srgb, var(--hal0-accent) 30%, transparent); }
+.done-title { font-size: 24px; font-weight: 600; color: var(--color-fg); margin: 0; letter-spacing: -0.02em; }
 .done-desc  { font-size: 13.5px; color: var(--color-fg-muted); margin: 0; line-height: 1.6; }
 .done-actions { display: flex; flex-direction: column; gap: 10px; width: 100%; align-items: center; }
 
@@ -615,12 +671,12 @@ const stepLabels = ['Pick model', 'License', 'Install', 'Done']
 .wizard-footer-2 { display: flex; justify-content: space-between; align-items: center; }
 
 /* Buttons */
-.btn-primary { display: flex; align-items: center; justify-content: center; gap: 6px; padding: 9px 20px; border-radius: var(--radius); background: var(--color-accent); color: var(--color-bg); font-size: 14px; font-weight: 600; border: none; cursor: pointer; transition: opacity 0.1s; }
-.btn-primary:hover:not(:disabled) { opacity: 0.88; }
+.btn-primary { display: flex; align-items: center; justify-content: center; gap: 6px; padding: 11px 22px; border-radius: var(--radius); background: var(--hal0-accent); color: #000; font-family: var(--font-mono); font-size: 13px; font-weight: 500; border: none; cursor: pointer; transition: background 0.15s; }
+.btn-primary:hover:not(:disabled) { background: var(--hal0-accent-hover); }
 .btn-primary:disabled { opacity: 0.45; cursor: not-allowed; }
 .btn-wide { width: 100%; }
-.btn-ghost { padding: 8px 16px; border-radius: var(--radius); border: 1px solid var(--color-border); background: transparent; color: var(--color-fg-muted); font-size: 13px; cursor: pointer; }
-.btn-ghost:hover { background: var(--color-surface-2); color: var(--color-fg); }
+.btn-ghost { padding: 9px 18px; border-radius: var(--radius); border: 1px solid var(--color-border); background: transparent; color: var(--color-fg-muted); font-family: var(--font-mono); font-size: 12px; cursor: pointer; transition: border-color 0.15s, color 0.15s; }
+.btn-ghost:hover { border-color: var(--color-border-hi); color: var(--color-fg); }
 
 .inline-code { font-family: var(--font-mono); font-size: 12px; padding: 1px 5px; border-radius: 3px; background: var(--color-surface-3); color: var(--color-fg-muted); }
 

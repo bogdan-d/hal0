@@ -206,7 +206,7 @@ onMounted(load)
 
 <template>
   <div class="providers-page">
-    <PageHeader title="Providers" subtitle="External LLM upstreams (OpenRouter, Anthropic, OpenAI, custom)">
+    <PageHeader eyebrow="Upstreams" title="Providers" subtitle="External LLM routing — OpenRouter, Anthropic, OpenAI, custom">
       <template #actions>
         <button class="btn-ghost" type="button" @click="load" title="Refresh from server">
           <svg width="13" height="13" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" aria-hidden="true">
@@ -400,9 +400,9 @@ onMounted(load)
 .status-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; margin-top: 6px; transition: background 0.2s; }
 .up-info { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
 .up-name-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.up-name { font-size: 13px; font-weight: 600; color: var(--color-fg); }
-.up-kind { font-size: 10px; padding: 1px 6px; border-radius: 3px; background: var(--color-surface-2); color: var(--color-fg-faint); border: 1px solid var(--color-border); }
-.up-catalog { font-size: 10px; padding: 1px 6px; border-radius: 3px; background: color-mix(in oklch, var(--color-accent) 12%, transparent); color: var(--color-accent); border: 1px solid color-mix(in oklch, var(--color-accent) 30%, transparent); }
+.up-name { font-family: var(--font-mono); font-size: 13px; font-weight: 600; color: var(--color-fg); }
+.up-kind { font-size: 10px; padding: 1px 6px; border-radius: 3px; background: var(--color-surface-2); color: var(--color-fg-faint); border: 1px solid var(--color-border); text-transform: uppercase; letter-spacing: 0.06em; }
+.up-catalog { font-size: 10px; padding: 1px 6px; border-radius: 3px; background: color-mix(in srgb, var(--hal0-accent) 12%, transparent); color: var(--hal0-accent); border: 1px solid color-mix(in srgb, var(--hal0-accent) 35%, transparent); text-transform: uppercase; letter-spacing: 0.06em; }
 .up-url { font-size: 11.5px; color: var(--color-fg-muted); word-break: break-all; }
 .up-meta-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .up-meta { font-size: 10.5px; color: var(--color-fg-faint); }
@@ -419,11 +419,12 @@ onMounted(load)
   border: 1px solid var(--color-border);
   background: transparent;
   color: var(--color-fg-muted);
-  font-size: 12px;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
   cursor: pointer;
-  transition: background 0.1s, color 0.1s;
+  transition: border-color 0.15s, color 0.15s;
 }
-.act-btn:hover { background: var(--color-surface-2); color: var(--color-fg); }
+.act-btn:hover { border-color: var(--color-border-hi); color: var(--color-fg); }
 .act-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
 /* Modal */
@@ -473,11 +474,11 @@ onMounted(load)
   overflow: auto;
 }
 
-.btn-primary { display: flex; align-items: center; gap: 6px; padding: 7px 16px; border-radius: var(--radius); background: var(--color-accent); color: var(--color-bg); font-size: 13px; font-weight: 600; border: none; cursor: pointer; }
-.btn-primary:hover:not(:disabled) { opacity: 0.88; }
+.btn-primary { display: flex; align-items: center; gap: 6px; padding: 7px 16px; border-radius: var(--radius); background: var(--hal0-accent); color: #000; font-family: var(--font-mono); font-size: 12px; font-weight: 500; border: none; cursor: pointer; transition: background 0.15s; }
+.btn-primary:hover:not(:disabled) { background: var(--hal0-accent-hover); }
 .btn-primary:disabled { opacity: 0.45; cursor: not-allowed; }
-.btn-ghost { display: flex; align-items: center; gap: 6px; padding: 6px 12px; border-radius: var(--radius); border: 1px solid var(--color-border); background: transparent; color: var(--color-fg-muted); font-size: 12.5px; cursor: pointer; }
-.btn-ghost:hover:not(:disabled) { background: var(--color-surface-2); color: var(--color-fg); }
+.btn-ghost { display: flex; align-items: center; gap: 6px; padding: 6px 12px; border-radius: var(--radius); border: 1px solid var(--color-border); background: transparent; color: var(--color-fg-muted); font-family: var(--font-mono); font-size: 12px; cursor: pointer; transition: border-color 0.15s, color 0.15s; }
+.btn-ghost:hover:not(:disabled) { border-color: var(--color-border-hi); color: var(--color-fg); }
 .btn-ghost:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .spinner { width: 11px; height: 11px; border: 2px solid rgba(255,255,255,0.3); border-top-color: white; border-radius: 50%; animation: spin 0.7s linear infinite; flex-shrink: 0; }

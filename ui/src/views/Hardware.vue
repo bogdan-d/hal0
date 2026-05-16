@@ -163,7 +163,7 @@ onMounted(loadHardware)
 
 <template>
   <div class="hardware-page">
-    <PageHeader title="Hardware" subtitle="Compute resources and slot allocation">
+    <PageHeader eyebrow="Probe" title="Hardware" subtitle="Compute resources and slot allocation">
       <template #actions>
         <button class="btn-secondary" type="button" @click="reProbe" :disabled="probing">
           <svg width="13" height="13" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" aria-hidden="true" :class="{ 'spin': probing }">
@@ -348,7 +348,7 @@ onMounted(loadHardware)
 
 .error-banner { padding: 10px 16px; border-radius: var(--radius-lg); background: color-mix(in oklch, var(--color-danger) 10%, var(--color-surface)); border: 1px solid color-mix(in oklch, var(--color-danger) 30%, transparent); color: var(--color-danger); font-size: 13px; }
 
-.section-title { font-size: 13px; font-weight: 600; color: var(--color-fg-muted); letter-spacing: 0.03em; margin: 0 0 8px; }
+.section-title { font-size: 16px; font-weight: 600; color: var(--color-fg); letter-spacing: -0.01em; margin: 0 0 10px; }
 
 /* Tiles */
 .tiles {
@@ -367,16 +367,17 @@ onMounted(loadHardware)
 }
 .tile-label {
   font-family: var(--font-mono);
-  font-size: 10.5px;
+  font-size: 11px;
   text-transform: uppercase;
   letter-spacing: 0.08em;
-  color: var(--color-fg-faint);
+  color: var(--hal0-accent);
+  font-weight: 500;
 }
-.tile-value { font-size: 22px; font-weight: 600; color: var(--color-fg); }
-.tile-value.tile-small { font-size: 13px; font-weight: 500; }
+.tile-value { font-family: var(--font-mono); font-size: 24px; font-weight: 600; color: var(--color-fg); letter-spacing: -0.02em; font-feature-settings: 'zero' 1, 'ss02' 1, 'tnum' 1; }
+.tile-value.tile-small { font-size: 13px; font-weight: 500; letter-spacing: 0; }
 .tile-unit { font-size: 12px; font-weight: 400; color: var(--color-fg-faint); margin-left: 4px; }
 .tile-sub { font-size: 11.5px; color: var(--color-fg-faint); }
-.tile-sub.mono { font-family: var(--font-mono); }
+.tile-sub.mono { font-family: var(--font-mono); font-feature-settings: 'zero' 1, 'ss02' 1, 'tnum' 1; }
 
 /* Stacked memory bar */
 .bar-row { display: flex; align-items: center; gap: 12px; }
@@ -389,7 +390,7 @@ onMounted(loadHardware)
   display: flex;
 }
 .bar-seg { height: 100%; transition: width 0.3s ease; }
-.bar-seg.seg-gtt  { background: var(--color-accent); }
+.bar-seg.seg-gtt  { background: var(--hal0-accent); }
 .bar-seg.seg-sys  { background: color-mix(in oklch, var(--color-fg-muted) 40%, var(--color-surface)); }
 .bar-seg.seg-npu  { background: var(--color-warning); }
 .bar-seg.seg-vram { background: var(--color-danger); }
@@ -411,7 +412,7 @@ onMounted(loadHardware)
   border-radius: 2px;
   flex-shrink: 0;
 }
-.legend-swatch.seg-gtt  { background: var(--color-accent); }
+.legend-swatch.seg-gtt  { background: var(--hal0-accent); }
 .legend-swatch.seg-sys  { background: color-mix(in oklch, var(--color-fg-muted) 40%, var(--color-surface)); }
 .legend-swatch.seg-npu  { background: var(--color-warning); }
 .legend-swatch.seg-vram { background: var(--color-danger); }
@@ -435,18 +436,19 @@ onMounted(loadHardware)
 /* Slot table */
 .allocation-empty { padding: 24px; text-align: center; color: var(--color-fg-faint); font-size: 13px; }
 .alloc-table { width: 100%; border-collapse: collapse; font-size: 13px; }
-.alloc-table th { padding: 9px 16px; text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--color-fg-faint); font-family: var(--font-mono); border-bottom: 1px solid var(--color-border); font-weight: 500; }
+.alloc-table thead { background: var(--hal0-bg-sunken); }
+.alloc-table th { padding: 9px 16px; text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--hal0-accent); font-family: var(--font-mono); border-bottom: 1px solid var(--color-border); font-weight: 500; }
 .alloc-table td { padding: 10px 16px; border-bottom: 1px solid var(--color-border); color: var(--color-fg-muted); }
 .alloc-table tbody tr:last-child td { border-bottom: none; }
-.alloc-table .mono { font-family: var(--font-mono); }
+.alloc-table .mono { font-family: var(--font-mono); font-feature-settings: 'zero' 1, 'ss02' 1, 'tnum' 1; }
 .alloc-table .small { font-size: 11.5px; }
 
-.status-chip { font-family: var(--font-mono); font-size: 10.5px; padding: 2px 8px; border-radius: 4px; }
-.chip-ok  { background: color-mix(in oklch, var(--color-success) 15%, transparent); color: var(--color-success); }
+.status-chip { font-family: var(--font-mono); font-size: 10.5px; padding: 2px 8px; border-radius: 4px; text-transform: uppercase; letter-spacing: 0.06em; }
+.chip-ok  { background: color-mix(in srgb, var(--hal0-accent) 14%, transparent); color: var(--hal0-accent); }
 .chip-off { background: var(--color-surface-2); color: var(--color-fg-faint); }
 
-.btn-secondary { display: flex; align-items: center; gap: 6px; padding: 6px 12px; border-radius: var(--radius); border: 1px solid var(--color-border); background: transparent; color: var(--color-fg-muted); font-size: 12.5px; cursor: pointer; }
-.btn-secondary:hover:not(:disabled) { background: var(--color-surface-2); color: var(--color-fg); }
+.btn-secondary { display: flex; align-items: center; gap: 6px; padding: 6px 12px; border-radius: var(--radius); border: 1px solid var(--color-border); background: transparent; color: var(--color-fg-muted); font-family: var(--font-mono); font-size: 12px; cursor: pointer; transition: border-color 0.15s, color 0.15s; }
+.btn-secondary:hover:not(:disabled) { border-color: var(--color-border-hi); color: var(--color-fg); }
 .btn-secondary:disabled { opacity: 0.5; cursor: not-allowed; }
 .spin { animation: spin 0.8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }

@@ -1,4 +1,15 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" fill="none">
-  <rect width="32" height="32" rx="8" fill="#06b6d4"/>
-  <text x="16" y="22" font-family="'JetBrains Mono', 'Courier New', monospace" font-size="16" font-weight="500" fill="white" text-anchor="middle" letter-spacing="-1">h0</text>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="hal0">
+  <rect width="32" height="32" rx="6" fill="#0a0a0a"/>
+  <!-- halo + "0" — minimal companion mark for 16px legibility. Halo
+       stroke kept fat (2.2) so it survives downscaling; tilt is kept
+       small (-3°) so the ellipse doesn't read as crooked at favicon
+       sizes. -->
+  <ellipse cx="16" cy="7" rx="10" ry="1.8"
+           fill="none" stroke="#ffb000" stroke-width="2.2"
+           transform="rotate(-3 16 7)" />
+  <text x="16" y="25" text-anchor="middle"
+        font-family="'JetBrains Mono', ui-monospace, Menlo, monospace"
+        font-weight="700" font-size="20" letter-spacing="-1"
+        fill="#ffb000"
+        style="font-feature-settings: 'zero' 1">0</text>
 </svg>

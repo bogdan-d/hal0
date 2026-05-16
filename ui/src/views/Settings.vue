@@ -401,7 +401,7 @@ onMounted(async () => {
 
 <template>
   <div class="settings-page">
-    <PageHeader title="Settings" subtitle="hal0.toml runtime configuration">
+    <PageHeader eyebrow="Config" title="Settings" subtitle="hal0.toml runtime configuration">
       <template #actions>
         <span v-if="changedFields.length > 0" class="change-count">
           {{ changedFields.length }} unsaved change{{ changedFields.length !== 1 ? 's' : '' }}
@@ -761,7 +761,7 @@ onMounted(async () => {
 
 .error-banner { padding: 10px 16px; border-radius: var(--radius-lg); background: color-mix(in oklch, var(--color-danger) 10%, var(--color-surface)); border: 1px solid color-mix(in oklch, var(--color-danger) 30%, transparent); color: var(--color-danger); font-size: 13px; }
 
-.section-title { font-size: 13px; font-weight: 600; color: var(--color-fg-muted); margin: 0 0 14px; letter-spacing: 0.02em; }
+.section-title { font-family: var(--font-mono); font-size: 11px; font-weight: 500; color: var(--hal0-accent); margin: 0 0 14px; letter-spacing: 0.08em; text-transform: uppercase; }
 
 .fields { display: flex; flex-direction: column; gap: 14px; }
 .field-row { display: grid; grid-template-columns: 1fr 240px; align-items: start; gap: 16px; }
@@ -787,7 +787,7 @@ onMounted(async () => {
   box-sizing: border-box;
 }
 .field-input:focus { border-color: var(--color-border-hi); }
-.field-changed { border-color: color-mix(in oklch, var(--color-accent) 50%, var(--color-border)) !important; }
+.field-changed { border-color: color-mix(in srgb, var(--hal0-accent) 55%, var(--color-border)) !important; box-shadow: inset 2px 0 0 var(--hal0-accent); }
 .field-error   { border-color: var(--color-danger) !important; }
 
 .toggle-label { display: flex; align-items: center; gap: 10px; cursor: pointer; }
@@ -797,7 +797,7 @@ onMounted(async () => {
   background: var(--color-surface-3); border: 1px solid var(--color-border);
   position: relative; flex-shrink: 0; transition: background 0.15s;
 }
-.toggle-checkbox:checked + .toggle-track { background: var(--color-accent); border-color: var(--color-accent); }
+.toggle-checkbox:checked + .toggle-track { background: var(--hal0-accent); border-color: var(--hal0-accent); }
 .toggle-thumb {
   position: absolute; left: 2px; top: 2px;
   width: 14px; height: 14px; border-radius: 50%;
@@ -806,14 +806,14 @@ onMounted(async () => {
 .toggle-checkbox:checked + .toggle-track .toggle-thumb { transform: translateX(16px); }
 .toggle-text { font-size: 13px; color: var(--color-fg-muted); }
 
-.change-count { font-family: var(--font-mono); font-size: 11.5px; color: var(--color-warning); }
+.change-count { font-family: var(--font-mono); font-size: 11px; color: var(--hal0-accent); text-transform: uppercase; letter-spacing: 0.06em; }
 .mono { font-family: var(--font-mono); }
 
-.btn-primary { display: flex; align-items: center; gap: 6px; padding: 7px 16px; border-radius: var(--radius); background: var(--color-accent); color: var(--color-bg); font-size: 13px; font-weight: 600; border: none; cursor: pointer; }
-.btn-primary:hover:not(:disabled) { opacity: 0.88; }
+.btn-primary { display: flex; align-items: center; gap: 6px; padding: 7px 16px; border-radius: var(--radius); background: var(--hal0-accent); color: #000; font-family: var(--font-mono); font-size: 12px; font-weight: 500; border: none; cursor: pointer; transition: background 0.15s; }
+.btn-primary:hover:not(:disabled) { background: var(--hal0-accent-hover); }
 .btn-primary:disabled { opacity: 0.45; cursor: not-allowed; }
-.btn-ghost { padding: 7px 16px; border-radius: var(--radius); border: 1px solid var(--color-border); background: transparent; color: var(--color-fg-muted); font-size: 13px; cursor: pointer; }
-.btn-ghost:hover:not(:disabled) { background: var(--color-surface-2); color: var(--color-fg); }
+.btn-ghost { padding: 7px 16px; border-radius: var(--radius); border: 1px solid var(--color-border); background: transparent; color: var(--color-fg-muted); font-family: var(--font-mono); font-size: 12px; cursor: pointer; transition: border-color 0.15s, color 0.15s; }
+.btn-ghost:hover:not(:disabled) { border-color: var(--color-border-hi); color: var(--color-fg); }
 .btn-ghost:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .spinner { width: 11px; height: 11px; border: 2px solid rgba(255,255,255,0.3); border-top-color: white; border-radius: 50%; animation: spin 0.7s linear infinite; flex-shrink: 0; }
@@ -832,7 +832,7 @@ onMounted(async () => {
   letter-spacing: 0.04em;
   text-transform: uppercase;
 }
-.auth-on  { background: color-mix(in oklch, var(--color-success) 18%, transparent); color: var(--color-success); border: 1px solid color-mix(in oklch, var(--color-success) 30%, transparent); }
+.auth-on  { background: color-mix(in srgb, var(--hal0-accent) 14%, transparent); color: var(--hal0-accent); border: 1px solid color-mix(in srgb, var(--hal0-accent) 35%, transparent); }
 .auth-off { background: color-mix(in oklch, var(--color-warning) 16%, transparent); color: var(--color-warning); border: 1px solid color-mix(in oklch, var(--color-warning) 30%, transparent); }
 .auth-identity { font-size: 11.5px; color: var(--color-fg-muted); }
 

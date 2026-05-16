@@ -1,6 +1,7 @@
 <script setup>
 import { computed, ref, onMounted, onBeforeUnmount } from 'vue'
 import { useSystemStore } from '../stores/system.js'
+import Wordmark from './Wordmark.vue'
 
 const props = defineProps({
   isMobile: Boolean,
@@ -54,7 +55,7 @@ const totalSlots   = computed(() => system.slots.length)
         </svg>
       </button>
 
-      <span class="brand-name" aria-label="hal0">hal0</span>
+      <Wordmark size="text-base" />
       <span v-if="version" class="version-pill" :title="`Version ${version}`">v{{ version }}</span>
     </div>
 
@@ -101,12 +102,33 @@ const totalSlots   = computed(() => system.slots.length)
   display: flex;
   align-items: center;
   height: 44px;
-  border-bottom: 1px solid var(--color-border);
-  background: color-mix(in oklch, var(--color-surface) 90%, transparent);
-  backdrop-filter: blur(8px);
+  /* Vacuum-tube treatment — solid-state hal0-nav from the marketing site:
+   * near-black at 85% with a heavy blur, plus an amber halo glow under
+   * the filament that the ::after pseudo paints along the bottom edge. */
+  background: rgba(10, 10, 10, 0.85);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  box-shadow: 0 1px 24px -10px rgba(255, 176, 0, 0.28);
   padding: 0 12px 0 0;
   gap: 8px;
   z-index: 30;
+  position: relative;
+}
+
+.topbar::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -1px;
+  height: 1px;
+  background: linear-gradient(
+    to right,
+    transparent 0%,
+    color-mix(in srgb, var(--hal0-accent) 60%, transparent) 50%,
+    transparent 100%
+  );
+  pointer-events: none;
 }
 
 /* ── Brand ─────────────────────────────────────────────────────── */
@@ -139,21 +161,16 @@ const totalSlots   = computed(() => system.slots.length)
   color: var(--color-fg);
 }
 
-.brand-name {
-  font-weight: 600;
-  font-size: 14px;
-  color: var(--color-fg);
-  letter-spacing: -0.02em;
-}
-
 .version-pill {
   font-family: var(--font-mono);
   font-size: 10px;
+  /* Slashed-zero so a "v1.0.0" reads in the wordmark's voice. */
+  font-feature-settings: 'zero' 1;
   padding: 2px 6px;
   border-radius: 4px;
   background: var(--color-surface-2);
   color: var(--color-fg-faint);
-  border: 1px solid var(--color-border);
+  border: 1px solid color-mix(in srgb, var(--hal0-accent) 25%, var(--hal0-border));
 }
 
 /* ── Center ────────────────────────────────────────────────────── */
@@ -177,6 +194,8 @@ const totalSlots   = computed(() => system.slots.length)
   color: var(--color-fg-faint);
   font-size: 12px;
   font-family: var(--font-mono);
+  font-feature-settings: 'zero' 1;
+  letter-spacing: -0.01em;
   cursor: pointer;
   transition: border-color 0.1s, color 0.1s;
 }
@@ -222,11 +241,13 @@ const totalSlots   = computed(() => system.slots.length)
 }
 .slot-dot.live {
   background: var(--color-success);
-  box-shadow: 0 0 6px -1px var(--color-success);
+  /* Brighter halo when slots are running — "the rack is on". */
+  box-shadow: 0 0 10px 0 var(--color-success);
 }
 .mono-text {
   font-family: var(--font-mono);
   font-size: 11px;
+  font-feature-settings: 'zero' 1;
 }
 
 .health-dot {
@@ -247,7 +268,8 @@ const totalSlots   = computed(() => system.slots.length)
     gap: 6px;
     padding: 0 8px 0 10px;
   }
-  .brand-name, .version-pill { display: none; }
+  .topbar-brand :deep(.wordmark),
+  .version-pill { display: none; }
   .topbar-center { padding: 0 8px; }
   .slot-stat { display: none; }
 }

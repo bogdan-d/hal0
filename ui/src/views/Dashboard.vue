@@ -237,7 +237,8 @@ loadChatModels()
 
 <template>
   <div class="dashboard-page">
-    <PageHeader title="Dashboard" subtitle="Control Room">
+    <div class="dashboard-hero" aria-hidden="true"></div>
+    <PageHeader eyebrow="Control Room" title="Dashboard" subtitle="Live status of your hal0 box.">
       <template #actions>
         <button class="btn-secondary" type="button" @click="system.fetchStatus()">
           <svg width="13" height="13" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" aria-hidden="true">
@@ -261,7 +262,7 @@ loadChatModels()
           </div>
         </Card>
 
-        <Card class="stat-card">
+        <Card class="stat-card" :highlight="slotSummary.running > 0">
           <div class="stat-label">Slots running</div>
           <div class="stat-value">
             <template v-if="system.loading && system.slots.length === 0">
@@ -333,6 +334,7 @@ loadChatModels()
 
       <!-- ── Active slots ─────────────────────────────────────────── -->
       <section aria-labelledby="slots-heading">
+        <p class="section-eyebrow"><span class="section-eyebrow-dot" aria-hidden="true"></span> Slots</p>
         <h2 id="slots-heading" class="section-title">Active slots</h2>
         <template v-if="system.loading && system.slots.length === 0">
           <div class="slot-list">
@@ -371,6 +373,7 @@ loadChatModels()
 
       <!-- ── Chat panel ───────────────────────────────────────────── -->
       <section aria-labelledby="chat-heading">
+        <p class="section-eyebrow"><span class="section-eyebrow-dot" aria-hidden="true"></span> /v1/chat</p>
         <h2 id="chat-heading" class="section-title">Test chat</h2>
         <Card class="chat-card">
           <div class="chat-row">
@@ -404,6 +407,7 @@ loadChatModels()
 
       <!-- ── Recent logs ──────────────────────────────────────────── -->
       <section aria-labelledby="logs-heading">
+        <p class="section-eyebrow"><span class="section-eyebrow-dot" aria-hidden="true"></span> Journal</p>
         <h2 id="logs-heading" class="section-title">
           Recent log events
           <button class="stat-link section-link" type="button" @click="router.push('/logs')">View all →</button>
@@ -422,8 +426,20 @@ loadChatModels()
 </template>
 
 <style scoped>
-.dashboard-page { display: flex; flex-direction: column; min-height: 100%; }
-.page-body { padding: 20px 24px; display: flex; flex-direction: column; gap: 20px; }
+.dashboard-page { position: relative; display: flex; flex-direction: column; min-height: 100%; }
+.page-body { padding: 20px 24px; display: flex; flex-direction: column; gap: 20px; position: relative; z-index: 1; }
+
+/* Hero glow — radial amber wash behind the page title, mirroring
+   the HeroSection on hal0-web. Pointer-events none so it never
+   blocks the refresh button. */
+.dashboard-hero {
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 220px;
+  pointer-events: none;
+  background: radial-gradient(ellipse at top, var(--hal0-accent-glow), transparent 70%);
+  z-index: 0;
+}
 
 /* ── Stat rail ──────────────────────────────────────────────────── */
 .stat-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
@@ -431,30 +447,30 @@ loadChatModels()
 @media (max-width: 480px) { .stat-grid { grid-template-columns: 1fr; } }
 
 .stat-card { padding: 16px; }
-.stat-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--color-fg-faint); font-family: var(--font-mono); margin-bottom: 6px; }
-.stat-value { font-size: 28px; font-weight: 600; color: var(--color-fg); line-height: 1; margin-bottom: 6px; }
-.stat-denom { font-size: 15px; color: var(--color-fg-muted); font-weight: 400; }
+.stat-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--hal0-accent); font-family: var(--font-mono); margin-bottom: 8px; font-weight: 500; }
+.stat-value { font-family: var(--font-mono); font-size: 26px; font-weight: 600; color: var(--color-fg); line-height: 1.1; margin-bottom: 6px; letter-spacing: -0.02em; font-feature-settings: 'zero' 1, 'ss02' 1, 'tnum' 1; }
+.stat-denom { font-size: 14px; color: var(--color-fg-muted); font-weight: 400; margin-left: 2px; }
 .stat-sub { font-size: 11.5px; color: var(--color-fg-faint); font-family: var(--font-mono); }
-.stat-link { background: transparent; border: none; color: var(--color-accent); font-family: var(--font-mono); font-size: 11px; cursor: pointer; padding: 0; }
+.stat-link { background: transparent; border: none; color: var(--hal0-accent); font-family: var(--font-mono); font-size: 11px; cursor: pointer; padding: 0; }
 .stat-link:hover { text-decoration: underline; }
 .stat-tput { display: flex; flex-direction: column; }
 .stat-tput .stat-value { margin-bottom: 4px; }
 .stat-tput .stat-denom { margin-left: 4px; font-size: 13px; }
-.stat-spark { width: 100%; height: 30px; color: var(--color-accent); margin-top: auto; }
+.stat-spark { width: 100%; height: 30px; color: var(--hal0-accent); margin-top: auto; }
 
 /* ── Unified memory bar ─────────────────────────────────────────── */
 .um-card { padding: 16px 18px; }
 .um-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 10px; }
-.um-title { font-size: 13px; font-weight: 600; color: var(--color-fg); }
-.um-sub { font-size: 11.5px; color: var(--color-fg-muted); font-family: var(--font-mono); }
+.um-title { font-family: var(--font-mono); font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; font-weight: 500; color: var(--hal0-accent); }
+.um-sub { font-size: 11.5px; color: var(--color-fg-muted); font-family: var(--font-mono); font-feature-settings: 'zero' 1, 'ss02' 1, 'tnum' 1; }
 .um-bar { display: flex; height: 24px; border-radius: 4px; overflow: hidden; background: var(--color-surface-2); border: 1px solid var(--color-border); }
 .useg { height: 100%; transition: width 0.4s ease; }
-.seg-gtt   { background: var(--color-accent); }
+.seg-gtt   { background: var(--hal0-accent); }
 .seg-sys   { background: var(--color-success); opacity: 0.85; }
 .seg-npu   { background: var(--color-warning); opacity: 0.9; }
-.seg-vram  { background: color-mix(in oklch, var(--color-accent) 50%, var(--color-warning)); }
+.seg-vram  { background: color-mix(in oklch, var(--hal0-accent) 50%, var(--color-warning)); }
 .seg-free  { background: var(--color-surface-2); }
-.um-legend { display: flex; flex-wrap: wrap; gap: 14px 18px; margin-top: 10px; font-size: 11.5px; color: var(--color-fg-muted); font-family: var(--font-mono); }
+.um-legend { display: flex; flex-wrap: wrap; gap: 14px 18px; margin-top: 10px; font-size: 11.5px; color: var(--color-fg-muted); font-family: var(--font-mono); font-feature-settings: 'zero' 1, 'ss02' 1, 'tnum' 1; }
 .lg { display: inline-flex; align-items: center; gap: 6px; }
 .sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; }
 .lbl { color: var(--color-fg-muted); }
@@ -462,25 +478,44 @@ loadChatModels()
 .lg small { color: var(--color-fg-faint); margin-left: 1px; }
 
 /* ── Sections ───────────────────────────────────────────────────── */
-.section-title { font-size: 13px; font-weight: 600; color: var(--color-fg-muted); letter-spacing: 0.03em; margin: 0 0 10px; display: flex; align-items: center; gap: 12px; }
-.section-link { margin-left: auto; }
+.section-eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0 0 6px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--hal0-accent);
+  font-weight: 500;
+}
+.section-eyebrow-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--hal0-accent);
+  box-shadow: 0 0 6px var(--hal0-accent);
+}
+.section-title { font-size: 16px; font-weight: 600; color: var(--color-fg); letter-spacing: -0.01em; margin: 0 0 12px; display: flex; align-items: center; gap: 12px; }
+.section-link { margin-left: auto; font-size: 11px; }
 
 /* ── Slot summary list ──────────────────────────────────────────── */
 .slot-list { display: flex; flex-direction: column; gap: 6px; }
 .slot-row { display: flex; align-items: center; justify-content: space-between; padding: 12px 16px; gap: 12px; }
 .slot-info { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .state-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
-.state-running { background: var(--color-success); box-shadow: 0 0 6px -1px var(--color-success); }
+.state-running { background: var(--hal0-accent); box-shadow: 0 0 8px var(--hal0-accent); }
 .state-idle    { background: var(--color-warning); }
 .state-error   { background: var(--color-danger); }
 .state-offline { background: var(--color-fg-faint); }
 .slot-name-wrap { display: flex; flex-direction: column; min-width: 0; }
-.slot-name { font-size: 13px; font-weight: 600; color: var(--color-fg); }
+.slot-name { font-family: var(--font-mono); font-size: 13px; font-weight: 600; color: var(--color-fg); }
 .slot-model { font-size: 11px; color: var(--color-fg-faint); font-family: var(--font-mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .slot-meta { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
-.mono-chip { font-family: var(--font-mono); font-size: 11px; padding: 2px 7px; border-radius: 4px; background: var(--color-surface-2); border: 1px solid var(--color-border); color: var(--color-fg-faint); }
-.state-label { font-family: var(--font-mono); font-size: 11px; padding: 2px 8px; border-radius: 4px; }
-.state-label.state-running { background: color-mix(in oklch, var(--color-success) 15%, transparent); color: var(--color-success); }
+.mono-chip { font-family: var(--font-mono); font-size: 11px; padding: 2px 7px; border-radius: 4px; background: var(--color-surface-2); border: 1px solid var(--color-border); color: var(--color-fg-faint); font-feature-settings: 'zero' 1, 'ss02' 1, 'tnum' 1; }
+.state-label { font-family: var(--font-mono); font-size: 10.5px; padding: 2px 8px; border-radius: 4px; text-transform: uppercase; letter-spacing: 0.06em; }
+.state-label.state-running { background: color-mix(in srgb, var(--hal0-accent) 14%, transparent); color: var(--hal0-accent); }
 .state-label.state-idle    { background: color-mix(in oklch, var(--color-warning) 15%, transparent); color: var(--color-warning); }
 .state-label.state-error   { background: color-mix(in oklch, var(--color-danger) 15%, transparent); color: var(--color-danger); }
 .state-label.state-offline { background: var(--color-surface-2); color: var(--color-fg-faint); }
@@ -499,8 +534,8 @@ loadChatModels()
 
 /* ── Logs ───────────────────────────────────────────────────────── */
 .logs-empty { padding: 20px 16px; display: flex; align-items: center; }
-.logs-list { padding: 8px 0; max-height: 200px; overflow-y: auto; }
-.log-line { padding: 3px 16px; font-family: var(--font-mono); font-size: 11.5px; color: var(--color-fg-muted); white-space: pre-wrap; word-break: break-all; border-bottom: 1px solid var(--color-border); }
+.logs-list { padding: 8px 0; max-height: 200px; overflow-y: auto; background: var(--hal0-bg-sunken); }
+.log-line { padding: 3px 16px; font-family: var(--font-mono); font-size: 11.5px; color: var(--hal0-fg-dim); white-space: pre-wrap; word-break: break-all; border-bottom: 1px solid var(--color-border); }
 .log-line:last-child { border-bottom: none; }
 
 /* ── Utility ────────────────────────────────────────────────────── */
@@ -510,10 +545,10 @@ loadChatModels()
 .text-muted   { color: var(--color-fg-faint); }
 .mono-text    { font-family: var(--font-mono); font-size: 12px; }
 
-.btn-primary { padding: 8px 18px; border-radius: var(--radius); background: var(--color-accent); color: var(--color-bg); font-size: 13px; font-weight: 600; border: none; cursor: pointer; flex-shrink: 0; }
-.btn-primary:hover:not(:disabled) { opacity: 0.88; }
+.btn-primary { padding: 8px 18px; border-radius: var(--radius); background: var(--hal0-accent); color: #000; font-family: var(--font-mono); font-size: 12px; font-weight: 500; border: none; cursor: pointer; flex-shrink: 0; transition: background 0.15s; }
+.btn-primary:hover:not(:disabled) { background: var(--hal0-accent-hover); }
 .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
 
-.btn-secondary { display: flex; align-items: center; gap: 6px; padding: 6px 12px; border-radius: var(--radius); border: 1px solid var(--color-border); background: transparent; color: var(--color-fg-muted); font-size: 12.5px; cursor: pointer; }
-.btn-secondary:hover { background: var(--color-surface-2); color: var(--color-fg); }
+.btn-secondary { display: flex; align-items: center; gap: 6px; padding: 6px 12px; border-radius: var(--radius); border: 1px solid var(--color-border); background: transparent; color: var(--color-fg-muted); font-family: var(--font-mono); font-size: 12px; cursor: pointer; transition: border-color 0.15s, color 0.15s; }
+.btn-secondary:hover { border-color: var(--color-border-hi); color: var(--color-fg); }
 </style>

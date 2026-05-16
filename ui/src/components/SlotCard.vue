@@ -270,9 +270,15 @@ const sparkSvg = computed(() => {
   color: var(--color-fg);
   transition: border-color 0.18s ease, box-shadow 0.18s ease, opacity 0.18s ease;
 }
-.slot-card.is-running { border-color: color-mix(in oklch, var(--color-success), transparent 70%); }
+/* Running slot is the headline metric — amber inset rail mirroring the
+   "Why hal0" featured-card treatment from hal0-web. */
+.slot-card.is-running {
+  border-color: color-mix(in srgb, var(--hal0-accent) 40%, var(--color-border));
+  box-shadow: inset 3px 0 0 var(--hal0-accent);
+}
 .slot-card.is-busy { opacity: 0.78; }
 .slot-card:hover { border-color: var(--color-border-hi); }
+.slot-card.is-running:hover { border-color: color-mix(in srgb, var(--hal0-accent) 55%, var(--color-border)); }
 
 .sc-head {
   display: flex;
@@ -280,8 +286,8 @@ const sparkSvg = computed(() => {
   gap: 6px;
   padding: 10px 12px 4px;
 }
-.sc-name { font-weight: 600; font-size: 13px; color: var(--color-fg); }
-.sc-port { margin-left: auto; font-size: 11px; color: var(--color-fg-faint); }
+.sc-name { font-family: var(--font-mono); font-weight: 600; font-size: 13px; color: var(--color-fg); }
+.sc-port { margin-left: auto; font-size: 11px; color: var(--color-fg-faint); font-feature-settings: 'zero' 1, 'ss02' 1, 'tnum' 1; }
 .sc-dot {
   width: 6px;
   height: 6px;
@@ -289,7 +295,7 @@ const sparkSvg = computed(() => {
   background: var(--color-fg-faint);
   flex-shrink: 0;
 }
-.sc-state-live .sc-dot   { background: var(--color-success); box-shadow: 0 0 0 4px color-mix(in oklch, var(--color-success), transparent 80%); animation: dot-pulse 1.4s ease-in-out infinite; }
+.sc-state-live .sc-dot   { background: var(--hal0-accent); box-shadow: 0 0 0 4px color-mix(in srgb, var(--hal0-accent) 22%, transparent), 0 0 8px var(--hal0-accent); animation: dot-pulse 1.4s ease-in-out infinite; }
 
 /* SSE-driven state-transition flash. Brief border highlight + dot pop so
    the user sees instant feedback on a transition without the noise of a
@@ -307,7 +313,7 @@ const sparkSvg = computed(() => {
 @media (prefers-reduced-motion: reduce) {
   .slot-card.sc-flash, .slot-card.sc-flash .sc-dot { animation: none; }
 }
-.sc-state-idle .sc-dot   { background: var(--color-accent); }
+.sc-state-idle .sc-dot   { background: var(--hal0-accent); opacity: 0.65; }
 .sc-state-loading .sc-dot { background: var(--color-warning); animation: dot-pulse 1.4s ease-in-out infinite; }
 .sc-state-error .sc-dot  { background: var(--color-danger); }
 .sc-state-offline .sc-dot { background: var(--color-fg-faint); }
@@ -342,9 +348,9 @@ const sparkSvg = computed(() => {
   white-space: nowrap;
 }
 .sc-model-chip.primary {
-  color: var(--color-fg);
-  border-color: color-mix(in oklch, var(--color-accent), transparent 60%);
-  background: color-mix(in oklch, var(--color-accent), transparent 90%);
+  color: var(--hal0-accent);
+  border-color: color-mix(in srgb, var(--hal0-accent) 40%, transparent);
+  background: color-mix(in srgb, var(--hal0-accent) 12%, transparent);
 }
 
 .sc-meta {
@@ -399,19 +405,20 @@ const sparkSvg = computed(() => {
   grid-template-columns: repeat(4, 1fr);
   text-align: center;
   font-family: var(--font-mono);
+  font-feature-settings: 'zero' 1, 'ss02' 1, 'tnum' 1;
 }
-.sc-stat-l { font-size: 8px; color: var(--color-fg-faint); text-transform: uppercase; letter-spacing: 0.08em; }
+.sc-stat-l { font-size: 8px; color: var(--hal0-accent); text-transform: uppercase; letter-spacing: 0.08em; opacity: 0.75; }
 .sc-stat-v { font-size: 12px; font-weight: 500; color: var(--color-fg-faint); margin-top: 1px; }
-.sc-stat-v.active { color: var(--color-success); }
+.sc-stat-v.active { color: var(--hal0-accent); }
 
 .sc-spark {
   position: relative;
   margin: 4px 12px 0;
   height: 28px;
-  background: rgba(0,0,0,0.18);
+  background: var(--hal0-bg-sunken);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-sm);
-  color: var(--color-accent);
+  color: var(--hal0-accent);
   overflow: hidden;
 }
 .sc-spark-inner :deep(svg) { width: 100%; height: 100%; display: block; }

@@ -285,7 +285,7 @@ const QUANTS = ['Q4_K_M', 'Q5_K_M', 'Q8_0', 'F16', 'BF16']
 
 <template>
   <div class="models-page">
-    <PageHeader title="Models" subtitle="Registry and download management">
+    <PageHeader eyebrow="Registry" title="Models" subtitle="Local model registry and downloads">
       <template #actions>
         <div class="search-wrap">
           <svg width="13" height="13" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" class="search-icon" aria-hidden="true">
@@ -630,13 +630,14 @@ const QUANTS = ['Q4_K_M', 'Q5_K_M', 'Q8_0', 'F16', 'BF16']
   border-collapse: collapse;
   font-size: 13px;
 }
+.models-table thead { background: var(--hal0-bg-sunken); }
 .models-table th {
   padding: 10px 16px;
   text-align: left;
   font-size: 11px;
   text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--color-fg-faint);
+  letter-spacing: 0.08em;
+  color: var(--hal0-accent);
   font-family: var(--font-mono);
   border-bottom: 1px solid var(--color-border);
   font-weight: 500;
@@ -652,9 +653,9 @@ const QUANTS = ['Q4_K_M', 'Q5_K_M', 'Q8_0', 'F16', 'BF16']
 .models-table tbody tr:hover td { background: var(--color-surface-2); }
 
 .model-name-cell { display: flex; flex-direction: column; gap: 2px; }
-.model-name { font-weight: 500; color: var(--color-fg); }
+.model-name { font-family: var(--font-mono); font-weight: 600; color: var(--color-fg); }
 .model-id   { font-family: var(--font-mono); font-size: 10.5px; color: var(--color-fg-faint); }
-.mono-cell  { font-family: var(--font-mono); font-size: 11.5px; }
+.mono-cell  { font-family: var(--font-mono); font-size: 11.5px; font-feature-settings: 'zero' 1, 'ss02' 1, 'tnum' 1; }
 
 /* Inline pull progress (Team I gap #3) */
 .row-pull { display: flex; flex-direction: column; gap: 4px; margin-top: 4px; }
@@ -704,7 +705,7 @@ const QUANTS = ['Q4_K_M', 'Q5_K_M', 'Q8_0', 'F16', 'BF16']
   background: var(--color-surface-2); border: 1px solid var(--color-border);
   color: var(--color-fg-faint);
 }
-.slot-badge.badge-running { background: color-mix(in oklch, var(--color-success) 12%, transparent); border-color: color-mix(in oklch, var(--color-success) 30%, transparent); color: var(--color-success); }
+.slot-badge.badge-running { background: color-mix(in srgb, var(--hal0-accent) 12%, transparent); border-color: color-mix(in srgb, var(--hal0-accent) 35%, transparent); color: var(--hal0-accent); }
 .text-faint { color: var(--color-fg-faint); }
 
 /* Row actions */
@@ -750,7 +751,7 @@ const QUANTS = ['Q4_K_M', 'Q5_K_M', 'Q8_0', 'F16', 'BF16']
   transition: color 0.1s, border-color 0.1s;
 }
 .pull-tab:hover { color: var(--color-fg-muted); }
-.pull-tab.active { color: var(--color-accent); border-bottom-color: var(--color-accent); }
+.pull-tab.active { color: var(--hal0-accent); border-bottom-color: var(--hal0-accent); }
 
 /* Curated list */
 .curated-list { display: flex; flex-direction: column; gap: 8px; }
@@ -774,11 +775,12 @@ const QUANTS = ['Q4_K_M', 'Q5_K_M', 'Q8_0', 'F16', 'BF16']
 .btn-sm-accent {
   display: flex; align-items: center; gap: 5px;
   padding: 5px 12px; border-radius: var(--radius);
-  background: var(--color-accent); color: var(--color-bg);
-  font-size: 12px; font-weight: 600; border: none; cursor: pointer;
-  flex-shrink: 0;
+  background: var(--hal0-accent); color: #000;
+  font-family: var(--font-mono);
+  font-size: 11.5px; font-weight: 500; border: none; cursor: pointer;
+  flex-shrink: 0; transition: background 0.15s;
 }
-.btn-sm-accent:hover:not(:disabled) { opacity: 0.88; }
+.btn-sm-accent:hover:not(:disabled) { background: var(--hal0-accent-hover); }
 .btn-sm-accent:disabled { opacity: 0.45; cursor: not-allowed; }
 
 /* Shared */
@@ -802,13 +804,13 @@ const QUANTS = ['Q4_K_M', 'Q5_K_M', 'Q8_0', 'F16', 'BF16']
 .field-hint { font-size: 11.5px; color: var(--color-fg-faint); margin: 0; }
 .mono-text  { font-family: var(--font-mono); }
 
-.btn-primary { display: flex; align-items: center; gap: 6px; padding: 7px 16px; border-radius: var(--radius); background: var(--color-accent); color: var(--color-bg); font-size: 13px; font-weight: 600; border: none; cursor: pointer; }
-.btn-primary:hover:not(:disabled) { opacity: 0.88; }
+.btn-primary { display: flex; align-items: center; gap: 6px; padding: 7px 16px; border-radius: var(--radius); background: var(--hal0-accent); color: #000; font-family: var(--font-mono); font-size: 12px; font-weight: 500; border: none; cursor: pointer; transition: background 0.15s; }
+.btn-primary:hover:not(:disabled) { background: var(--hal0-accent-hover); }
 .btn-primary:disabled { opacity: 0.45; cursor: not-allowed; }
-.btn-ghost { padding: 7px 16px; border-radius: var(--radius); border: 1px solid var(--color-border); background: transparent; color: var(--color-fg-muted); font-size: 13px; cursor: pointer; }
-.btn-ghost:hover:not(:disabled) { background: var(--color-surface-2); color: var(--color-fg); }
+.btn-ghost { padding: 7px 16px; border-radius: var(--radius); border: 1px solid var(--color-border); background: transparent; color: var(--color-fg-muted); font-family: var(--font-mono); font-size: 12px; cursor: pointer; transition: border-color 0.15s, color 0.15s; }
+.btn-ghost:hover:not(:disabled) { border-color: var(--color-border-hi); color: var(--color-fg); }
 .btn-ghost:disabled { opacity: 0.5; cursor: not-allowed; }
-.btn-link { background: transparent; border: none; color: var(--color-accent); font-size: 13px; cursor: pointer; }
+.btn-link { background: transparent; border: none; color: var(--hal0-accent); font-size: 13px; cursor: pointer; }
 .btn-link:hover { text-decoration: underline; }
 
 .spinner { width: 11px; height: 11px; border: 2px solid rgba(255,255,255,0.3); border-top-color: white; border-radius: 50%; animation: spin 0.7s linear infinite; flex-shrink: 0; }

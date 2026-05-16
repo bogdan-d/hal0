@@ -211,7 +211,7 @@ onUnmounted(closeStream)
 
 <template>
   <div class="logs-page">
-    <PageHeader title="Logs" subtitle="systemd journal tail">
+    <PageHeader eyebrow="Journal" title="Logs" subtitle="Live systemd journal tail">
       <template #actions>
         <div class="status-dot-wrap" :title="connected ? 'SSE connected' : (frozen ? 'frozen' : 'disconnected')" aria-label="SSE connection status">
           <span class="dot" :class="frozen ? 'dot-frozen' : (connected ? 'dot-live' : 'dot-off')" aria-hidden="true" />
@@ -374,10 +374,10 @@ onUnmounted(closeStream)
 
 .status-dot-wrap { display: flex; align-items: center; gap: 6px; }
 .dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
-.dot-live   { background: var(--color-success); box-shadow: 0 0 6px -1px var(--color-success); }
-.dot-frozen { background: var(--color-accent); }
+.dot-live   { background: var(--hal0-accent); box-shadow: 0 0 8px var(--hal0-accent); }
+.dot-frozen { background: var(--color-warning); }
 .dot-off    { background: var(--color-fg-faint); }
-.dot-label  { font-family: var(--font-mono); font-size: 11px; color: var(--color-fg-faint); }
+.dot-label  { font-family: var(--font-mono); font-size: 11px; color: var(--color-fg-faint); text-transform: uppercase; letter-spacing: 0.06em; }
 
 .error-banner { padding: 8px 14px; border-radius: var(--radius); background: color-mix(in oklch, var(--color-warning) 10%, var(--color-surface)); border: 1px solid color-mix(in oklch, var(--color-warning) 30%, transparent); color: var(--color-warning); font-size: 12px; font-family: var(--font-mono); }
 
@@ -385,19 +385,20 @@ onUnmounted(closeStream)
 .logbox {
   flex: 1;
   overflow-y: auto;
-  background: oklch(9% 0.01 250);
+  background: var(--hal0-bg-sunken);
   padding: 12px 16px;
   min-height: 400px;
   font-family: var(--font-mono);
   font-size: 11.5px;
   line-height: 1.55;
+  font-feature-settings: 'zero' 1, 'ss02' 1, 'tnum' 1;
 }
 .logbox-loading,
 .logbox-empty { color: var(--color-fg-faint); padding: 8px 0; }
-.log-line { color: var(--color-fg-muted); white-space: pre-wrap; word-break: break-all; }
+.log-line { color: var(--hal0-fg-dim); white-space: pre-wrap; word-break: break-all; }
 .log-line.line-error { color: var(--color-danger); }
 .log-line.line-warn  { color: var(--color-warning); }
-.log-line.line-debug { color: var(--color-fg-faint); }
+.log-line.line-debug { color: var(--color-fg-faint); opacity: 0.7; }
 
 .scroll-paused {
   position: absolute;
@@ -418,8 +419,8 @@ onUnmounted(closeStream)
 }
 .scroll-resume-btn:hover { color: var(--color-fg); }
 
-.btn-secondary { display: flex; align-items: center; gap: 6px; padding: 5px 11px; border-radius: var(--radius); border: 1px solid var(--color-border); background: transparent; color: var(--color-fg-muted); font-size: 12px; cursor: pointer; }
-.btn-secondary:hover { background: var(--color-surface-2); color: var(--color-fg); }
+.btn-secondary { display: flex; align-items: center; gap: 6px; padding: 5px 11px; border-radius: var(--radius); border: 1px solid var(--color-border); background: transparent; color: var(--color-fg-muted); font-family: var(--font-mono); font-size: 11.5px; cursor: pointer; transition: border-color 0.15s, color 0.15s; }
+.btn-secondary:hover { border-color: var(--color-border-hi); color: var(--color-fg); }
 .spin { animation: spin 0.8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 

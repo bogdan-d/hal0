@@ -285,9 +285,9 @@ watch(systemUpdateHint, (v) => { if (v && !check.value) doCheck() })
   align-items: center;
   gap: 10px;
   padding: 9px 24px;
-  background: color-mix(in oklch, var(--color-info) 16%, var(--color-surface));
-  border-bottom: 1px solid color-mix(in oklch, var(--color-info) 30%, transparent);
-  color: color-mix(in oklch, var(--color-info) 90%, var(--color-fg));
+  background: color-mix(in srgb, var(--hal0-accent) 10%, var(--hal0-bg-elevated));
+  border-bottom: 1px solid color-mix(in srgb, var(--hal0-accent) 35%, transparent);
+  color: var(--hal0-fg);
   font-size: 13px;
 }
 
@@ -296,9 +296,10 @@ watch(systemUpdateHint, (v) => { if (v && !check.value) doCheck() })
 .banner-msg .mono { font-family: var(--font-mono); font-size: 12px; }
 .banner-link {
   margin-left: 6px;
-  color: var(--color-accent);
+  color: var(--hal0-accent);
   text-decoration: none;
   font-size: 12px;
+  font-family: var(--font-mono);
 }
 .banner-link:hover { text-decoration: underline; }
 
@@ -307,7 +308,7 @@ watch(systemUpdateHint, (v) => { if (v && !check.value) doCheck() })
   position: relative;
   width: 120px;
   height: 4px;
-  background: color-mix(in oklch, var(--color-info) 25%, transparent);
+  background: color-mix(in srgb, var(--hal0-accent) 20%, transparent);
   border-radius: 4px;
   overflow: hidden;
   margin-left: 6px;
@@ -315,8 +316,9 @@ watch(systemUpdateHint, (v) => { if (v && !check.value) doCheck() })
 .banner-progress-fill {
   display: block;
   height: 100%;
-  background: var(--color-info);
+  background: var(--hal0-accent);
   transition: width 0.3s ease;
+  box-shadow: 0 0 8px color-mix(in srgb, var(--hal0-accent) 60%, transparent);
 }
 
 .banner-actions {
@@ -329,7 +331,7 @@ watch(systemUpdateHint, (v) => { if (v && !check.value) doCheck() })
 
 .banner-channel {
   display: inline-flex;
-  border: 1px solid color-mix(in oklch, var(--color-info) 30%, transparent);
+  border: 1px solid color-mix(in srgb, var(--hal0-accent) 30%, transparent);
   border-radius: var(--radius);
   overflow: hidden;
 }
@@ -337,37 +339,42 @@ watch(systemUpdateHint, (v) => { if (v && !check.value) doCheck() })
   padding: 2px 8px;
   background: transparent;
   border: none;
-  color: color-mix(in oklch, var(--color-info) 80%, var(--color-fg));
+  color: var(--hal0-fg-muted);
   font-size: 11px;
   font-family: var(--font-mono);
   cursor: pointer;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
 }
 .banner-channel-btn.active {
-  background: var(--color-info);
-  color: var(--color-bg);
+  background: var(--hal0-accent);
+  color: #000;
 }
 
 .banner-btn {
   padding: 4px 12px;
   border-radius: var(--radius);
-  background: var(--color-info);
-  color: var(--color-bg);
-  font-size: 12px;
-  font-weight: 600;
+  background: var(--hal0-accent);
+  color: #000;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  font-weight: 500;
   border: none;
   cursor: pointer;
   flex-shrink: 0;
+  transition: background 0.15s;
 }
-.banner-btn:hover:not(:disabled) { opacity: 0.9; }
+.banner-btn:hover:not(:disabled) { background: var(--hal0-accent-hover); }
 .banner-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .banner-btn-ghost {
   background: transparent;
-  color: color-mix(in oklch, var(--color-info) 90%, var(--color-fg));
-  border: 1px solid color-mix(in oklch, var(--color-info) 40%, transparent);
+  color: var(--hal0-fg-muted);
+  border: 1px solid color-mix(in srgb, var(--hal0-accent) 35%, transparent);
 }
 .banner-btn-ghost:hover:not(:disabled) {
-  background: color-mix(in oklch, var(--color-info) 12%, transparent);
+  background: color-mix(in srgb, var(--hal0-accent) 10%, transparent);
+  color: var(--hal0-fg);
 }
 
 .slide-up-enter-active { transition: all 0.2s ease; }

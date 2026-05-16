@@ -1,63 +1,182 @@
 @import "tailwindcss";
 
-/* Google Fonts are loaded in index.html to avoid FOUC */
+/* hal0 dashboard — design tokens.
+ *
+ * Single source of truth, kept deliberately in sync with hal0-web's
+ * src/styles/global.css. The dashboard exposes *two* token namespaces:
+ *
+ *   --hal0-*     — brand tokens (match the website exactly)
+ *   --color-*    — dashboard-flavoured aliases that pre-date the brand
+ *                  refresh. Every existing component reads --color-*,
+ *                  so we keep them as thin aliases over --hal0-* and
+ *                  nothing has to change to pick up the new look.
+ *
+ * Fonts are self-hosted via @fontsource* (imported in main.js) so a
+ * cold dashboard load doesn't reach out to Google's CDN.
+ */
 
-@theme {
-  /* ── Backgrounds ──────────────────────────────────────────────── */
-  --color-bg:       oklch(12% 0.01 250);   /* near-black, slight blue cast */
-  --color-surface:  oklch(16% 0.012 250);  /* card / panel surface */
-  --color-surface-2: oklch(19% 0.014 250); /* raised elements */
-  --color-surface-3: oklch(22% 0.015 250); /* hover states */
+/* ─── Brand tokens ─────────────────────────────────────────────── */
+:root {
+  /* Brand — sodium amber. Matches hal0-web exactly. */
+  --hal0-accent:        #ffb000;
+  --hal0-accent-hover:  #ffc533;
+  --hal0-accent-muted:  #7a5500;
+  --hal0-accent-glow:   rgba(255, 176, 0, 0.18);
 
-  /* ── Borders ──────────────────────────────────────────────────── */
-  --color-border:   oklch(28% 0.015 250);  /* default separator */
-  --color-border-hi: oklch(36% 0.018 250); /* focus / hover */
+  /* Dark surfaces (default theme) */
+  --hal0-bg:            #0a0a0a;
+  --hal0-bg-elevated:   #141414;
+  --hal0-bg-sunken:     #050505;
+  --hal0-bg-raised:     #1c1c1c;        /* one step above elevated, hover/focus */
+  --hal0-fg:            #f5f5f4;
+  --hal0-fg-muted:      #c8c2bd;         /* ≥7:1 on bg-elevated */
+  --hal0-fg-dim:        #a3a09c;         /* ≥4.5:1 on bg-elevated */
+  --hal0-border:        #262626;
+  --hal0-border-strong: #3a3a3a;
 
-  /* ── Accent — cyan/teal ───────────────────────────────────────── */
-  /* Rationale: cyan reads as "data flow" and "inference throughput" —
-     it complements the dark neutral shell without competing with status
-     colors (green/yellow/red). Distinctly different from purple/violet
-     used in the haloai predecessor, giving hal0 its own identity. */
-  --color-accent:   oklch(72% 0.18 195);   /* cyan-400 equivalent */
-  --color-accent-hi: oklch(80% 0.16 195);  /* hover / active */
-  --color-accent-bg: oklch(20% 0.04 195);  /* tinted surface */
+  /* Type stack — same as hal0-web, including the size-adjusted
+   * fallback families defined below so the FOUT swap is metric-neutral. */
+  --hal0-font-mono:    'JetBrains Mono', 'JBM Fallback', ui-monospace, 'SF Mono', Menlo, monospace;
+  --hal0-font-body:    'Geist Variable', 'Geist', 'Geist Fallback', system-ui, -apple-system, BlinkMacSystemFont,
+                        'Segoe UI', Roboto, sans-serif;
+  --hal0-font-display: var(--hal0-font-mono);
 
-  /* ── Text ─────────────────────────────────────────────────────── */
-  --color-fg:       oklch(94% 0.01 250);   /* primary text, near-white */
-  --color-fg-muted: oklch(65% 0.012 250);  /* secondary / labels */
-  --color-fg-faint: oklch(42% 0.01 250);   /* placeholder / disabled */
+  /* Motion easing — same curve the website uses for nav transitions. */
+  --hal0-ease: cubic-bezier(0.22, 1, 0.36, 1);
+}
 
-  /* ── Status ───────────────────────────────────────────────────── */
-  --color-success:  oklch(70% 0.18 145);   /* green */
-  --color-warning:  oklch(78% 0.18 85);    /* amber */
-  --color-danger:   oklch(65% 0.22 25);    /* red */
-  --color-info:     oklch(72% 0.18 230);   /* blue */
+/* ─── Size-adjusted fallback fonts ───────────────────────────────
+ * Without these, the swap from system fallback → real webfont reflows
+ * headings and inflates CLS. See hal0-web/src/styles/fonts.css for the
+ * tuning notes (CLS dropped from ~0.21 → ~0 on long pages). */
+@font-face {
+  font-family: 'JBM Fallback';
+  src: local('Menlo'), local('Consolas'), local('Liberation Mono'), local('Courier New');
+  size-adjust: 102%;
+  ascent-override: 90%;
+  descent-override: 22%;
+  line-gap-override: 0%;
+}
+@font-face {
+  font-family: 'Geist Fallback';
+  src: local('Inter'), local('Segoe UI'), local('Helvetica Neue'), local('Arial');
+  size-adjust: 100%;
+  ascent-override: 93%;
+  descent-override: 22%;
+  line-gap-override: 0%;
+}
 
-  /* ── Fonts ────────────────────────────────────────────────────── */
-  --font-sans: 'Inter', system-ui, -apple-system, sans-serif;
-  --font-mono: 'JetBrains Mono', ui-monospace, 'Cascadia Code', monospace;
+/* ─── Dashboard aliases ──────────────────────────────────────────
+ * Every component in src/{components,views}/ reads these. Keep them
+ * thin aliases over the hal0-* tokens so the brand refresh stays the
+ * single source of truth. */
+:root {
+  /* Backgrounds */
+  --color-bg:        var(--hal0-bg);
+  --color-surface:   var(--hal0-bg-elevated);
+  --color-surface-2: var(--hal0-bg-raised);
+  --color-surface-3: #242422;                   /* hover / pressed */
 
-  /* ── Radii ────────────────────────────────────────────────────── */
+  /* Borders */
+  --color-border:    var(--hal0-border);
+  --color-border-hi: var(--hal0-border-strong);
+
+  /* Accent — sodium amber (was cyan; brand refresh). The amber-bg is
+   * a hand-tuned warm shadow tone, dark enough to host hover states
+   * without competing with status colours. */
+  --color-accent:    var(--hal0-accent);
+  --color-accent-hi: var(--hal0-accent-hover);
+  --color-accent-bg: #2a1d00;
+  --color-accent-glow: var(--hal0-accent-glow);
+
+  /* Text */
+  --color-fg:        var(--hal0-fg);
+  --color-fg-muted:  var(--hal0-fg-muted);
+  --color-fg-faint:  var(--hal0-fg-dim);
+
+  /* Status */
+  --color-success:   oklch(70% 0.18 145);
+  --color-warning:   oklch(78% 0.18 85);
+  --color-danger:    oklch(65% 0.22 25);
+  --color-info:      oklch(72% 0.18 230);
+
+  /* Fonts */
+  --font-sans:    var(--hal0-font-body);
+  --font-mono:    var(--hal0-font-mono);
+  --font-display: var(--hal0-font-display);
+
+  /* Radii */
   --radius-sm: 4px;
   --radius:    6px;
   --radius-lg: 10px;
   --radius-xl: 14px;
 }
 
-/* ── Global reset + base ────────────────────────────────────────── */
+/* ─── Tailwind v4 theme bridge ─────────────────────────────────── */
+@theme {
+  /* hal0-* namespace — mirrors hal0-web so utilities (text-hal0-fg,
+   * bg-hal0-bg-elevated, …) work identically in both repos. */
+  --color-hal0-accent:        var(--hal0-accent);
+  --color-hal0-accent-hover:  var(--hal0-accent-hover);
+  --color-hal0-accent-muted:  var(--hal0-accent-muted);
+
+  --color-hal0-bg:            var(--hal0-bg);
+  --color-hal0-bg-elevated:   var(--hal0-bg-elevated);
+  --color-hal0-bg-sunken:     var(--hal0-bg-sunken);
+  --color-hal0-bg-raised:     var(--hal0-bg-raised);
+  --color-hal0-fg:            var(--hal0-fg);
+  --color-hal0-fg-muted:      var(--hal0-fg-muted);
+  --color-hal0-fg-dim:        var(--hal0-fg-dim);
+  --color-hal0-border:        var(--hal0-border);
+  --color-hal0-border-strong: var(--hal0-border-strong);
+
+  /* Dashboard-flavoured tokens — also exposed as Tailwind utilities
+   * so views can write bg-bg, text-fg-muted, border-border. */
+  --color-bg:           var(--color-bg);
+  --color-surface:      var(--color-surface);
+  --color-surface-2:    var(--color-surface-2);
+  --color-border:       var(--color-border);
+  --color-border-hi:    var(--color-border-hi);
+  --color-accent:       var(--color-accent);
+  --color-accent-bg:    var(--color-accent-bg);
+  --color-fg:           var(--color-fg);
+  --color-fg-muted:     var(--color-fg-muted);
+  --color-fg-faint:     var(--color-fg-faint);
+  --color-success:      var(--color-success);
+  --color-warning:      var(--color-warning);
+  --color-danger:       var(--color-danger);
+  --color-info:         var(--color-info);
+
+  --font-sans:    'Geist Variable', 'Geist', 'Geist Fallback', system-ui, sans-serif;
+  --font-mono:    'JetBrains Mono', 'JBM Fallback', ui-monospace, 'SF Mono', Menlo, monospace;
+  --font-display: 'JetBrains Mono', 'JBM Fallback', ui-monospace, 'SF Mono', Menlo, monospace;
+
+  --radius-sm: 4px;
+  --radius:    6px;
+  --radius-lg: 10px;
+  --radius-xl: 14px;
+}
+
+/* ─── Reset + base ─────────────────────────────────────────────── */
 *, *::before, *::after { box-sizing: border-box; }
 
 html, body {
   margin: 0;
   padding: 0;
   height: 100%;
-  background: var(--color-bg);
-  color: var(--color-fg);
-  font-family: var(--font-sans);
+  background: var(--hal0-bg);
+  color: var(--hal0-fg);
+  font-family: var(--hal0-font-body);
   font-size: 14px;
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  /* Geist's stylistic alternates — matches hal0-web body styling. */
+  font-feature-settings: 'cv11' 1, 'ss01' 1;
+}
+
+code, pre, kbd, .tabular, .mono, .wordmark {
+  font-feature-settings: 'zero' 1, 'ss02' 1;
 }
 
 #app {
@@ -67,19 +186,44 @@ html, body {
   overflow: hidden;
 }
 
-/* ── Scrollbar (dark, thin) ─────────────────────────────────────── */
-::-webkit-scrollbar { width: 5px; height: 5px; }
-::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: var(--color-border); border-radius: 10px; }
-::-webkit-scrollbar-thumb:hover { background: var(--color-border-hi); }
-
-/* ── Focus ring ─────────────────────────────────────────────────── */
-:focus-visible {
-  outline: 2px solid var(--color-accent);
-  outline-offset: 2px;
+/* The wordmark — JetBrains Mono with slashed zero, slightly tightened.
+ * Used by <Wordmark /> + as a fallback for direct .wordmark class use. */
+.wordmark {
+  font-family: var(--hal0-font-display);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  font-feature-settings: 'zero' 1;
 }
 
-/* ── Transitions ────────────────────────────────────────────────── */
+/* ─── Scrollbar ────────────────────────────────────────────────── */
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--hal0-border); border-radius: 10px; }
+::-webkit-scrollbar-thumb:hover { background: var(--hal0-border-strong); }
+
+/* ─── Focus ring — amber, matches hal0-web ─────────────────────── */
+:focus-visible {
+  outline: 2px solid var(--hal0-accent);
+  outline-offset: 3px;
+  border-radius: 2px;
+}
+
+/* Selection in accent — small touch, big personality. */
+::selection {
+  background: var(--hal0-accent-glow);
+  color: var(--hal0-fg);
+}
+
+/* ─── Reduced motion ───────────────────────────────────────────── */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* ─── Transitions ──────────────────────────────────────────────── */
 .fade-enter-active, .fade-leave-active { transition: opacity 0.12s ease; }
 .fade-enter-from, .fade-leave-to { opacity: 0; }
 
@@ -88,8 +232,62 @@ html, body {
 .slide-up-enter-from { opacity: 0; transform: translateY(8px); }
 .slide-up-leave-to { opacity: 0; transform: translateY(-4px); }
 
-/* Toast slide-in */
 .toast-enter-active { transition: all 0.2s ease; }
 .toast-leave-active { transition: all 0.18s ease; }
 .toast-enter-from { opacity: 0; transform: translateX(16px); }
 .toast-leave-to { opacity: 0; transform: translateX(16px); }
+
+/* ─── Brand helpers ────────────────────────────────────────────── */
+/* Reusable "eyebrow" tag — small uppercase mono label with optional
+ * amber dot, the website's standard section header treatment. */
+.eyebrow {
+  font-family: var(--hal0-font-mono);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--hal0-accent);
+  font-weight: 500;
+}
+
+/* Vacuum-tube filament — 1px gradient line under elevated surfaces
+ * that brightens to amber at centre. Apply via .filament on the host
+ * element; relies on position: relative on the parent. */
+.filament {
+  position: relative;
+}
+.filament::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -1px;
+  height: 1px;
+  background: linear-gradient(
+    to right,
+    transparent 0%,
+    color-mix(in srgb, var(--hal0-accent) 60%, transparent) 50%,
+    transparent 100%
+  );
+  pointer-events: none;
+}
+
+/* Halo glow under an element — radial amber wash, used on heroes. */
+.halo-glow {
+  position: relative;
+}
+.halo-glow::before {
+  content: '';
+  position: absolute;
+  inset: auto 0 -32px 0;
+  height: 64px;
+  background: radial-gradient(ellipse at center, var(--hal0-accent-glow), transparent 70%);
+  pointer-events: none;
+  z-index: 0;
+}
+
+/* Inset accent rail on a card — matches the "Why hal0" highlight
+ * pattern from hal0-web/src/pages/index.astro. */
+.accent-rail {
+  box-shadow: inset 3px 0 0 var(--hal0-accent);
+  border-color: color-mix(in srgb, var(--hal0-accent) 40%, var(--hal0-border)) !important;
+}

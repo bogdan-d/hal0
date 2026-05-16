@@ -65,13 +65,14 @@ const emit = defineEmits(['cta'])
   margin-top: 4px;
   padding: 7px 16px;
   border-radius: var(--radius);
-  background: var(--color-accent);
-  color: var(--color-bg);
-  font-size: 13px;
-  font-weight: 600;
+  background: var(--hal0-accent);
+  color: #000;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 500;
   border: none;
   cursor: pointer;
-  transition: opacity 0.1s;
+  transition: background 0.15s;
 }
-.empty-cta:hover { opacity: 0.88; }
+.empty-cta:hover { background: var(--hal0-accent-hover); }
 </style>
