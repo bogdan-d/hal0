@@ -20,6 +20,8 @@ command on any modern Linux box.
 - **Dashboard** — Vue 3 + Tailwind 4 UI for slot/model management,
   hardware-aware configuration, live logs, and system health
 - **OpenWebUI bundled** — prewired chat interface at `:3001`, no setup
+- **Image generation** — bundled ComfyUI provider with curated SDXL /
+  SD 1.5 / Flux models; OpenAI-compatible `/v1/images/generations`
 - **One-line install** — `curl -fsSL hal0.dev/install | bash`
 
 ## Backends (v1)
@@ -30,6 +32,7 @@ command on any modern Linux box.
 | FLM         | AMD XDNA NPU (opt-in)| chat / embed / ASR multiplex     |
 | Moonshine   | CPU / Vulkan         | STT (`/v1/audio/transcriptions`) |
 | Kokoro      | CPU / Vulkan         | TTS                              |
+| ComfyUI     | ROCm                 | image gen (`/v1/images/generations`) |
 
 ## Project layout
 
@@ -60,9 +63,22 @@ npm run dev
 The API lives at `http://127.0.0.1:8080`, the dashboard at the Vite dev
 server URL (usually `http://127.0.0.1:5173`).
 
+Run `hal0 doctor` any time to re-check pre-flight (systemd / python /
+docker / disk / ports).
+
+### Auth posture
+
+The installer defaults to `--auth=off` — API on `:8080`, OpenWebUI on
+`:3001`, no auth in front. For LAN-only boxes that's fine; for anything
+exposed beyond the LAN, install with `--auth=basic` to bring up the
+Caddy reverse proxy (basic_auth at the edge for the dashboard, bearer
+tokens for the OpenAI-compatible API, OpenWebUI SSO via trusted
+header). See [`installer/README.md`](./installer/README.md) for the
+full flow.
+
 ## License
 
-TBD — to be decided before v1.0. See `PLAN.md` §16.
+Apache 2.0. See [`LICENSE`](./LICENSE).
 
 ## Contributing
 
