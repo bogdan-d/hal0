@@ -661,6 +661,151 @@ fi
 HOST="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
 [[ -z "${HOST}" ]] && HOST=localhost
 
+# ── Reachability discovery ─────────────────────────────────────────────────
+# Build a list of "label\turl" pairs covering every interface the user
+# might browse from. Always-tab-separated so the renderer can split.
+# Failures are silent: a missing tailscale binary just means no
+# Tailscale entry; nothing in this block can fail the installer.
+REACH_LINES=()
+
+if [[ "${AUTH_MODE}" == "basic" ]]; then
+    HOSTNAME_FOR_REACH="${HAL0_HOSTNAME:-hal0.local}"
+    DASHBOARD_URL="https://${HOSTNAME_FOR_REACH}/"
+    REACH_LINES+=("mDNS"$'\t'"https://${HOSTNAME_FOR_REACH}/")
+else
+    DASHBOARD_URL="http://${HOST}:${HAL0_PORT}/"
+    # All IPv4 addresses on this host. `hostname -I` already excludes
+    # loopback. Add an avahi mDNS entry only if we wrote the service file.
+    if command -v hostname >/dev/null 2>&1; then
+        for ip in $(hostname -I 2>/dev/null); do
+            REACH_LINES+=("LAN"$'\t'"http://${ip}:${HAL0_PORT}/")
+        done
+    fi
+    if [[ -f /etc/avahi/services/hal0.service ]]; then
+        REACH_LINES+=("mDNS"$'\t'"http://${HAL0_HOSTNAME:-hal0.local}:${HAL0_PORT}/")
+    fi
+    # Tailscale — show whichever tailnet IPs are present. Never fatal.
+    if command -v tailscale >/dev/null 2>&1; then
+        for ts in $(tailscale ip -4 2>/dev/null) $(tailscale ip -6 2>/dev/null); do
+            # Bracket IPv6 for URL grammar.
+            if [[ "$ts" == *:* ]]; then
+                REACH_LINES+=("Tailscale"$'\t'"http://[${ts}]:${HAL0_PORT}/")
+            else
+                REACH_LINES+=("Tailscale"$'\t'"http://${ts}:${HAL0_PORT}/")
+            fi
+        done
+    fi
+    # Up to 2 globally-routable IPv6 addresses — useful for direct LAN
+    # access on dual-stack networks. `ip` is in iproute2; on non-Linux
+    # exotic minimal containers it may be missing — silent skip.
+    if command -v ip >/dev/null 2>&1; then
+        v6_addrs=$(ip -6 addr show scope global 2>/dev/null | awk '/inet6/{print $2}' | cut -d/ -f1 | head -2)
+        for v6 in $v6_addrs; do
+            REACH_LINES+=("IPv6"$'\t'"http://[${v6}]:${HAL0_PORT}/")
+        done
+    fi
+fi
+
+# ── Live hello prompt ──────────────────────────────────────────────────────
+# Fires only when ALL of the following are true:
+#   * not --dev
+#   * not --no-start
+#   * HAL0_NO_HELLO is unset
+#   * the hal0 API is responding to /api/health
+#   * at least one model is already pulled (so we don't silently spend
+#     5+ minutes downloading on first install — cheap operators can
+#     `hal0 model pull qwen3-4b` and re-run the installer to see the
+#     greeting fire)
+# Every step is wrapped so failure logs a single info line and moves on.
+HELLO_RESULT=""
+if [[ "${DEV_MODE}" -eq 0 && "${NO_START}" -eq 0 && -z "${HAL0_NO_HELLO:-}" ]]; then
+    HELLO_BASE="http://127.0.0.1:${HAL0_PORT}"
+    if curl -sf --max-time 3 "${HELLO_BASE}/api/health" >/dev/null 2>&1; then
+        # Find a pulled model. `hal0 model list --installed` returns one
+        # id per line. We pick the first; on a fresh install this is
+        # empty and we skip with a hint.
+        FIRST_MODEL="$("${HAL0_BIN}" model list --installed 2>/dev/null | awk 'NR==1{print $1}' || true)"
+        if [[ -z "${FIRST_MODEL}" || "${FIRST_MODEL}" == "ID" ]]; then
+            HELLO_RESULT="skipped: no model pulled — try '${HAL0_BIN} model pull qwen3-4b' then rerun installer"
+        else
+            HELLO_SLOT="hello"
+            # Best-effort slot create + load. Errors don't stop us.
+            "${HAL0_BIN}" slot create "${HELLO_SLOT}" --backend cpu --provider llama-server >/dev/null 2>&1 || true
+            "${HAL0_BIN}" model assign "${FIRST_MODEL}" --slot "${HELLO_SLOT}" >/dev/null 2>&1 || true
+            "${HAL0_BIN}" slot load "${HELLO_SLOT}" >/dev/null 2>&1 || true
+
+            # Wait up to 30 s for the slot to report ready.
+            HELLO_DEADLINE=$((SECONDS + 30))
+            HELLO_READY=0
+            while (( SECONDS < HELLO_DEADLINE )); do
+                if curl -sf --max-time 2 "${HELLO_BASE}/api/slots/${HELLO_SLOT}" 2>/dev/null \
+                   | grep -q '"state":"ready"'; then
+                    HELLO_READY=1
+                    break
+                fi
+                sleep 1
+            done
+
+            if [[ "${HELLO_READY}" -eq 1 ]]; then
+                # Stream the greeting. python -c parses SSE and echoes
+                # content deltas in real time. 20 s ceiling on the
+                # whole exchange so a sluggish backend doesn't stall
+                # the installer.
+                printf '\n   %shal0 says:%s\n\n   %s' "${BOLD}" "${RST}" "${AMBER}"
+                set +e
+                timeout 20 curl -sN -X POST \
+                    -H 'Content-Type: application/json' \
+                    -d "{\"model\":\"${HELLO_SLOT}\",\"stream\":true,\"messages\":[{\"role\":\"system\",\"content\":\"You are hal0, just installed on a new machine. Greet the user in one short friendly sentence.\"},{\"role\":\"user\",\"content\":\"Say hi.\"}]}" \
+                    "${HELLO_BASE}/v1/chat/completions" 2>/dev/null \
+                | "${VENV_DIR}/bin/python" -c '
+import json, sys
+for raw in sys.stdin:
+    raw = raw.strip()
+    if not raw.startswith("data: "):
+        continue
+    payload = raw[6:]
+    if payload == "[DONE]":
+        break
+    try:
+        delta = json.loads(payload)["choices"][0]["delta"].get("content", "")
+    except Exception:
+        continue
+    if delta:
+        sys.stdout.write(delta)
+        sys.stdout.flush()
+'
+                rc=$?
+                set -e
+                printf '%s\n\n' "${RST}"
+                if [[ $rc -ne 0 ]]; then
+                    HELLO_RESULT="hello stream errored (exit ${rc}) — slot stayed up; try the dashboard"
+                else
+                    HELLO_RESULT="ok"
+                fi
+            else
+                HELLO_RESULT="skipped: slot ${HELLO_SLOT} not ready within 30s — check 'journalctl -u hal0-slot@${HELLO_SLOT}'"
+            fi
+        fi
+    else
+        HELLO_RESULT="skipped: API not responding at ${HELLO_BASE}/api/health"
+    fi
+fi
+if [[ -n "${HELLO_RESULT}" && "${HELLO_RESULT}" != "ok" ]]; then
+    info "live hello ${HELLO_RESULT}"
+fi
+
+# ── QR code ────────────────────────────────────────────────────────────────
+# Render a QR for DASHBOARD_URL above the summary box if qrencode is on
+# PATH. Skipped in --dev / --no-start (no daemon listening, so the URL
+# would 404). HAL0_NO_QR=1 forces skip on headless runs; missing
+# qrencode binary is a silent soft-skip — it's documented as optional.
+if [[ "${DEV_MODE}" -eq 0 && "${NO_START}" -eq 0 \
+      && -z "${HAL0_NO_QR:-}" ]] \
+   && command -v qrencode >/dev/null 2>&1; then
+    printf '\n   %sScan to open:%s  %s%s%s\n\n' "${DIM}" "${RST}" "${BLU}" "${DASHBOARD_URL}" "${RST}"
+    qrencode -t ANSIUTF8 -m 2 "${DASHBOARD_URL}" 2>/dev/null | sed 's/^/   /' || true
+fi
+
 # Build the summary lines into an array, then hand off to ui_box. Lines
 # are pre-padded so the column layout reads cleanly inside the box.
 SUMMARY_LINES=(
@@ -685,6 +830,21 @@ if [[ "${DEV_MODE}" -eq 0 && "${NO_START}" -eq 0 ]]; then
         )
     fi
 fi
+
+# Reachability list — only shown when we have entries beyond the
+# already-printed Dashboard line, and only outside --dev / --no-start.
+if [[ "${DEV_MODE}" -eq 0 && "${NO_START}" -eq 0 && ${#REACH_LINES[@]} -gt 0 ]]; then
+    SUMMARY_LINES+=(
+        ""
+        "$(printf '%sReach hal0 at:%s' "${BOLD}" "${RST}")"
+    )
+    for entry in "${REACH_LINES[@]}"; do
+        label="${entry%%$'\t'*}"
+        url="${entry##*$'\t'}"
+        SUMMARY_LINES+=("$(printf '  %s%-12s%s %s%s%s' "${DIM}" "${label}" "${RST}" "${BLU}" "${url}" "${RST}")")
+    done
+fi
+
 SUMMARY_LINES+=(
     ""
     "$(printf '%sNext steps:%s' "${BOLD}" "${RST}")"
