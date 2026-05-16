@@ -544,6 +544,27 @@ else
         if command -v systemctl >/dev/null && systemctl is-active --quiet avahi-daemon; then
             systemctl reload avahi-daemon || true
         fi
+
+        # Round-trip an authenticated request through Caddy so the
+        # installer fails loudly when basic_auth or the bcrypt hash is
+        # wired wrong, instead of leaving the operator to discover it
+        # at first browser load.  -k accepts Caddy's `tls internal`
+        # self-signed cert; we only run this when HAL0_ADMIN_PASSWORD
+        # is still set in scope (it is — the read happens earlier in
+        # this same --auth=basic block and there is no `unset`).
+        step "Auth self-test"
+        if [[ -n "${HAL0_ADMIN_PASSWORD:-}" ]]; then
+            if curl -ksSf --max-time 10 \
+                    -u "${HAL0_ADMIN_USER}:${HAL0_ADMIN_PASSWORD}" \
+                    "https://${HAL0_HOSTNAME}/api/health" >/dev/null 2>&1; then
+                info "basic_auth round-trip OK (https://${HAL0_HOSTNAME}/api/health)"
+            else
+                warn "basic_auth round-trip failed — check 'journalctl -u hal0-caddy -n 60'"
+                warn "  (Caddy may still be provisioning TLS; retry curl in ~10s)"
+            fi
+        else
+            warn "skipping auth self-test — HAL0_ADMIN_PASSWORD not in scope"
+        fi
     fi
 fi
 
