@@ -27,6 +27,7 @@ from hal0.cli._shared import (
     die,
 )
 from hal0.cli.config_commands import app as config_app
+from hal0.cli.doctor_commands import app as doctor_app
 from hal0.cli.model_commands import app as model_app
 from hal0.cli.slot_commands import app as slot_app
 from hal0.cli.update_commands import update as _update_impl
@@ -48,6 +49,7 @@ app = typer.Typer(
 app.add_typer(slot_app, name="slot")
 app.add_typer(model_app, name="model")
 app.add_typer(config_app, name="config")
+app.add_typer(doctor_app, name="doctor")
 
 
 # ---------------------------------------------------------------------------
