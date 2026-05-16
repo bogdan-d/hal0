@@ -48,13 +48,13 @@ class CuratedModel(BaseModel):
     )
     license: str = Field(..., description="SPDX-ish license short name, e.g. 'Apache-2.0'.")
     license_url: str = Field(..., description="HTTPS URL to the canonical license text.")
-    hf_repo: str = Field(..., description="HuggingFace repo id, e.g. 'Qwen/Qwen3-4B-Instruct-GGUF'.")
+    hf_repo: str = Field(
+        ..., description="HuggingFace repo id, e.g. 'Qwen/Qwen3-4B-Instruct-GGUF'."
+    )
     hf_file: str = Field(..., description="Filename within the repo (GGUF, safetensors, etc.).")
     context_length: int = Field(
         default=0,
-        description=(
-            "Native context window in tokens. Zero/omitted for image-gen entries."
-        ),
+        description=("Native context window in tokens. Zero/omitted for image-gen entries."),
     )
     recommended_slot: str = Field(
         default="primary",
@@ -169,9 +169,7 @@ CURATED_MODELS: list[CuratedModel] = [
         size_gb=6.5,
         vram_gb_min=8.0,
         license="SAI-NC-Research-Community",
-        license_url=(
-            "https://huggingface.co/stabilityai/sdxl-turbo/blob/main/LICENSE.TXT"
-        ),
+        license_url=("https://huggingface.co/stabilityai/sdxl-turbo/blob/main/LICENSE.TXT"),
         hf_repo="stabilityai/sdxl-turbo",
         hf_file="sd_xl_turbo_1.0_fp16.safetensors",
         context_length=0,
@@ -197,9 +195,7 @@ CURATED_MODELS: list[CuratedModel] = [
         size_gb=4.3,
         vram_gb_min=4.0,
         license="CreativeML-Open-RAIL-M",
-        license_url=(
-            "https://huggingface.co/runwayml/stable-diffusion-v1-5/blob/main/LICENSE"
-        ),
+        license_url=("https://huggingface.co/runwayml/stable-diffusion-v1-5/blob/main/LICENSE"),
         hf_repo="runwayml/stable-diffusion-v1-5",
         hf_file="v1-5-pruned-emaonly.safetensors",
         context_length=0,

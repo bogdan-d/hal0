@@ -95,9 +95,7 @@ def test_put_settings_non_json_body_returns_envelope(isolated_client: TestClient
     assert "error" in r.json()
 
 
-def test_reload_settings_re_reads_disk(
-    isolated_client: TestClient, tmp_hal0_home: str
-) -> None:
+def test_reload_settings_re_reads_disk(isolated_client: TestClient, tmp_hal0_home: str) -> None:
     """POST /api/settings/reload re-reads hal0.toml from disk."""
     # Hand-write a TOML to disk, then ask the route to reload.
     cfg_dir = Path(tmp_hal0_home) / "etc" / "hal0"

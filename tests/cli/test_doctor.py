@@ -21,9 +21,7 @@ import typer
 
 from hal0.cli.doctor_commands import _locate_preflight, doctor
 
-pytestmark = pytest.mark.skipif(
-    sys.platform != "linux", reason="preflight.sh is Linux-only"
-)
+pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="preflight.sh is Linux-only")
 
 
 def _make_stub(tmp_path: Path, body: str) -> Path:
@@ -64,9 +62,7 @@ def test_doctor_failure_propagates_exit_code(
     capfd: pytest.CaptureFixture[str],
 ) -> None:
     """A failing preflight script (rc=1) surfaces as a non-zero hal0 doctor exit."""
-    stub = _make_stub(
-        tmp_path, "printf 'disk: only 7 GB free\\n'\nexit 1\n"
-    )
+    stub = _make_stub(tmp_path, "printf 'disk: only 7 GB free\\n'\nexit 1\n")
     monkeypatch.setenv("HAL0_PREFLIGHT_SH", str(stub))
 
     with pytest.raises(typer.Exit) as exc:

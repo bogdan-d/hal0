@@ -76,8 +76,7 @@ def doctor(
     ports: str | None = typer.Option(
         None,
         "--ports",
-        help="Space-separated TCP ports for the port collision check "
-        "(default: '8080 3001').",
+        help="Space-separated TCP ports for the port collision check (default: '8080 3001').",
     ),
 ) -> None:
     """Re-run pre-flight checks (systemd, python, docker, disk, ports)."""

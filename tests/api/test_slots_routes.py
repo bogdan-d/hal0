@@ -379,6 +379,7 @@ async def test_state_stream_emits_transition_event(
         class _ReqShim:
             class _AppShim:
                 state = isolated_app.state
+
             app = _AppShim()
 
         response = await slot_state_stream("primary", _ReqShim())  # type: ignore[arg-type]
@@ -387,7 +388,7 @@ async def test_state_stream_emits_transition_event(
         first = await asyncio.wait_for(agen.__anext__(), timeout=1.0)
         if isinstance(first, bytes):
             first = first.decode("utf-8")
-        assert 'data: ' in first, f"missing data line in initial frame: {first!r}"
+        assert "data: " in first, f"missing data line in initial frame: {first!r}"
 
         # Kick off the next __anext__ — this enters the `async for rec in
         # sm.state_stream()` loop, registers the subscriber queue, and
@@ -409,9 +410,7 @@ async def test_state_stream_emits_transition_event(
         await agen.aclose()
 
         assert next_frame.startswith("event: state\n"), f"bad SSE prefix: {next_frame!r}"
-        data_line = next(
-            line for line in next_frame.splitlines() if line.startswith("data: ")
-        )
+        data_line = next(line for line in next_frame.splitlines() if line.startswith("data: "))
         payload = json.loads(data_line[len("data: ") :])
         assert payload["name"] == "primary"
         # Unload runs READY → UNLOADING → OFFLINE; either intermediate
@@ -445,6 +444,7 @@ async def test_state_stream_subscriber_cleaned_up_on_close(
         class _ReqShim:
             class _AppShim:
                 state = isolated_app.state
+
             app = _AppShim()
 
         before = len(sm._subscribers)
@@ -513,9 +513,7 @@ async def test_state_stream_emits_sse_event_shape(
             first = first.decode("utf-8")
         assert first.startswith("event: state\n"), f"unexpected SSE prefix: {first!r}"
         # Extract the data: line and JSON-parse it.
-        data_line = next(
-            line for line in first.splitlines() if line.startswith("data: ")
-        )
+        data_line = next(line for line in first.splitlines() if line.startswith("data: "))
         payload = json.loads(data_line[len("data: ") :])
         assert payload["name"] == "primary"
         assert payload["state"] == "ready"

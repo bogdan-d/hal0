@@ -240,9 +240,7 @@ class TokenStore:
                     hash=str(row["hash"]),
                     scope=str(row.get("scope", "all")),
                     created_at=str(row.get("created_at", "")),
-                    last_used_at=(
-                        str(row["last_used_at"]) if row.get("last_used_at") else None
-                    ),
+                    last_used_at=(str(row["last_used_at"]) if row.get("last_used_at") else None),
                     extra={
                         k: v
                         for k, v in row.items()

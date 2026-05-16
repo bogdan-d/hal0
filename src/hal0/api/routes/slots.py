@@ -119,8 +119,7 @@ def _synthesize_slots_from_upstreams(request: Request) -> list[dict[str, Any]]:
                 "last_used_model": last_used.get(u.name) or None,
                 "_synthetic": True,
                 "_synthetic_reason": (
-                    "Backed by remote upstream; install a local slot of the "
-                    "same name to take over."
+                    "Backed by remote upstream; install a local slot of the same name to take over."
                 ),
             }
         )

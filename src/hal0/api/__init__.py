@@ -308,18 +308,12 @@ def create_app() -> FastAPI:
     # Single-purpose protected routers — every endpoint requires a token
     # when HAL0_AUTH_ENABLED=1, no path-aware bypass needed.
     _admin_auth = [Depends(require_token)]
-    app.include_router(
-        slots.router, prefix="/api/slots", tags=["slots"], dependencies=_admin_auth
-    )
+    app.include_router(slots.router, prefix="/api/slots", tags=["slots"], dependencies=_admin_auth)
     app.include_router(
         models.router, prefix="/api/models", tags=["models"], dependencies=_admin_auth
     )
-    app.include_router(
-        hardware.router, prefix="/api", tags=["hardware"], dependencies=_admin_auth
-    )
-    app.include_router(
-        logs.router, prefix="/api/logs", tags=["logs"], dependencies=_admin_auth
-    )
+    app.include_router(hardware.router, prefix="/api", tags=["hardware"], dependencies=_admin_auth)
+    app.include_router(logs.router, prefix="/api/logs", tags=["logs"], dependencies=_admin_auth)
     app.include_router(
         settings.router,
         prefix="/api/settings",

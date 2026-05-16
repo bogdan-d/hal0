@@ -323,8 +323,7 @@ async def images_generations(request: Request, dispatcher: DispatcherDep) -> Res
     upstream = request.app.state.upstreams.get(call.upstream_name)
     if upstream is None:
         raise NoRouteFound(
-            f"image-gen dispatch landed on upstream {call.upstream_name!r} "
-            "which is not registered",
+            f"image-gen dispatch landed on upstream {call.upstream_name!r} which is not registered",
             details={"upstream": call.upstream_name},
         )
     port = _extract_port_from_upstream_url(upstream.url)

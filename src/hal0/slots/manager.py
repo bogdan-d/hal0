@@ -911,9 +911,7 @@ class SlotManager:
                                 body = {}
                             if isinstance(body, dict) and body.get("model_loaded"):
                                 return
-                            last_error = (
-                                f"/health 200 but model_loaded != true (body={body!r})"
-                            )
+                            last_error = f"/health 200 but model_loaded != true (body={body!r})"
                         else:
                             last_error = f"/health HTTP {resp.status_code}"
                     else:

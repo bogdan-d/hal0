@@ -165,9 +165,7 @@ def test_releases_url_appends_channel_for_http_override(
     """An http(s) override is rewritten with ?channel= for non-stable channels."""
     monkeypatch.setenv("HAL0_RELEASES_URL", "https://example.test/releases.json")
     assert releases_url("stable") == "https://example.test/releases.json"
-    assert (
-        releases_url("nightly") == "https://example.test/releases.json?channel=nightly"
-    )
+    assert releases_url("nightly") == "https://example.test/releases.json?channel=nightly"
 
 
 # ── manifest schema validation ─────────────────────────────────────────────────
@@ -501,9 +499,7 @@ def test_check_uses_per_channel_url(
     sig = artifacts / "hal0-0.0.1.tar.gz.sig"
     sig.write_bytes(b"sig")
     manifest_path = artifacts / "latest.json"
-    _write_release_manifest(
-        manifest_path=manifest_path, tarball=tarball, sig=sig, version="0.0.1"
-    )
+    _write_release_manifest(manifest_path=manifest_path, tarball=tarball, sig=sig, version="0.0.1")
     monkeypatch.setenv("HAL0_RELEASES_URL", str(manifest_path))
 
     info_stable = asyncio.run(Updater(channel="stable").check())

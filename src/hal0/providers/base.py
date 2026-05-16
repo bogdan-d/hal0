@@ -49,7 +49,7 @@ def _quote_for_systemd(value: str) -> str:
     # double quotes in that case (systemd documents this in `systemd.unit(5)`
     # §"Command lines").
     if _SYSTEMD_VAR_REF.search(value) and quoted.startswith("'"):
-        inner = value.replace('\\', '\\\\').replace('"', '\\"')
+        inner = value.replace("\\", "\\\\").replace('"', '\\"')
         return f'"{inner}"'
     return quoted
 

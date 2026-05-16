@@ -149,9 +149,7 @@ def test_auth_falsy_values_keep_defaults(
     assert env["WEBUI_AUTH"] == "False"
 
 
-def test_overrides_still_win_under_auth(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_overrides_still_win_under_auth(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Explicit overrides survive the auth-driven defaults."""
     monkeypatch.setenv("HAL0_AUTH_ENABLED", "1")
     target = tmp_path / "openwebui.env"

@@ -170,9 +170,7 @@ async def delete_model(model_id: str, request: Request) -> dict[str, object]:
     return {"id": model_id, "deleted": bool(removed)}
 
 
-def _resolve_pull_source(
-    request: Request, model_id: str
-) -> tuple[str, str]:
+def _resolve_pull_source(request: Request, model_id: str) -> tuple[str, str]:
     """Resolve the (hf_repo, hf_file) tuple for a pull.
 
     Priority:

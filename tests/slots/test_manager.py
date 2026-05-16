@@ -292,14 +292,7 @@ async def test_status_rehydrates_backend_from_toml_when_state_extra_missing(
     # Hand-write a state.json that mimics the legacy shape — no
     # ``extra.backend`` carried.  slot_root fixture already put
     # primary.toml on disk with ``backend = "vulkan"``.
-    state_path = (
-        Path(tmp_hal0_home)
-        / "var-lib"
-        / "hal0"
-        / "slots"
-        / "primary"
-        / "state.json"
-    )
+    state_path = Path(tmp_hal0_home) / "var-lib" / "hal0" / "slots" / "primary" / "state.json"
     write_state_atomic(
         state_path,
         SlotStateRecord(name="primary", state=_S.OFFLINE, port=8081, extra={}),

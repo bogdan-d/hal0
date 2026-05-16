@@ -743,7 +743,9 @@ class Updater:
         latest = ""
         if isinstance(raw, dict):
             latest = str(raw.get("version") or raw.get("latest_version") or "")
-        update_available = bool(latest) and _version_tuple(latest) > _version_tuple(hal0.__version__)
+        update_available = bool(latest) and _version_tuple(latest) > _version_tuple(
+            hal0.__version__
+        )
         return ReleaseInfo(
             current=hal0.__version__,
             latest=latest or None,

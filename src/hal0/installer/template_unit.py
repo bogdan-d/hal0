@@ -32,9 +32,7 @@ log = logging.getLogger(__name__)
 # Repo-relative source path for the template unit.  Resolved against the
 # package's ``hal0`` location so a wheel/editable install both work:
 #   <repo>/src/hal0/installer/template_unit.py  →  <repo>/packaging/systemd/...
-_DEFAULT_SRC = (
-    Path(__file__).resolve().parents[3] / "packaging" / "systemd" / "hal0-slot@.service"
-)
+_DEFAULT_SRC = Path(__file__).resolve().parents[3] / "packaging" / "systemd" / "hal0-slot@.service"
 
 #: Production install path for the template unit.
 DEFAULT_DEST = Path("/etc/systemd/system/hal0-slot@.service")

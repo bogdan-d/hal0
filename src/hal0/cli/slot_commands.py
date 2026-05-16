@@ -246,9 +246,7 @@ def slot_create(
     except CliApiError as exc:
         die(str(exc))
         return
-    console.print(
-        f"Created slot [bold]{name}[/bold] on port {snap.get('port')} (model={model})"
-    )
+    console.print(f"Created slot [bold]{name}[/bold] on port {snap.get('port')} (model={model})")
 
 
 @app.command("edit")

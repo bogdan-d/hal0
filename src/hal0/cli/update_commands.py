@@ -70,8 +70,7 @@ def _restart_slots() -> None:
         return
     if proc.returncode != 0:
         console.print(
-            f"[yellow]slot restart returned {proc.returncode}:[/yellow] "
-            f"{proc.stderr.strip()[:300]}"
+            f"[yellow]slot restart returned {proc.returncode}:[/yellow] {proc.stderr.strip()[:300]}"
         )
     else:
         console.print("[green]slot units restarted.[/green]")
@@ -198,7 +197,9 @@ def update(
         return
 
     try:
-        job = api_post("/api/updates/apply", json={"version": target_version} if target_version else {})
+        job = api_post(
+            "/api/updates/apply", json={"version": target_version} if target_version else {}
+        )
     except CliApiError as exc:
         die(str(exc))
         return
