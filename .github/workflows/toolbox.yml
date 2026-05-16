@@ -54,11 +54,12 @@ jobs:
             # rocm pulls a ~10GB base; allow a longer timeout below
           - image: flm
             dockerfile: packaging/toolbox/flm.Dockerfile
-            optional: "true"
             # FLM compiles XRT + xdna-driver userspace + FastFlowLM from
-            # source. Slow build (~20-30 min). Marked optional — failure
-            # does not fail the workflow when triggered with the default
-            # input set (continue-on-error below).
+            # source. Slow build (~20-30 min). No longer masked — the
+            # `optional: "true"` flag was removed in #26 because the
+            # continue-on-error mask was hiding cascading build failures
+            # behind green checkmarks for hours.  If the FLM build breaks
+            # the matrix should fail loudly.
           - image: comfyui
             dockerfile: packaging/toolbox/comfyui.Dockerfile
             optional: "true"

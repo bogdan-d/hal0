@@ -41,25 +41,16 @@ FROM ubuntu:24.04 AS xrt-builder
 ARG DEBIAN_FRONTEND=noninteractive
 ARG XDNA_REF=main
 
+# Minimal bootstrap deps — just enough to clone the repo and run XRT's
+# own dependency installer. After three rounds of whack-a-mole with
+# missing find_package() targets (OpenCL → Boost components → Curses →
+# Protobuf → …), it's faster to defer to XRT's canonical dep script
+# which knows every package the configure step touches on each
+# Ubuntu release.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        build-essential \
-        cmake \
-        git \
         ca-certificates \
-        libboost-dev \
-        libboost-program-options-dev \
-        libdrm-dev \
-        libelf-dev \
-        libssl-dev \
-        libudev-dev \
-        ocl-icd-dev \
-        pkg-config \
-        protobuf-compiler \
-        python3 \
-        python3-pip \
-        pybind11-dev \
-        rapidjson-dev \
-        uuid-dev \
+        git \
+        sudo \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
@@ -68,10 +59,36 @@ RUN git clone --recurse-submodules \
     && git checkout "${XDNA_REF}" \
     && git submodule update --init --recursive
 
+# XRT ships its own apt installer for every Ubuntu release it supports.
+# `-docker` skips kernel-module-build deps (we're never going to insmod
+# inside the image). It's idempotent and covers GTest, Protobuf, ncurses,
+# Boost (full), OpenCL, systemd, pybind11, rapidjson, uuid, ffmpeg-libs,
+# etc. — i.e. the same packages we were enumerating by hand.
+ARG DEBIAN_FRONTEND=noninteractive
+RUN apt-get update \
+    && ./xrt/src/runtime_src/tools/scripts/xrtdeps.sh -docker \
+    && rm -rf /var/lib/apt/lists/*
+
 # xdna-driver bundles upstream XRT as a submodule under xrt/.
-# Build XRT first, then the xdna plugin against it. The Makefile-based
-# top-level build script knows the right order.
-RUN cd xrt/build && ./build.sh -opt && ./build.sh -install
+# Build XRT first, then the xdna plugin against it.
+#
+# -noert: skip ERT MicroBlaze firmware build. ERT requires the Xilinx
+#   Vitis toolchain (XILINX_VITIS env) which we don't ship in CI — and
+#   the XDNA2 NPU on Strix Halo doesn't use the MicroBlaze firmware path
+#   anyway (it has its own AIE compiler output). Without this flag the
+#   build aborts with "XILINX_VITIS is undefined" before any compilation
+#   happens. Confirmed by upstream xrt build.sh: "To treat as a warning
+#   use -noert option."
+#
+# `./build.sh -opt` already runs `cmake --install` into the staging dir
+# `build/Release/opt/xilinx/xrt`. The companion `./build.sh -install`
+# step is the .deb-packaging path which (a) expects ERT firmware to be
+# present and (b) prints help + exits 1 when called twice in a row.
+# So: drop the second invocation and copy the staging tree directly
+# into /opt/xilinx/xrt — that's exactly what the .deb would put there.
+RUN cd xrt/build && ./build.sh -noert -opt \
+    && mkdir -p /opt/xilinx \
+    && cp -a Release/opt/xilinx/xrt /opt/xilinx/xrt
 
 # Build the xdna NPU plugin against the XRT we just installed.
 RUN mkdir -p build && cd build \
@@ -88,22 +105,47 @@ ARG FLM_REF=main
 # Pull the freshly-built XRT in so FLM can link against it.
 COPY --from=xrt-builder /opt/xilinx/xrt /opt/xilinx/xrt
 
+# Dep list mirrors upstream FastFlowLM/Dockerfile (main): adds rust
+# toolchain (FLM ships Rust components since 2026-04), nasm + patchelf
+# (xclbin packaging), and the full ffmpeg dev libs (libavutil,
+# libswresample) — the prior hand-picked subset compiled against an
+# older release that predated the Rust rewrite of FLM's tokenizer.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential \
         cmake \
         ninja-build \
         git \
+        curl \
         ca-certificates \
         libboost-program-options-dev \
         libcurl4-openssl-dev \
         libfftw3-dev \
         libavformat-dev \
         libavcodec-dev \
+        libavutil-dev \
         libswscale-dev \
+        libswresample-dev \
         libreadline-dev \
         libdrm-dev \
+        nasm \
+        patchelf \
         pkg-config \
+        uuid-dev \
     && rm -rf /var/lib/apt/lists/*
+
+# Install a recent Rust via rustup. Ubuntu 24.04 ships rustc 1.75 in
+# apt which is too old. FLM's tokenizers-cpp pulls a dependency graph
+# that requires rustc >= 1.85 — the floor moved twice while debugging:
+# `monostate v0.1.18` needs 1.79, and `unicode-segmentation v1.13.2`
+# (pulled transitively) needs 1.85. Pinning to 1.85.0 stable keeps
+# the build reproducible.
+ARG RUST_VERSION=1.85.0
+ENV RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    PATH=/usr/local/cargo/bin:${PATH}
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+        | sh -s -- -y --default-toolchain ${RUST_VERSION} --profile minimal --no-modify-path \
+    && rustc --version && cargo --version
 
 WORKDIR /src
 RUN git clone --recurse-submodules \
@@ -111,7 +153,12 @@ RUN git clone --recurse-submodules \
     && git checkout "${FLM_REF}" \
     && git submodule update --init --recursive
 
-# FLM ships a CMake preset that points at /opt/xilinx/xrt.
+# Upstream layout note: FastFlowLM's CMakeLists.txt + CMakePresets.json
+# live under src/ (not the repo root). The previous Dockerfile config
+# step `cmake --preset linux-default` ran from /src and bailed with
+# "Could not read presets from /src" — the presets file is actually
+# at /src/src/CMakePresets.json. cd into the source dir first.
+WORKDIR /src/src
 RUN cmake --preset linux-default \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_INSTALL_PREFIX=/opt/fastflowlm \
@@ -169,7 +216,8 @@ ENV LD_LIBRARY_PATH=/opt/xilinx/xrt/lib:/opt/fastflowlm/lib \
 #
 # Pre-create render/video groups so docker --group-add (FLM ContainerSpec
 # passes ["video", "render"]) resolves inside the container.
-RUN groupadd --system --gid 44  video  2>/dev/null || true \
+RUN userdel -r ubuntu 2>/dev/null || true \
+    && groupadd --system --gid 44  video  2>/dev/null || true \
     && groupadd --system --gid 993 render 2>/dev/null || true \
     && groupadd --system --gid 1000 hal0 \
     && useradd  --system --uid 1000 --gid 1000 --shell /usr/sbin/nologin \
