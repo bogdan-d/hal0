@@ -65,6 +65,10 @@ yarn-error.log*
 /usr-local/
 hal0-home/
 
+# Test harness runtime artifacts
+.harness/
+tests/harness/reports/
+
 # Secrets
 .env
 .env.local
