@@ -1,0 +1,306 @@
+name: Release
+
+# Cut a hal0 release on a `v*` tag push:
+#   1. build the source + UI tarball with the layout the updater expects
+#   2. cosign keyless-sign the tarball against the workflow's OIDC subject
+#   3. write a hal0.releases.v1 manifest pointing at the GH-release assets
+#   4. publish tarball + .sig + manifest as a GitHub Release
+#
+# Triggered by: `git tag vX.Y.Z && git push origin vX.Y.Z`.
+#
+# What this workflow does NOT do (deliberate, see "Blockers" in
+# scripts/release-prototype/RELEASE_PIPELINE_NOTES.md):
+#   - publish the manifest to https://releases.hal0.dev/ — that host
+#     does not exist yet. Until it does, the GH Release page acts as the
+#     canonical source and the updater can be pointed at
+#     HAL0_RELEASES_URL=https://github.com/hal0ai/hal0/releases/latest/download/latest.json
+#   - rebuild + republish toolbox images. That stays in toolbox.yml. The
+#     release manifest mirrors the toolbox digests pinned in
+#     manifest.json at the moment of the tag — the assumption is the
+#     toolbox workflow ran on main first.
+#
+# See: docs/release-manifest.md, src/hal0/updater/updater.py,
+#      scripts/release-prototype/verify-roundtrip.sh, PLAN §9 + §17.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to (re)build a release for, e.g. v0.1.0-rc1"
+        required: true
+        default: ""
+      channel:
+        description: "Release channel manifest field"
+        required: true
+        default: "stable"
+
+permissions:
+  contents: write     # required to upload Release assets
+  id-token: write     # required for cosign keyless OIDC
+  packages: read      # in case we ever pull a private image at build time
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false   # never cancel a half-published release
+
+jobs:
+  release:
+    name: Build, sign, publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      # ── 0. Resolve tag + version ────────────────────────────────────────────
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve tag + version
+        id: ver
+        run: |
+          TAG="${{ inputs.tag }}"
+          if [[ -z "${TAG}" ]]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+          fi
+          # Strip leading "v"; updater compares dotted versions without it.
+          VERSION="${TAG#v}"
+          if [[ -z "${VERSION}" ]]; then
+            echo "::error::could not resolve version from tag '${TAG}'"
+            exit 1
+          fi
+          CHANNEL="${{ inputs.channel || 'stable' }}"
+          echo "tag=${TAG}"           >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}"   >> "$GITHUB_OUTPUT"
+          echo "channel=${CHANNEL}"   >> "$GITHUB_OUTPUT"
+
+      - name: Confirm pyproject.toml version matches the tag
+        run: |
+          PYV="$(python3 -c '
+          import tomllib
+          print(tomllib.loads(open("pyproject.toml","rb").read().decode())["project"]["version"])
+          ')"
+          echo "pyproject.toml version: ${PYV}"
+          echo "tag-derived version:    ${{ steps.ver.outputs.version }}"
+          if [[ "${PYV}" != "${{ steps.ver.outputs.version }}" ]]; then
+            echo "::error::pyproject.toml version (${PYV}) ≠ tag (${{ steps.ver.outputs.version }})"
+            echo "::error::bump pyproject.toml + retag, or use scripts/release-check.sh --tag ${{ steps.ver.outputs.tag }} first"
+            exit 1
+          fi
+
+      # ── 1. Build the UI bundle so the tarball includes ui-dist/ ─────────────
+      - name: Setup Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - name: Build UI
+        working-directory: ui
+        run: |
+          npm ci
+          npm run build
+
+      # ── 2. Stage the release tree (matches updater._extract_tarball expectation) ──
+      - name: Stage release tree
+        id: stage
+        run: |
+          VERSION="${{ steps.ver.outputs.version }}"
+          STAGE="${RUNNER_TEMP}/hal0-${VERSION}"
+          mkdir -p "${STAGE}"
+
+          # Source + manifest + license — the runtime payload.
+          cp -a src                  "${STAGE}/"
+          cp -a manifest.json        "${STAGE}/"
+          cp -a LICENSE              "${STAGE}/"
+          cp -a README.md            "${STAGE}/"
+          cp -a pyproject.toml       "${STAGE}/"
+          cp -a installer            "${STAGE}/"
+          cp -a packaging            "${STAGE}/"
+          cp -a docs                 "${STAGE}/"
+
+          # UI bundle — the updater extracts this under hal0-<ver>/ui-dist/.
+          if [[ -d ui/dist ]]; then
+            cp -a ui/dist            "${STAGE}/ui-dist"
+          else
+            echo "::error::ui/dist missing after npm run build"
+            exit 1
+          fi
+
+          echo "${VERSION}" > "${STAGE}/VERSION"
+          echo "stage=${STAGE}"      >> "$GITHUB_OUTPUT"
+
+      - name: Build tarball
+        id: tarball
+        run: |
+          VERSION="${{ steps.ver.outputs.version }}"
+          OUT="${RUNNER_TEMP}/hal0-${VERSION}.tar.gz"
+          # Use --owner/--group to make the archive reproducible-ish across
+          # runners. The updater doesn't care, but it makes diffs sane.
+          tar --owner=0 --group=0 --numeric-owner \
+              --sort=name --mtime='UTC 2026-01-01' \
+              -C "${RUNNER_TEMP}" \
+              -czf "${OUT}" \
+              "hal0-${VERSION}"
+          DIGEST="$(sha256sum "${OUT}" | awk '{print $1}')"
+          SIZE="$(stat -c %s "${OUT}")"
+          echo "path=${OUT}"      >> "$GITHUB_OUTPUT"
+          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+          echo "size=${SIZE}"     >> "$GITHUB_OUTPUT"
+          echo "::notice::tarball ${OUT} ${SIZE}B sha256=${DIGEST}"
+
+      # ── 3. cosign keyless-sign the tarball via GH Actions OIDC ──────────────
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: cosign sign-blob (keyless OIDC, legacy raw .sig)
+        id: sign
+        env:
+          # Belt + braces: the keyless flow reads ACTIONS_ID_TOKEN_REQUEST_*
+          # from the runner automatically when `id-token: write` is granted.
+          COSIGN_EXPERIMENTAL: "true"
+        run: |
+          TARBALL="${{ steps.tarball.outputs.path }}"
+          SIG="${TARBALL}.sig"
+          # cosign 3.x defaults to --new-bundle-format=true and refuses
+          # --output-signature. Today's updater (_verify_cosign in
+          # src/hal0/updater/updater.py) calls verify-blob with the legacy
+          # --signature flag, so we must opt out of the bundle format
+          # here. When the updater learns to consume Sigstore Bundles
+          # (RELEASE_PIPELINE_NOTES.md → Findings § cosign 3.x), drop the
+          # --new-bundle-format=false and emit a .bundle alongside.
+          cosign sign-blob --yes \
+              --new-bundle-format=false \
+              --output-signature "${SIG}" \
+              "${TARBALL}"
+          echo "sig=${SIG}" >> "$GITHUB_OUTPUT"
+
+      # ── 4. Self-verify before publishing — never ship a release we can't
+      #       verify with our own production code path. ────────────────────────
+      - name: Self-verify (cosign verify-blob with workflow OIDC identity)
+        run: |
+          TARBALL="${{ steps.tarball.outputs.path }}"
+          SIG="${{ steps.sign.outputs.sig }}"
+          # The identity regex must match what we'll write into the
+          # manifest below — keep these two strings in lock-step.
+          # github.repository preserves case (Hal0ai/hal0); use (?i) to
+          # absorb the lowercase `hal0ai` redirect form too.
+          IDENT="^(?i)https://github\\.com/${{ github.repository }}/\\.github/workflows/release\\.yml@${{ github.ref }}$"
+          ISSUER="https://token.actions.githubusercontent.com"
+          cosign verify-blob \
+              --signature "${SIG}" \
+              --certificate-identity-regexp "${IDENT}" \
+              --certificate-oidc-issuer    "${ISSUER}" \
+              "${TARBALL}"
+
+      # ── 5. Generate the hal0.releases.v1 manifest ───────────────────────────
+      - name: Generate release manifest
+        id: manifest
+        run: |
+          VERSION="${{ steps.ver.outputs.version }}"
+          TAG="${{ steps.ver.outputs.tag }}"
+          CHANNEL="${{ steps.ver.outputs.channel }}"
+          DIGEST="${{ steps.tarball.outputs.digest }}"
+          OUT="${RUNNER_TEMP}/${CHANNEL}.json"
+
+          BASE_URL="https://github.com/${{ github.repository }}/releases/download/${TAG}"
+          MANIFEST_URL="https://github.com/${{ github.repository }}/releases/download/${TAG}/${CHANNEL}.json"
+
+          IDENT="^(?i)https://github\\.com/${{ github.repository }}/\\.github/workflows/release\\.yml@refs/tags/${TAG}$"
+
+          python3 - "${OUT}" "${VERSION}" "${TAG}" "${CHANNEL}" "${DIGEST}" \
+                   "${BASE_URL}" "${MANIFEST_URL}" "${IDENT}" <<'PY'
+          import json, sys, datetime as dt
+          out, version, tag, channel, digest, base, self_url, ident = sys.argv[1:]
+          # Mirror the toolbox_images block from manifest.json into the
+          # release manifest so an updater can pull the matching image
+          # set (see docs/release-manifest.md §"What the release pipeline
+          # must guarantee", item 6).
+          repo_manifest = json.loads(open("manifest.json").read())
+          payload = {
+              "_schema":         "hal0.releases.v1",
+              "version":         version,
+              "channel":         channel,
+              "url":             f"{base}/hal0-{version}.tar.gz",
+              "sig_url":         f"{base}/hal0-{version}.tar.gz.sig",
+              "digest_sha256":   digest,
+              "signer_identity": ident,
+              "signer_issuer":   "https://token.actions.githubusercontent.com",
+              "min_data_version": int(repo_manifest.get("min_data_version", 1)),
+              "released_at":     dt.datetime.now(dt.UTC).isoformat(timespec="seconds"),
+              "notes_url":       f"https://github.com/{__import__('os').environ['GITHUB_REPOSITORY']}/releases/tag/{tag}",
+              "manifest_url":    self_url,
+              "toolbox_images":  repo_manifest.get("toolbox_images", {}),
+          }
+          # Refuse to publish if any toolbox digest is null/missing — the
+          # release would advertise images we never actually pinned.
+          missing = [n for n, e in payload["toolbox_images"].items() if not e.get("digest")]
+          if missing:
+              sys.exit(f"toolbox_images digests missing for: {missing} — run toolbox.yml on main first")
+          open(out, "w").write(json.dumps(payload, indent=2) + "\n")
+          print(f"wrote {out}")
+          PY
+          echo "path=${OUT}" >> "$GITHUB_OUTPUT"
+
+      - name: Self-validate manifest against ReleaseManifest schema
+        run: |
+          # Catch shape regressions before publish. Uses the runtime's
+          # own pydantic schema so the manifest can never drift from
+          # what hal0.updater can actually parse.
+          python3 -m pip install -e ".[dev]" >/dev/null
+          python3 - "${{ steps.manifest.outputs.path }}" <<'PY'
+          import json, sys
+          from hal0.updater.updater import _parse_manifest
+          raw = json.loads(open(sys.argv[1]).read())
+          mf = _parse_manifest(raw)
+          print(f"manifest OK: version={mf.version} digest_sha256={mf.digest_sha256[:12]}…")
+          PY
+
+      # ── 6. Publish GitHub Release with all three assets ─────────────────────
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ steps.ver.outputs.tag }}"
+          TARBALL="${{ steps.tarball.outputs.path }}"
+          SIG="${{ steps.sign.outputs.sig }}"
+          MANIFEST="${{ steps.manifest.outputs.path }}"
+
+          # Create the release if it doesn't already exist (workflow_dispatch
+          # rebuild path) — otherwise just upload the assets, replacing
+          # any prior copies with --clobber.
+          if ! gh release view "${TAG}" >/dev/null 2>&1; then
+            gh release create "${TAG}" \
+              --title "hal0 ${TAG}" \
+              --notes "Automated release. See docs/release-manifest.md for the verify path." \
+              --draft=false \
+              --prerelease="$([[ "${TAG}" == *-* ]] && echo true || echo false)"
+          fi
+
+          gh release upload "${TAG}" "${TARBALL}" "${SIG}" "${MANIFEST}" --clobber
+
+      - name: Summary
+        run: |
+          TAG="${{ steps.ver.outputs.tag }}"
+          {
+            echo "## hal0 ${TAG} published"
+            echo ""
+            echo "| asset | sha256 |"
+            echo "|---|---|"
+            echo "| hal0-${{ steps.ver.outputs.version }}.tar.gz | \`${{ steps.tarball.outputs.digest }}\` |"
+            echo ""
+            echo "Manifest URL (until releases.hal0.dev exists): "
+            echo ""
+            echo "    https://github.com/${{ github.repository }}/releases/download/${TAG}/${{ steps.ver.outputs.channel }}.json"
+            echo ""
+            echo "Verify locally:"
+            echo ""
+            echo '```'
+            echo "HAL0_RELEASES_URL='https://github.com/${{ github.repository }}/releases/download/${TAG}/${{ steps.ver.outputs.channel }}.json' \\"
+            echo "  hal0 update --check"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
