@@ -490,6 +490,29 @@ Critical paths, each a separate spec:
 
 Runs on PR with browser cached, ~8 min total.
 
+### Harness (δ, local end-to-end smoke)
+
+Beyond α/β/γ, `tests/harness/` drives every public surface a contributor
+or operator touches on a real host — installer, every CLI subcommand,
+slot lifecycle, uninstall — and emits one structured JSON row per
+scenario. A fail flags one specific surface, not the whole pipeline.
+
+- `make harness` — non-mutating defaults (skips prod install + auth path)
+- `HAL0_HARNESS_PROD=1 make harness` — also exercises sudo `/opt/hal0` install
+- `HAL0_HARNESS_AUTH=1 HAL0_HARNESS_PROD=1 make harness` — adds the Caddy
+  `--auth=basic` install path
+- `make harness-report` — pretty-prints `tests/harness/reports/harness.json`
+
+Status vocabulary, scenario layout, JSON schema, and the "how to add a
+row" template live in `tests/harness/README.md`. Findings get catalogued
+inline at `tests/harness/FINDINGS.md` with file:line cites so a fix can
+land directly.
+
+Harness is **not** required for PR merge — it's a contributor-side smoke
+loop on real hardware, not a CI gate. The `hal0-test` LXC matrix
+(`make release-test`) remains the release-gate γ for NPU + ROCm +
+Vulkan combinations CI can't cover.
+
 ---
 
 ## 11. Dev environment + migration plan
