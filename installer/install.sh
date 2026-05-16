@@ -78,6 +78,10 @@ EOF
     esac
 done
 
+# Banner first — before any info/warn so the brand greets the user
+# rather than hiding behind a "Dev mode …" line.
+ui_banner
+
 HAL0_PORT="${HAL0_PORT:-8080}"
 HAL0_USER="${HAL0_USER:-root}"
 PY="${HAL0_PYTHON:-python3}"
@@ -107,8 +111,6 @@ if [[ "${AUTH_MODE}" == "basic" && "${DEV_MODE}" -eq 0 ]]; then
         UI_STEP_TOTAL=$((UI_STEP_TOTAL + 1))       # "Auth self-test"
     fi
 fi
-
-ui_banner
 
 trap 'err "install failed at line ${LINENO} during: ${CURRENT_STEP:-pre-init}"
     case "${CURRENT_STEP}" in
