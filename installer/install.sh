@@ -534,8 +534,7 @@ else
         systemctl restart hal0-api
         systemctl restart hal0-openwebui || true
         systemctl enable --now hal0-caddy
-        sleep 1
-        if systemctl is-active --quiet hal0-caddy; then
+        if wait_active hal0-caddy 15; then
             info "hal0-caddy is running (https://${HAL0_HOSTNAME:-hal0.local}/)"
         else
             warn "hal0-caddy not yet active; check 'journalctl -u hal0-caddy -n 60'"
