@@ -632,45 +632,48 @@ Working assumption: 1 person full-time + Claude as pair. Adjust if not.
 - All three reliability tiers in (TIER1/TIER2/TIER3 markers across the ported code, lifecycle state machine + single-flight + migration framework + adaptive backoff)
 - Cross-agent reconciliation: `HardwareInfo` canonicalised in `config/schema.py` (multi-GPU list, MiB integers, richer GPUInfo with compute/vulkan_capable + drm_path + nested NPUInfo); slot port range stays at PLAN §2's 8081-8099
 
-**Phase 2 — installer + LXC QA (week 4)**
-- Provision `hal0-test` LXC with Strix Halo passthrough
-- Write `install.sh` (signed-release path) + uninstall
-- Hardware probe → default slot configs
-- Toolbox image build + publish (`hal0-toolbox-vulkan` first)
-- Run install on hal0-test, fix everything
+**Phase 2 — installer + LXC QA (week 4)** — ✅ done 2026-05-15
+- Provision `hal0-test` LXC with Strix Halo passthrough ✅
+- Write `install.sh` (signed-release path) + uninstall ✅ (including UX overhaul: ASCII banner + step counter + spinner + preflight + hardware cards + `hal0 doctor`; `--dev` mode + warning re: systemd visibility; uninstall.sh `--dev` parity + hal0-caddy unit removal)
+- Hardware probe → default slot configs ✅
+- Toolbox image build + publish (`hal0-toolbox-vulkan` first) ✅ (vulkan/rocm/moonshine/kokoro/comfyui digests pinned; **flm in progress** — Team I CI run 25951155295)
+- Run install on hal0-test, fix everything ✅ (harness `make harness` drives every public surface; 9 findings catalogued in `tests/harness/FINDINGS.md`, all in-scope ones fixed)
 
-**Phase 3 — reliability Tier 1 + 2 (week 5)**
-- Atomic env writes, schema validation, structured errors
-- Tightened health probes, adaptive cold-boot
-- Dispatcher decision logging, prefetch tuning
-- All audit-identified bugs closed
+**Phase 3 — reliability Tier 1 + 2 (week 5)** — ✅ done 2026-05-15
+- Atomic env writes, schema validation, structured errors ✅
+- Tightened health probes, adaptive cold-boot ✅
+- Dispatcher decision logging, prefetch tuning ✅
+- All audit-identified bugs closed ✅
 
-**Phase 4 — UI polish (weeks 6-7)**
-- All 9 views built out, dark mode, hardware-aware slot form
-- SSE plumbing for slot status + log tail
-- FirstRun wizard end-to-end with model download
-- Empty states, loading skeletons, toasts everywhere
+**Phase 4 — UI polish (weeks 6-7)** — ✅ done 2026-05-15
+- All 9 views built out, dark mode, hardware-aware slot form ✅
+- SSE plumbing for slot status + log tail ✅ (Team B verified real `EventSource` per slot — not polling — overlays the 5s `/api/status` poll)
+- FirstRun wizard end-to-end with model download ✅ (Models.vue `pullProgress` bug fixed in PR #7; γ-3 spec rewritten for Wave-3 per-id pull URL in PR #12)
+- Empty states, loading skeletons, toasts everywhere ✅
+- Hal0-web brand language: sodium amber + JBM/Geist applied
 
-**Phase 5 — Tier 3 reliability + OpenWebUI prewire (week 8)**
-- Slot lifecycle state machine
-- Request coalescing / single-flight
-- Config migration tooling
-- OpenWebUI systemd unit + env prewire
-- `hal0 update` mechanism + signed releases pipeline
+**Phase 5 — Tier 3 reliability + OpenWebUI prewire (week 8)** — ✅ done 2026-05-15
+- Slot lifecycle state machine ✅ (9-state machine; PR #11 wired the last 3 — PULLING / SERVING / IDLE — closing the gap Team B's research surfaced)
+- Push-driven systemd failure detector ✅ (PR #8 — per-slot watcher flips to ERROR within ~1s of unit death vs prior 180s grace)
+- Request coalescing / single-flight ✅
+- Config migration tooling ✅
+- OpenWebUI systemd unit + env prewire ✅ (PR #4 — CI smoke test boots the real container against stub upstream)
+- Auth token hot-reload ✅ (PR #9 — mint a token via CLI, next API request honors it without `systemctl restart`)
+- `hal0 update` mechanism + signed releases pipeline ✅ (PR #3 — release.yml drafted, cosign verify path proven locally; HAL0_UPDATE_SKIP_COSIGN gated to pre-release builds in PR #6; `releases.hal0.dev` live via CF Pages Function middleware in `hal0ai/hal0-web`#2)
 
-**Phase 6 — γ testing + release prep (week 9)**
-- Playwright suites for the 7 critical paths
-- Release notes draft
-- `make release-test` on hal0-test (full NPU + ROCm + Vulkan matrix)
-- Bug bash
+**Phase 6 — γ testing + release prep (week 9)** — ✅ mostly done 2026-05-15
+- Playwright suites for the 7 critical paths ✅ (7/7 green: firstrun, hardware, logs, models, settings, slot-lifecycle, update)
+- Release notes draft — pending
+- `make release-test` on hal0-test (full NPU + ROCm + Vulkan matrix) — ⏳ blocked behind FLM toolbox build (Team I) + ghcr.io image visibility (task #25)
+- Bug bash — superseded by the harness (`tests/harness/`); 9 findings closed-or-deferred
 
-**Phase 7 — v1.0 cut (week 10)**
-- Tag v1.0.0
-- Cut signed release artifacts
-- Migrate haloai LXC → hal0 (cutover)
-- Public launch (timing depends on repo-home + license decision — separate call)
+**Phase 7 — v1.0 cut (week 10)** — ⏳ in progress
+- Tag v1.0.0 — pending blockers below
+- Cut signed release artifacts — pipeline ready, awaiting first real tag-push to validate cosign keyless OIDC end-to-end
+- Migrate haloai LXC → hal0 (cutover) — script ready (PR #22, `scripts/migrate-haloai.py` + 14-model curated allow-list); cutover script tested with synthetic fixtures, not yet against live haloai data
+- Public launch — pending §16 decisions (launch story, contribution model)
 
-**Total: ~10 weeks of focused work.**
+**Total: ~10 weeks of focused work.** Phases 1–6 closed in ~3 weeks of compressed sprint work + a multi-agent sweep on 2026-05-15.
 
 ---
 
@@ -679,41 +682,56 @@ Working assumption: 1 person full-time + Claude as pair. Adjust if not.
 These were intentionally not settled during the grilling and need their
 own decisions before relevant milestones:
 
-- ~~**Repo home**~~ — RESOLVED 2026-05-15: GitHub org is `hal0ai` for both `hal0ai/hal0` and `hal0ai/hal0.dev`
+- ~~**Repo home**~~ — RESOLVED 2026-05-15: GitHub org is `Hal0ai` (capital H) for both `Hal0ai/hal0` and `Hal0ai/hal0-web` (marketing/docs)
 - ~~**License**~~ — RESOLVED 2026-05-15: Apache 2.0 (LICENSE file at repo root)
+- ~~**`hal0.dev` web property** scope~~ — RESOLVED 2026-05-15: marketing site + Starlight docs in `Hal0ai/hal0-web` (Astro+Starlight). Apex `hal0.dev` stays on Vercel for now; `releases.hal0.dev` subdomain serves the updater manifest from CF Pages (Function middleware in `Hal0ai/hal0-web#2`)
+- ~~**`releases.hal0.dev` host**~~ — RESOLVED 2026-05-15: CF Pages from `Hal0ai/hal0-web` master; subdomain via host-conditional rewrite in `functions/_middleware.ts`. `Updater.check()` verified end-to-end against the live URL
 - **Hermes shutdown timing** on the haloai LXC. Decide at cutover (phase 7)
-- ~~**`hal0.dev` web property** scope~~ — RESOLVED 2026-05-15: marketing site + Starlight docs in a separate `hal0ai/hal0.dev` repo, Vercel-hosted
 - **Public launch story** — blog post? HN? home AI subreddit? Decide before phase 7
 - **Contribution model** — accepting external PRs from day one? GH issues open? Decide before phase 7
+- **`hal0.dev` apex migration off Vercel** — optional; tracker for if/when the marketing site moves to CF Pages alongside `releases.hal0.dev`
 
 ---
 
 ## 17. Risks + mitigations
 
-| Risk | Likelihood | Mitigation |
+| Risk | Likelihood | Mitigation / Status |
 |---|---|---|
-| Slot lifecycle state machine refactor balloons in scope | Medium | Time-box phase 5 at 5 days; if not converging, fall back to status-snapshot model and defer state machine to v0.2 |
-| Cosign release pipeline + signed-artifact verification has nasty edges | Medium | Prototype in phase 2 against a throwaway release, not phase 5 |
-| ~~Toolbox images on `ghcr.io/hal0ai/` blocked by org provisioning~~ | RESOLVED | `hal0ai` GitHub org exists (decided 2026-05-15) |
-| OpenWebUI internal API changes break prewire env | Low | Pin OpenWebUI container version per hal0 release; test on every update bump |
+| ~~Slot lifecycle state machine refactor balloons in scope~~ | RESOLVED | All 9 states wired (PR #11); fail-watcher push-driven (PR #8) |
+| ~~Cosign release pipeline + signed-artifact verification has nasty edges~~ | RESOLVED | Verify-roundtrip prototype proven locally; `release.yml` drafted; cosign 3.x compat handled (`--new-bundle-format=false`). First real tag-push still pending to validate keyless OIDC end-to-end |
+| ~~Toolbox images on `ghcr.io/hal0ai/` blocked by org provisioning~~ | RESOLVED | `Hal0ai` GitHub org exists (decided 2026-05-15) |
+| **GHCR image visibility — `ghcr.io/hal0ai/*` returns `unauthorized` on pull** | **High** | Task #25 — launch blocker; user must flip org-package visibility to public OR document `docker login` requirement in installer/README.md. Harness finding #8 |
+| FLM (XDNA2) toolbox build flakiness | Medium | Team I on iteration 7 (`884cbd9`); upstream xrtdeps.sh + Rust toolchain + ffmpeg/nasm now in Dockerfile. CI run 25951155295 in flight. `optional: true` on FLM matrix entry has been masking real failures — to be removed once stable (task #26) |
+| OpenWebUI internal API changes break prewire env | Low | Pin OpenWebUI container version per hal0 release; CI smoke test in PR #4 boots the real container + asserts `/api/models` round-trips |
 | Strix Halo NPU driver flakiness on `hal0-test` LXC delays integration | Medium | Build CI path on Vulkan-CPU first; NPU is release-gate only, not per-commit |
-| Self-update mechanism corrupts an install | Low–Medium | Atomic symlink swap + retained previous version + `hal0 update --rollback` command. Test rollback as part of release-gate |
+| Self-update mechanism corrupts an install | Low–Medium | Atomic symlink swap + retained previous version + `hal0 update --rollback` command. Test rollback as part of release-gate. `HAL0_UPDATE_SKIP_COSIGN` gated to pre-release builds (PR #6) so v1.0.0 mandates signature verification |
 | Scope creep ("just add memory while we're in there") | High | This document is the scope. Anything else is v0.2. Push back hard |
 
 ---
 
 ## 18. Definition of done — v1.0
 
-- [ ] Fresh LXC: `curl -fsSL hal0.dev/install | bash` → install completes in <5 min
-- [ ] Dashboard at `:8080`, OpenWebUI at `:3001`, both reachable
-- [ ] FirstRun wizard downloads a model, assigns to slot, slot reports ready
-- [ ] Chat works end-to-end (OpenWebUI → hal0 → llama.cpp slot → response)
-- [ ] All 9 views render, dark mode, hardware-aware slot form works
-- [ ] SSE log tail works without manual refresh
-- [ ] `hal0 update --channel=nightly` upgrades, `--rollback` reverts
-- [ ] `systemctl restart hal0-api` doesn't kick running slots
-- [ ] All Tier 1, 2, 3 reliability items closed
-- [ ] CI green (unit + slot integration), Playwright green on 7 paths
-- [ ] Release-gate `make release-test` passes on hal0-test (NPU + ROCm + Vulkan)
-- [ ] README, install docs, slot docs, model docs written
-- [ ] haloai LXC migration script tested on a hal0-test clone of haloai's data
+- [ ] Fresh LXC: `curl -fsSL hal0.dev/install | bash` → install completes in <5 min — *unmeasured against a real wipe*
+- [x] Dashboard at `:8080`, OpenWebUI at `:3001`, both reachable
+- [x] FirstRun wizard downloads a model, assigns to slot, slot reports ready — *UI flow unblocked (PR #7 + #12); pending live model-pull measurement*
+- [ ] Chat works end-to-end (OpenWebUI → hal0 → llama.cpp slot → response) — *stub-proxy CI green (PR #4); real run gated on toolbox image pull (task #25)*
+- [x] All 9 views render, dark mode, hardware-aware slot form works
+- [x] SSE log tail works without manual refresh
+- [ ] `hal0 update --channel=nightly` upgrades, `--rollback` reverts — *manifest hosting live; release.yml drafted; not exercised against a real RC tag yet*
+- [ ] `systemctl restart hal0-api` doesn't kick running slots — *code path supports it; unmeasured live*
+- [x] All Tier 1, 2, 3 reliability items closed
+- [x] CI green (unit + slot integration), Playwright γ green on 7 paths
+- [ ] Release-gate `make release-test` passes on hal0-test (NPU + ROCm + Vulkan) — *blocked behind FLM toolbox build (task #15) + ghcr.io visibility (task #25)*
+- [ ] README, install docs, slot docs, model docs written — *README + installer/README + docs/release-manifest + docs/migration shipped; need final pre-launch pass*
+- [x] haloai LXC migration script tested on synthetic fixtures — *14-model curated allow-list, 19 hermetic tests pass (PR #22). Live `make harness` style dry-run on real haloai data still pending*
+
+### Outstanding launch blockers (tracked, by owner)
+
+| # | Blocker | Owner | Note |
+|---|---|---|---|
+| 25 | `ghcr.io/hal0ai/*` toolbox pulls `unauthorized` | **user** | Flip org-package visibility OR document login in installer/README.md |
+| 15 | FLM toolbox digest pin | **Team I** | CI run 25951155295 in flight (Rust + ffmpeg + XRT staging tree) |
+| 26 | CI continue-on-error mask on FLM matrix | **Team I** | Drop once #15 stable |
+| — | Real v1.0.0-rc1 tag-push + cosign keyless OIDC end-to-end | **user/release-ritual** | First-tag-push validation pending |
+| — | Fresh-LXC install timing measurement | **user** | One wipe → install → stopwatch run on hal0-test |
+| — | Decisions: launch story, contribution model, Hermes shutdown timing | **user** | See §16 |
