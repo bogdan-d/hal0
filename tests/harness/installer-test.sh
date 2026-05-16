@@ -282,16 +282,21 @@ else
 fi
 
 # ── ROW: dev-installer-systemd-dir-unused ───────────────────────────────────
-# installer/systemd/ contains hal0-api.service + hal0-slot@.service but
-# install.sh writes the api unit inline (install.sh:488 cat>) and reads
-# the slot template from packaging/systemd/ (install.sh:512). The
-# installer/systemd/ dir is shipped but never read by the installer.
+# Historical gap: installer/systemd/ once shipped hal0-api.service +
+# hal0-slot@.service but install.sh never read them (api unit written
+# inline, slot template loaded from packaging/systemd/). Resolved
+# 2026-05-15 by deleting installer/systemd/. The canonical systemd unit
+# templates live in packaging/systemd/.
 log_step "Row: dev-installer-systemd-dir-unused"
 start=$(start_ms)
-if grep -q "installer/systemd" "${REPO_ROOT}/installer/install.sh"; then
-    add_row "dev-installer-systemd-dir-unused" "pass" "$(since_ms "${start}")" "install.sh references installer/systemd"
+if [[ -d "${REPO_ROOT}/installer/systemd" ]]; then
+    if grep -q "installer/systemd" "${REPO_ROOT}/installer/install.sh"; then
+        add_row "dev-installer-systemd-dir-unused" "pass" "$(since_ms "${start}")" "installer/systemd/ exists and install.sh references it"
+    else
+        add_row "dev-installer-systemd-dir-unused" "deferred" "$(since_ms "${start}")" "installer/systemd/ shipped but never read by install.sh. Either remove installer/systemd or rewire install.sh."
+    fi
 else
-    add_row "dev-installer-systemd-dir-unused" "deferred" "$(since_ms "${start}")" "installer/systemd/ shipped but never read; install.sh:488 writes api unit inline, install.sh:512 reads slot template from packaging/systemd. Either remove installer/systemd or rewire install.sh."
+    add_row "dev-installer-systemd-dir-unused" "pass" "$(since_ms "${start}")" "installer/systemd/ removed; systemd unit templates live in packaging/systemd/"
 fi
 
 # ── write + exit ────────────────────────────────────────────────────────────
