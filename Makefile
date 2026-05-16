@@ -1,4 +1,5 @@
 .PHONY: help install dev test test-unit test-integration release-test release-test-report \
+        harness harness-report harness-clean \
         lint fmt typecheck ui-install ui-dev ui-build clean
 
 # ── hal0-test LXC connection knobs (release-gate) ───────────────────────────
@@ -28,6 +29,11 @@ help:
 	@echo "    make ui-build             Production UI build"
 	@echo "    make clean                Remove caches"
 	@echo ""
+	@echo "  Local harness (full install -> CLI -> slot -> uninstall)"
+	@echo "    make harness              Drive every public surface on this host"
+	@echo "    make harness-report       Pretty-print last harness run"
+	@echo "    make harness-clean        Drop tests/harness/reports/"
+	@echo ""
 	@echo "  Release-gate (tier γ, hal0-test LXC at $(HAL0_TEST_HOST))"
 	@echo "    make release-test         Run full NPU + ROCm + Vulkan matrix over SSH"
 	@echo "    make release-test-report  Pretty-print $(HAL0_TEST_REPORT)"
@@ -56,6 +62,19 @@ test-integration:
 	    exit 1; \
 	fi
 	pytest tests/slots/test_integration.py -v -m integration
+
+harness:
+	bash scripts/harness.sh
+
+harness-report:
+	@if [ ! -f tests/harness/reports/harness.json ]; then \
+	    echo "!  tests/harness/reports/harness.json not found. Run 'make harness' first."; \
+	    exit 1; \
+	fi
+	@python3 scripts/harness-report.py tests/harness/reports/harness.json
+
+harness-clean:
+	rm -rf tests/harness/reports/
 
 release-test:
 	HAL0_TEST_HOST="$(HAL0_TEST_HOST)" \
