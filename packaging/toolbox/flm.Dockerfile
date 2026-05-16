@@ -216,7 +216,8 @@ ENV LD_LIBRARY_PATH=/opt/xilinx/xrt/lib:/opt/fastflowlm/lib \
 #
 # Pre-create render/video groups so docker --group-add (FLM ContainerSpec
 # passes ["video", "render"]) resolves inside the container.
-RUN groupadd --system --gid 44  video  2>/dev/null || true \
+RUN userdel -r ubuntu 2>/dev/null || true \
+    && groupadd --system --gid 44  video  2>/dev/null || true \
     && groupadd --system --gid 993 render 2>/dev/null || true \
     && groupadd --system --gid 1000 hal0 \
     && useradd  --system --uid 1000 --gid 1000 --shell /usr/sbin/nologin \
