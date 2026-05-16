@@ -92,10 +92,10 @@ class UpdateCosignMissing(UpdateError):
     """The ``cosign`` binary is not installed on this host.
 
     Surfaced as a typed error with install hints — the updater does NOT
-    fall back to unsigned acceptance. To prototype an end-to-end install
-    on a host without cosign, set ``HAL0_UPDATE_SKIP_COSIGN=1``; this is
-    a documented gap that must close before v1 ships (see
-    ``docs/release-manifest.md``).
+    fall back to unsigned acceptance. On dev (0.x) and pre-release
+    builds, ``HAL0_UPDATE_SKIP_COSIGN=1`` bypasses verification for
+    end-to-end smoke against unsigned tarballs; on stable v1+ tags the
+    env var is silently ignored (see ``docs/release-manifest.md``).
     """
 
     code = "system.update_cosign_missing"
@@ -428,14 +428,34 @@ def _sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
-def _cosign_skip() -> bool:
-    """Return True if ``HAL0_UPDATE_SKIP_COSIGN=1`` is set.
+def _is_pre_release(version: str) -> bool:
+    """True for dev placeholder (0.x) or any pre-release tag (contains a hyphen).
 
-    Documented gap (PLAN §17 risk #2): for the LXC smoke we may not have a
-    real GH-actions signed artifact. The skip flag is loud — it logs WARN
-    every time and must close before v1 ships.
+    Stable releases (e.g. ``1.0.0``, ``1.2.3``, ``2.0.0``) return False —
+    on those, the cosign skip hatch is hard-disabled.
     """
-    return os.environ.get("HAL0_UPDATE_SKIP_COSIGN", "").strip() == "1"
+    return version.startswith("0.") or "-" in version
+
+
+def _cosign_skip() -> bool:
+    """Return True if ``HAL0_UPDATE_SKIP_COSIGN=1`` is honored on this build.
+
+    The env var is only respected on dev (0.x) and pre-release builds
+    (anything with a ``-rc``/``-dev`` suffix). On stable v1+ tags the env
+    var is silently ignored — verified releases are mandatory.
+    """
+    if os.environ.get("HAL0_UPDATE_SKIP_COSIGN", "").strip() != "1":
+        return False
+    from hal0 import __version__
+
+    if not _is_pre_release(__version__):
+        log.warning(
+            "updater.cosign_skip_ignored_on_stable",
+            version=__version__,
+            reason="HAL0_UPDATE_SKIP_COSIGN is not honored on stable releases",
+        )
+        return False
+    return True
 
 
 def _verify_cosign(
@@ -466,13 +486,23 @@ def _verify_cosign(
 
     cosign = shutil.which("cosign")
     if not cosign:
+        from hal0 import __version__
+
+        skip_hint = (
+            "or set HAL0_UPDATE_SKIP_COSIGN=1 to bypass (pre-release builds only; ignored on stable)"
+            if _is_pre_release(__version__)
+            else "skip env-var is not honored on this stable build"
+        )
         raise UpdateCosignMissing(
-            "cosign is not installed; install from https://docs.sigstore.dev/cosign/installation/ "
-            "or set HAL0_UPDATE_SKIP_COSIGN=1 to bypass (NOT RECOMMENDED for production)",
+            f"cosign is not installed; install from https://docs.sigstore.dev/cosign/installation/ {skip_hint}",
             details={
                 "install_hint_arch": "pacman -S cosign  # or: paru -S cosign-bin",
                 "install_hint_deb": "see https://docs.sigstore.dev/cosign/installation/",
-                "skip_env": "HAL0_UPDATE_SKIP_COSIGN=1",
+                "skip_env": (
+                    "HAL0_UPDATE_SKIP_COSIGN=1"
+                    if _is_pre_release(__version__)
+                    else None
+                ),
             },
         )
 
