@@ -6,12 +6,12 @@
   "toolbox_images": {
     "vulkan": {
       "tag": "ghcr.io/hal0ai/hal0-toolbox-vulkan:v1",
-      "digest": "sha256:c67b61a896d2941f8cd46683b45a5fe9f9d9ae8edf777d5ba7538d7d5a1e78b0",
+      "digest": "sha256:8257537d32c900014c4fb81249ab8732c72701a9a28fa3053a9d294b5d5ef8e2",
       "_notes": "llama.cpp Vulkan backend; default for Strix Halo iGPU"
     },
     "rocm": {
       "tag": "ghcr.io/hal0ai/hal0-toolbox-rocm:v1",
-      "digest": "sha256:f715ea1d87e14de76575e136816afeb53f41d6e0cb358a49e6a110bfd3f18b5a",
+      "digest": "sha256:ea82221a210fd3b7ca6deb1e53b7206c8e53e6dd91fc53595efc0c5c73daea84",
       "_notes": "llama.cpp ROCm backend; multi-arch (gfx1030..gfx1151)"
     },
     "flm": {
@@ -21,18 +21,18 @@
     },
     "moonshine": {
       "tag": "ghcr.io/hal0ai/hal0-toolbox-moonshine:v1",
-      "digest": "sha256:dda0b63bf116e8da0b0e6158356256ac4653f9ca203fe42d7e65706a39cfb99f",
+      "digest": "sha256:b1fbd13db78975c3f29d77d1a4523ba613710fbfd331395e4f2c41913b4faba5",
       "_notes": "Moonshine STT (CPU/Vulkan); OpenAI-compat /v1/audio/transcriptions + WS"
     },
     "kokoro": {
       "tag": "ghcr.io/hal0ai/hal0-toolbox-kokoro:v1",
-      "digest": "sha256:b1c57c7782993e2c007b3288772c69b3702cb8332576e9072cc6c3bdd093f6cc",
+      "digest": "sha256:2247ed408a2ea556ba257cf3f054cc3d59f8d07b1274a7e44ea9f11b693eb716",
       "_notes": "Kokoro-82M TTS (CPU ONNX); OpenAI-compat /v1/audio/speech",
       "_upstream_reference": "https://github.com/thewh1teagle/kokoro-onnx"
     },
     "comfyui": {
       "tag": "ghcr.io/hal0ai/hal0-toolbox-comfyui:v1",
-      "digest": null,
+      "digest": "sha256:55d711557f4e6b761c5b09f21601d23736567a3d9a58283da5fe064bd65cd593",
       "_notes": "ComfyUI image-gen on ROCm; SDXL + SD 1.5 + Flux. Translated from OpenAI /v1/images/generations.",
       "_upstream_reference": "https://github.com/comfyanonymous/ComfyUI"
     }
