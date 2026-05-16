@@ -498,11 +498,7 @@ def _verify_cosign(
             details={
                 "install_hint_arch": "pacman -S cosign  # or: paru -S cosign-bin",
                 "install_hint_deb": "see https://docs.sigstore.dev/cosign/installation/",
-                "skip_env": (
-                    "HAL0_UPDATE_SKIP_COSIGN=1"
-                    if _is_pre_release(__version__)
-                    else None
-                ),
+                "skip_env": ("HAL0_UPDATE_SKIP_COSIGN=1" if _is_pre_release(__version__) else None),
             },
         )
 

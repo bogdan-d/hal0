@@ -207,12 +207,12 @@ def hal0_api(
     upstreams_toml = hal0_home / "etc" / "hal0" / "upstreams.toml"
     upstreams_toml.write_text(
         # Inline TOML — no need to import tomli_w just for this.
-        f'[[upstream]]\n'
+        f"[[upstream]]\n"
         f'name = "ci-smoke"\n'
         f'kind = "remote"\n'
         f'url = "{stub_url}"\n'
         f'auth_style = "none"\n'
-        f'advertise_models = true\n'
+        f"advertise_models = true\n"
     )
 
     port = _free_port()
@@ -269,8 +269,7 @@ def hal0_api(
 
         if not seen_model:
             raise RuntimeError(
-                f"hal0-api did not advertise stub model within 30 s "
-                f"(last error: {last_err})"
+                f"hal0-api did not advertise stub model within 30 s (last error: {last_err})"
             )
 
         yield ("host.docker.internal", port)
@@ -504,11 +503,7 @@ def test_openwebui_reads_prewired_env_and_lists_hal0_models(
             entries = body
         else:
             entries = []
-        last_ids = [
-            (e.get("id") or e.get("name") or "")
-            for e in entries
-            if isinstance(e, dict)
-        ]
+        last_ids = [(e.get("id") or e.get("name") or "") for e in entries if isinstance(e, dict)]
         if STUB_MODEL_ID in last_ids:
             return  # 🎉 prewire works end-to-end
 
