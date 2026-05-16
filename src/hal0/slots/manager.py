@@ -30,7 +30,7 @@ import contextlib
 import logging
 import random
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -86,6 +86,36 @@ _FAIL_WATCH_INTERVAL_S: float = 2.0
 _FAIL_WATCH_LIVE_STATES: frozenset[SlotState] = frozenset(
     {SlotState.READY, SlotState.SERVING, SlotState.IDLE}
 )
+
+# Idle-monitor defaults.  A READY slot whose last activity is older than
+# _IDLE_AFTER_S gets demoted to IDLE so dashboards / unload heuristics can
+# distinguish "warm but quiet" from "warm and serving".  Per task #10, the
+# default matches haloai's 300s; constructor args + start_idle_monitor()
+# accept overrides for tests and ops tuning.
+_IDLE_AFTER_S: float = 300.0
+_IDLE_MONITOR_INTERVAL_S: float = 30.0
+
+
+# ── Hook protocols ───────────────────────────────────────────────────────────
+#
+# Slot loading optionally fans out to a model-pull step when the model file
+# isn't on disk yet.  The pull engine itself lives in ``hal0.registry.pull``;
+# the SlotManager only sees an injectable callable so it stays out of HF /
+# I/O concerns.  ``PullRunner`` must raise on failure so ``load()`` can flip
+# the slot to ERROR with a meaningful message.
+
+PullRunner = Callable[[str], Awaitable[None]]
+"""Async hook invoked while the slot is in PULLING.
+
+Receives the resolved model id; must ``await`` until the model is on disk
+and resolvable through :class:`hal0.registry.store.ModelRegistry`, or raise
+on hard failure."""
+
+ModelCacheCheck = Callable[[str], bool]
+"""Sync predicate: True when ``model_id`` is already on disk + registered.
+
+The default check consults :class:`ModelRegistry`; tests inject stubs to
+force-trigger or skip the PULLING transition deterministically."""
 
 
 # ── Slot snapshot ────────────────────────────────────────────────────────────
@@ -146,7 +176,14 @@ class SlotManager:
 
     BUILTIN_SLOTS: tuple[str, ...] = ("primary", "embed", "stt", "tts", "img")
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        pull_runner: PullRunner | None = None,
+        model_cache_check: ModelCacheCheck | None = None,
+        idle_after_s: float = _IDLE_AFTER_S,
+        idle_monitor_interval_s: float = _IDLE_MONITOR_INTERVAL_S,
+    ) -> None:
         # Per-slot locks to prevent concurrent load/unload/restart races.
         self._locks: dict[str, asyncio.Lock] = {}
         # In-memory copy of the latest state per slot (mirrors state.json).
@@ -159,6 +196,28 @@ class SlotManager:
         # push a READY→ERROR transition the instant the unit dies.  Keyed by
         # slot name; only present while the slot is in a live state.
         self._fail_watchers: dict[str, asyncio.Task[None]] = {}
+        # PULLING — optional model-pull hook + cache predicate.  When
+        # ``pull_runner`` is unset, load() never enters PULLING (the model
+        # is treated as already present, matching the legacy
+        # offline→starting path).  See task #10 in PLAN.md.
+        self._pull_runner: PullRunner | None = pull_runner
+        self._model_cache_check: ModelCacheCheck = (
+            model_cache_check or self._default_model_cache_check
+        )
+        # SERVING — per-slot in-flight request counter.  ``serving()`` is
+        # an async context manager that flips READY/IDLE → SERVING on the
+        # first concurrent entry and back to READY on the last exit.  A
+        # single asyncio.Lock guards the counter to prevent toggle storms
+        # when N concurrent requests arrive in the same tick.
+        self._serving_count: dict[str, int] = {}
+        self._serving_lock: asyncio.Lock = asyncio.Lock()
+        # IDLE — background sweeper task that demotes READY→IDLE after
+        # ``idle_after_s`` seconds of inactivity.  Started explicitly via
+        # ``start_idle_monitor()`` (the API lifespan owns the lifecycle so
+        # tests can inject shorter intervals).
+        self._idle_after_s: float = idle_after_s
+        self._idle_monitor_interval_s: float = idle_monitor_interval_s
+        self._idle_monitor_task: asyncio.Task[None] | None = None
 
     # ── helpers ──────────────────────────────────────────────────────────────
 
@@ -457,6 +516,20 @@ class SlotManager:
                 return await self.status(slot_name)
 
             try:
+                # PULLING — gate the model download behind an explicit
+                # state so dashboards can show "downloading model"
+                # separately from "container starting".  If the model is
+                # already on disk (or no pull hook is wired), skip
+                # straight to STARTING — both edges are legal.
+                if resolved_model and self._needs_pull(resolved_model):
+                    await self._transition(
+                        slot_name,
+                        SlotState.PULLING,
+                        model_id=resolved_model,
+                        port=_cfg_port(cfg),
+                    )
+                    assert self._pull_runner is not None  # _needs_pull guards
+                    await self._pull_runner(resolved_model)
                 await self._transition(
                     slot_name,
                     SlotState.STARTING,
@@ -865,14 +938,213 @@ class SlotManager:
     def bump_last_used(self, slot_name: str) -> None:
         """Record activity on a slot — called from request dispatch paths.
 
-        Tier-2 idle-management: a separate task (in the dispatcher subtree)
-        polls these timestamps and transitions long-idle slots to IDLE,
-        then UNLOADING.  This module only owns the bookkeeping.
+        Tier-2 idle-management: the idle monitor (see
+        :meth:`start_idle_monitor`) polls these timestamps and transitions
+        long-idle READY slots to IDLE.  The dispatcher's ``serving()``
+        context also bumps on every request boundary so a steady stream
+        keeps the slot READY.
         """
         self._last_used[slot_name] = time.time()
 
     def last_used(self, slot_name: str) -> float | None:
         return self._last_used.get(slot_name)
+
+    # ── PULLING ──────────────────────────────────────────────────────────────
+    #
+    # ``load()`` consults ``_needs_pull`` before the STARTING transition.
+    # The default cache check looks the model up in ``ModelRegistry`` and
+    # verifies the file at ``Model.path`` exists on disk.  Tests inject a
+    # custom predicate to force-trigger or skip PULLING deterministically.
+
+    def _needs_pull(self, model_id: str) -> bool:
+        """True when load() must flip through PULLING before STARTING.
+
+        Returns ``False`` if no ``pull_runner`` was wired — the legacy
+        offline→starting path is preserved for callers that handle their
+        own model staging (installer, integration tests).
+        """
+        if self._pull_runner is None:
+            return False
+        try:
+            return not bool(self._model_cache_check(model_id))
+        except Exception as exc:
+            # Defensive: a buggy cache check must not break load().  Log
+            # and treat as "cached" so we fall through to STARTING and
+            # the slot's own probe surfaces the real failure.
+            log.warning(
+                "slot.cache_check_failed",
+                extra={"model_id": model_id, "error": str(exc)},
+            )
+            return False
+
+    @staticmethod
+    def _default_model_cache_check(model_id: str) -> bool:
+        """Default predicate: registered + path-on-disk → cached.
+
+        Imports the registry lazily so test fixtures that haven't wired
+        ``HAL0_HOME`` still load the module.  Missing registry / model →
+        not cached → caller flips through PULLING (where the pull hook
+        either materialises the file or raises).
+        """
+        try:
+            from hal0.registry.store import ModelNotFound, ModelRegistry
+        except ImportError:
+            return True
+        try:
+            model = ModelRegistry().get(model_id)
+        except ModelNotFound:
+            return False
+        except Exception:
+            return True
+        path = getattr(model, "path", "") or ""
+        if not path:
+            return False
+        try:
+            return Path(path).exists()
+        except OSError:
+            return False
+
+    # ── SERVING ──────────────────────────────────────────────────────────────
+
+    @contextlib.asynccontextmanager
+    async def serving(self, slot_name: str) -> AsyncIterator[None]:
+        """Mark ``slot_name`` as SERVING for the duration of one request.
+
+        Concurrency-safe: a per-manager asyncio.Lock guards an in-flight
+        counter.  The first concurrent entry flips READY/IDLE → SERVING;
+        the last exit flips SERVING → READY.  ``IllegalSlotTransition``
+        from races (e.g. the slot got unloaded mid-request) is swallowed
+        so request paths never crash because of state-machine drift.
+
+        ``bump_last_used`` fires on both entry and exit so the idle
+        monitor's clock resets every time a request lands.
+
+        # NOTE: callers wire this through ``Dispatcher.forward``; the
+        # single-flight prefetch path does NOT enter this context — it
+        # only touches /v1/models, never a real inference request, so
+        # the slot stays READY for cold-cache fanouts.
+        """
+        await self._serving_enter(slot_name)
+        try:
+            yield
+        finally:
+            await self._serving_exit(slot_name)
+
+    async def _serving_enter(self, slot_name: str) -> None:
+        async with self._serving_lock:
+            prev = self._serving_count.get(slot_name, 0)
+            self._serving_count[slot_name] = prev + 1
+            self.bump_last_used(slot_name)
+            if prev > 0:
+                return
+            current = self._current_state(slot_name)
+            if current not in (SlotState.READY, SlotState.IDLE):
+                return
+            try:
+                await self._transition(slot_name, SlotState.SERVING)
+            except IllegalSlotTransition:
+                log.debug(
+                    "slot.serving_enter_illegal_transition",
+                    extra={"slot": slot_name, "from": current.value},
+                )
+
+    async def _serving_exit(self, slot_name: str) -> None:
+        async with self._serving_lock:
+            remaining = self._serving_count.get(slot_name, 1) - 1
+            if remaining > 0:
+                self._serving_count[slot_name] = remaining
+                self.bump_last_used(slot_name)
+                return
+            self._serving_count.pop(slot_name, None)
+            self.bump_last_used(slot_name)
+            current = self._current_state(slot_name)
+            if current != SlotState.SERVING:
+                return
+            try:
+                await self._transition(slot_name, SlotState.READY)
+            except IllegalSlotTransition:
+                log.debug(
+                    "slot.serving_exit_illegal_transition",
+                    extra={"slot": slot_name, "from": current.value},
+                )
+
+    def in_flight_count(self, slot_name: str) -> int:
+        """Return the number of currently-active ``serving()`` contexts."""
+        return self._serving_count.get(slot_name, 0)
+
+    # ── IDLE monitor ─────────────────────────────────────────────────────────
+
+    async def start_idle_monitor(
+        self,
+        *,
+        idle_after_s: float | None = None,
+        interval_s: float | None = None,
+    ) -> None:
+        """Start the background sweeper that demotes READY → IDLE.
+
+        Idempotent — calling twice while the task is alive is a no-op.
+        Callers in the API lifespan invoke this once at startup; tests
+        construct a SlotManager with shorter intervals and start the
+        monitor explicitly.
+        """
+        if idle_after_s is not None:
+            self._idle_after_s = idle_after_s
+        if interval_s is not None:
+            self._idle_monitor_interval_s = interval_s
+        existing = self._idle_monitor_task
+        if existing is not None and not existing.done():
+            return
+        try:
+            self._idle_monitor_task = asyncio.create_task(
+                self._idle_monitor_loop(),
+                name="hal0-slot-idle-monitor",
+            )
+        except RuntimeError:
+            # No running loop (sync-context test).  Defer until callers
+            # are in an async context.
+            log.debug("slot.idle_monitor_no_loop")
+
+    async def stop_idle_monitor(self) -> None:
+        """Cancel the idle-monitor task if running.  Idempotent."""
+        task = self._idle_monitor_task
+        self._idle_monitor_task = None
+        if task is None or task.done():
+            return
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await task
+
+    async def _idle_monitor_loop(self) -> None:
+        """Periodically sweep READY slots for idle-timeout."""
+        try:
+            while True:
+                await asyncio.sleep(self._idle_monitor_interval_s)
+                try:
+                    await self._sweep_idle_once()
+                except Exception as exc:  # never let the monitor die quietly
+                    log.warning("slot.idle_sweep_failed", extra={"error": str(exc)})
+        except asyncio.CancelledError:
+            raise
+
+    async def _sweep_idle_once(self) -> None:
+        """One pass: flip any READY slot past idle-timeout to IDLE."""
+        now = time.time()
+        for slot_name, ts in list(self._last_used.items()):
+            if (now - ts) < self._idle_after_s:
+                continue
+            if self._serving_count.get(slot_name, 0) > 0:
+                continue
+            if self._current_state(slot_name) != SlotState.READY:
+                continue
+            try:
+                await self._transition(
+                    slot_name,
+                    SlotState.IDLE,
+                    message=f"idle for {now - ts:.0f}s",
+                )
+            except IllegalSlotTransition:
+                # Raced with an unload — fine; next sweep will skip it.
+                continue
 
     async def get_config(self, slot_name: str) -> dict[str, Any]:
         """Return the slot's TOML config as a plain dict (read-only view).

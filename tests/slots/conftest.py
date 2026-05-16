@@ -24,7 +24,11 @@ def pytest_configure(config: pytest.Config) -> None:
     )
 
 
-# ── shared fixtures (consumed by test_manager.py and test_fail_watcher.py) ──
+# ── shared fixtures ─────────────────────────────────────────────────────────
+#
+# Consumed by test_manager.py, test_fail_watcher.py, and the
+# state-state-state suite (test_pulling_serving_idle) so the systemctl +
+# health-probe stubs aren't duplicated across files.
 
 
 class _FakeProc:

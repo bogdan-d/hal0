@@ -37,8 +37,8 @@ from hal0.slots.state import (
 )
 
 # Shared fixtures (_FakeProc, systemctl_stub, stub_await_ready, slot_root)
-# live in tests/slots/conftest.py so they can be reused across this file
-# and test_fail_watcher.py.
+# live in tests/slots/conftest.py so they can be reused across this file,
+# test_fail_watcher.py, and test_pulling_serving_idle.py.
 
 
 # ── happy paths ──────────────────────────────────────────────────────────────

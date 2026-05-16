@@ -52,6 +52,7 @@ if TYPE_CHECKING:
     from fastapi import Request
 
     from hal0.registry.store import ModelRegistry
+    from hal0.slots.manager import SlotManager
 
 # Hop-by-hop response headers that must not be forwarded to the client.
 # httpx already decompresses content; content-length must be recomputed; and
@@ -177,6 +178,16 @@ class UpstreamCall:
     ``passthrough-prefetched:anthropic``, ``legacy_slot:primary``.
     """
 
+    slot_name: str = ""
+    """Local slot name when the upstream is ``kind=slot``, empty otherwise.
+
+    ``Dispatcher.forward`` wraps the HTTP round-trip in
+    :meth:`SlotManager.serving` for the duration of the request when this
+    is non-empty, so the slot moves READY/IDLE → SERVING → READY around
+    each /v1 call.  Remote upstreams (OpenAI, OpenRouter, …) leave this
+    empty — they have no local slot to mark.
+    """
+
     latency_ms: float = 0.0
     """Time spent in routing logic (not including the upstream round-trip)."""
 
@@ -249,6 +260,7 @@ class Dispatcher:
         fetch_models: FetchModelsFn | None = None,
         single_flight: SingleFlightGroup | None = None,
         http_client: httpx.AsyncClient | None = None,
+        slot_manager: SlotManager | None = None,
     ) -> None:
         self._upstreams = upstream_registry or UpstreamRegistry()
         self._models = model_registry
@@ -263,6 +275,11 @@ class Dispatcher:
         # only exercise dispatch() don't open sockets.
         self._http_client: httpx.AsyncClient | None = http_client
         self._owns_http_client: bool = http_client is None
+        # SlotManager — when supplied, forward() wraps slot-kind calls in
+        # SlotManager.serving() so the slot transitions READY/IDLE →
+        # SERVING → READY around each /v1 request (task #10 SERVING).
+        # Optional so unit tests that only exercise dispatch() can omit it.
+        self._slot_manager: SlotManager | None = slot_manager
 
     def _get_http_client(self) -> httpx.AsyncClient:
         if self._http_client is None:
@@ -370,6 +387,7 @@ class Dispatcher:
                     resolved_model=resolved,
                     requested_model=original_model,
                     resolution_path="registry",
+                    slot_name=_slot_name_of(upstream),
                 )
                 self._log_decision(call, t0, cache_state="warm" if advertised else "probed")
                 return call
@@ -393,6 +411,7 @@ class Dispatcher:
                     resolved_model=model_id,
                     requested_model=original_model,
                     resolution_path=f"passthrough:{upstream.name}",
+                    slot_name=_slot_name_of(upstream),
                 )
                 self._log_decision(call, t0, cache_state="warm")
                 return call
@@ -417,6 +436,7 @@ class Dispatcher:
                         resolved_model=model_id,
                         requested_model=original_model,
                         resolution_path=f"passthrough-prefetched:{upstream.name}",
+                        slot_name=_slot_name_of(upstream),
                     )
                     self._log_decision(call, t0, cache_state="prefetched")
                     return call
@@ -463,6 +483,7 @@ class Dispatcher:
             resolved_model=original_model or model_id,
             requested_model=original_model,
             resolution_path=f"legacy_slot:{slot_upstream.name}",
+            slot_name=_slot_name_of(slot_upstream),
         )
         self._log_decision(call, t0, cache_state="legacy")
         return call
@@ -487,13 +508,74 @@ class Dispatcher:
         the error middleware emits a structured ``dispatch.upstream_unavailable``
         envelope.
 
+        Slot upstreams (``call.slot_name`` set) are wrapped in
+        :meth:`SlotManager.serving` so the slot moves READY/IDLE →
+        SERVING → READY around the request.  For streaming responses the
+        context is held open until the iterator drains, so SERVING is
+        only released after the stream closes (task #10 SERVING).
+
         Mirrors haloai ``lib/dispatcher.py``'s ``_forward_direct`` and
         ``_forward_streaming`` (PLAN.md §3).
         """
+        if call.slot_name and self._slot_manager is not None:
+            return await self._forward_with_serving(call)
+        return await self._forward_plain(call)
+
+    async def _forward_plain(self, call: UpstreamCall) -> Response:
         client = self._get_http_client()
         if call.streaming:
             return await self._forward_streaming(client, call)
         return await self._forward_direct(client, call)
+
+    async def _forward_with_serving(self, call: UpstreamCall) -> Response:
+        """Wrap _forward_plain in SlotManager.serving for the slot's lifetime.
+
+        Non-streaming responses release the context before returning.
+        Streaming responses keep the context alive by wrapping the
+        upstream iterator so the slot stays SERVING until the client
+        finishes consuming the stream (or the response is GC'd).
+        """
+        assert self._slot_manager is not None  # narrowed by forward()
+        ctx = self._slot_manager.serving(call.slot_name)
+        await ctx.__aenter__()
+        released = False
+
+        async def _release() -> None:
+            nonlocal released
+            if released:
+                return
+            released = True
+            try:
+                await ctx.__aexit__(None, None, None)
+            except Exception as exc:  # never bury the request's outcome
+                log.warning(
+                    "dispatch.serving_release_failed",
+                    slot=call.slot_name,
+                    error=str(exc),
+                )
+
+        try:
+            client = self._get_http_client()
+            if call.streaming:
+                resp = await self._forward_streaming(client, call)
+                inner = resp.body_iterator
+
+                async def _drained() -> AsyncIterator[bytes]:
+                    try:
+                        async for chunk in inner:
+                            yield chunk if isinstance(chunk, bytes) else chunk.encode()
+                    finally:
+                        await _release()
+
+                resp.body_iterator = _drained()
+                return resp
+            try:
+                return await self._forward_direct(client, call)
+            finally:
+                await _release()
+        except BaseException:
+            await _release()
+            raise
 
     async def _forward_direct(
         self,
@@ -728,6 +810,20 @@ def _remap_model(body: dict[str, Any], new_model: str) -> bytes:
     if new_model:
         body = {**body, "model": new_model}
     return json.dumps(body).encode("utf-8")
+
+
+def _slot_name_of(upstream: Upstream) -> str:
+    """Return the local slot name for ``upstream`` (empty for remotes).
+
+    ``UpstreamCall.slot_name`` carries this through to ``forward()``,
+    which uses it to gate the SERVING transition.  Falls back to
+    ``upstream.name`` when ``slot_name`` is unset — autoregistered slots
+    use the same value for both, but explicit upstreams.toml entries can
+    override.
+    """
+    if upstream.kind != "slot":
+        return ""
+    return upstream.slot_name or upstream.name
 
 
 def _join_url(upstream_url: str, request_path: str) -> str:
