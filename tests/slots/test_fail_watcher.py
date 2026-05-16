@@ -1,0 +1,135 @@
+"""Tests for SlotManager's push-driven failure detector (task #11).
+
+When a slot's systemd unit dies unexpectedly while the slot is in a live
+state (READY / SERVING / IDLE), the manager must flip to ERROR and emit
+the SSE frame within ~1s — not on the next ``status()`` poll or after
+``_await_ready``'s 180s grace.
+
+These tests monkeypatch the fail-watch poll interval down to a few
+hundred milliseconds so they finish quickly while still exercising the
+real ``_fail_watch_loop`` and ``_update_fail_watcher`` codepaths.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from typing import Any
+
+import pytest
+
+from hal0.slots import manager as mgr_mod
+from hal0.slots.manager import SlotManager
+from hal0.slots.state import SlotState
+
+
+@pytest.fixture
+def fast_fail_watch(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Tighten the fail-watch poll interval so tests run in <5s."""
+    monkeypatch.setattr(mgr_mod, "_FAIL_WATCH_INTERVAL_S", 0.2)
+
+
+async def _wait_for_state(
+    sm: SlotManager,
+    name: str,
+    target: SlotState,
+    *,
+    timeout_s: float = 5.0,
+) -> SlotState:
+    """Poll the manager's in-memory state until ``target`` or timeout."""
+    deadline = asyncio.get_event_loop().time() + timeout_s
+    while asyncio.get_event_loop().time() < deadline:
+        rec = sm._states.get(name)
+        if rec is not None and rec.state == target:
+            return rec.state
+        await asyncio.sleep(0.05)
+    rec = sm._states.get(name)
+    return rec.state if rec is not None else SlotState.OFFLINE
+
+
+async def test_fail_watcher_pushes_error_within_5s_on_unit_death(
+    slot_root: Any,
+    systemctl_stub: dict[str, Any],
+    stub_await_ready: None,
+    fast_fail_watch: None,
+) -> None:
+    """Unit going inactive while slot is READY must trigger an ERROR
+    transition pushed by the watcher — not by a subsequent status() call.
+    """
+    sm = SlotManager()
+    snap = await sm.load("primary")
+    assert snap.state == SlotState.READY
+    # The watcher should be alive and tracked.
+    assert "primary" in sm._fail_watchers
+    assert not sm._fail_watchers["primary"].done()
+
+    # Simulate the systemd unit dying out-of-band (OOM / segfault).  No
+    # call to status() — the push-driven watcher is what should react.
+    systemctl_stub["is_active_state"] = "inactive"
+
+    observed = await _wait_for_state(sm, "primary", SlotState.ERROR, timeout_s=5.0)
+    assert observed == SlotState.ERROR, (
+        f"watcher failed to push ERROR within 5s; final state={observed}"
+    )
+
+    rec = sm._states["primary"]
+    assert "systemd" in rec.message.lower() or "died" in rec.message.lower(), (
+        f"ERROR record should carry an explanatory message (got {rec.message!r})"
+    )
+    # Watcher is one-shot — it should have exited after firing.
+    watcher = sm._fail_watchers.get("primary")
+    if watcher is not None:
+        # cooperative — wait briefly for the cancel/return to land
+        for _ in range(20):
+            if watcher.done():
+                break
+            await asyncio.sleep(0.05)
+        assert watcher.done()
+
+
+async def test_fail_watcher_emits_sse_frame_for_pushed_error(
+    slot_root: Any,
+    systemctl_stub: dict[str, Any],
+    stub_await_ready: None,
+    fast_fail_watch: None,
+) -> None:
+    """The watcher-triggered ERROR transition must broadcast to SSE subscribers."""
+    sm = SlotManager()
+    await sm.load("primary")
+
+    # Subscribe before the failure so we observe the watcher-emitted frame.
+    stream = sm.state_stream()
+    # Drain any frames already enqueued for late subscribers (there should
+    # be none — subscriber list grew after load()), then trigger failure.
+    systemctl_stub["is_active_state"] = "inactive"
+
+    # Pull frames until we see ERROR, with a hard timeout.
+    async def _next_error() -> str:
+        async for rec in stream:
+            if rec.state == SlotState.ERROR:
+                return rec.message
+        return ""
+
+    try:
+        msg = await asyncio.wait_for(_next_error(), timeout=5.0)
+    except TimeoutError:
+        pytest.fail("watcher did not emit an ERROR SSE frame within 5s")
+    assert "systemd" in msg.lower() or "died" in msg.lower()
+
+
+async def test_fail_watcher_does_not_fire_when_slot_unloads_cleanly(
+    slot_root: Any,
+    systemctl_stub: dict[str, Any],
+    stub_await_ready: None,
+    fast_fail_watch: None,
+) -> None:
+    """A clean unload() must cancel the watcher; no spurious ERROR push."""
+    sm = SlotManager()
+    await sm.load("primary")
+    assert "primary" in sm._fail_watchers
+    await sm.unload("primary")
+    # Watcher must be gone (or done) after the slot left live-state.
+    watcher = sm._fail_watchers.get("primary")
+    assert watcher is None or watcher.done()
+    # Give any stray watcher time to misbehave; then assert OFFLINE held.
+    await asyncio.sleep(0.6)  # > _FAIL_WATCH_INTERVAL_S
+    assert sm._states["primary"].state == SlotState.OFFLINE
