@@ -39,7 +39,12 @@ die()   { err "$*"; exit 1; }
 # `sleep N; is-active` so slow first boots (OpenWebUI pulling images,
 # Caddy provisioning TLS) don't get falsely flagged as failures.
 wait_active() {
-    local unit="$1" timeout="${2:-15}" deadline=$((SECONDS+timeout))
+    local unit="$1"
+    # `local` evaluates all RHS *before* any name binds, so a one-liner
+    # `local timeout="${2:-15}" deadline=$((SECONDS+timeout))` would
+    # reference an unset `timeout` under `set -u`. Split deliberately.
+    local timeout="${2:-15}"
+    local deadline=$((SECONDS+timeout))
     while (( SECONDS < deadline )); do
         systemctl is-active --quiet "${unit}" && return 0
         sleep 0.5
