@@ -26,7 +26,7 @@ file post-build; the runtime consumer is `hal0.updater.Updater.apply()`.
   "url": "https://github.com/hal0ai/hal0/releases/download/v0.1.1/hal0-0.1.1.tar.gz",
   "sig_url": "https://github.com/hal0ai/hal0/releases/download/v0.1.1/hal0-0.1.1.tar.gz.sig",
   "digest_sha256": "5e884898da28047151d0e56f8dc6292773603d0d6aabbdd62a11ef721d1542d8",
-  "signer_identity": "^https://github\\.com/hal0ai/hal0/\\.github/workflows/release\\.yml@refs/tags/v0\\.1\\.1$",
+  "signer_identity": "^(?i)https://github\\.com/hal0ai/hal0/\\.github/workflows/release\\.yml@refs/tags/v0\\.1\\.1$",
   "signer_issuer": "https://token.actions.githubusercontent.com",
   "min_data_version": 1,
   "released_at": "2026-05-15T12:00:00Z",
@@ -50,7 +50,7 @@ file post-build; the runtime consumer is `hal0.updater.Updater.apply()`.
 | `url` | string | yes | `http(s)` or `file://` URL of the release tarball. |
 | `sig_url` | string | yes | URL of the detached cosign signature (`*.sig`). |
 | `digest_sha256` | string | yes | Hex sha256 of the tarball bytes (64 chars). `sha256:` prefix tolerated. |
-| `signer_identity` | string | yes | Regex passed to `cosign verify-blob --certificate-identity-regexp`. Must anchor (`^...$`) to the exact GH Actions workflow + ref. |
+| `signer_identity` | string | yes | Regex passed to `cosign verify-blob --certificate-identity-regexp`. Must anchor (`^...$`) to the exact GH Actions workflow + ref. Use `(?i)` to absorb GH's case preservation — the `Hal0ai` org slug is canonical capital-H but lowercase `hal0ai` references redirect; `(?i)` matches either. |
 | `signer_issuer` | string | no | OIDC issuer; defaults to GitHub Actions (`token.actions.githubusercontent.com`). |
 | `min_data_version` | int | no | Smallest acceptable `meta.schema_version` on disk. Updater runs forward migrations up to `max(min_data_version, latest_version())`. Default `1`. |
 | `released_at` | string | no | ISO-8601 release timestamp; surfaced in the dashboard. |
