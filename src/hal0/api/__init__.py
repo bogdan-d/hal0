@@ -203,18 +203,23 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         model_cache[u.name] = merged
         return merged
 
+    # SlotManager owns slot state.  Built before Dispatcher so it can be
+    # threaded in and forward() can flip slots into SERVING per request.
+    slot_manager = SlotManager()
+
     dispatcher = Dispatcher(
         upstream_registry=upstreams,
         model_registry=model_registry,
         cached_models=lambda name: model_cache.get(name, []),
         fetch_models=_fetch_and_cache,
+        slot_manager=slot_manager,
     )
 
-    # SlotManager has no startup/shutdown work — it's a stateless façade
-    # over /etc/hal0/slots/*.toml + /var/lib/hal0/slots/*/state.json plus
-    # systemctl subprocesses. Per-slot configs are discovered lazily by
-    # paths.slots_config_dir(), so HAL0_HOME changes in tests are honoured.
-    slot_manager = SlotManager()
+    # Idle monitor — demotes READY → IDLE after the configured timeout
+    # so the dashboard distinguishes "warm but quiet" from "warm and
+    # actively serving" without operator help.  Defaults to 300s; the
+    # constructor accepts overrides for tests.
+    await slot_manager.start_idle_monitor()
 
     # Auto-register local slots as upstreams so the dispatcher can route
     # ``model: <slot_name>`` requests without requiring the user to write
@@ -264,6 +269,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         yield
     finally:
+        await slot_manager.stop_idle_monitor()
         await dispatcher.aclose()
         log.info("hal0.api.shutdown")
 
