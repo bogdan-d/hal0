@@ -177,11 +177,17 @@ def _make_wire_token() -> tuple[str, str, str]:
 class TokenStore:
     """Read/write wrapper around tokens.toml.
 
-    Loads lazily on first access; reload() forces a re-read after an
-    out-of-band edit. All mutations atomically rewrite the whole file —
-    tokens.toml is small (a handful of rows) so we don't bother with
-    delta writes, and the atomic-rename invariant is the same one the
-    rest of hal0 relies on for slot env files.
+    Loads lazily on first access. Subsequent accesses stat the file and
+    re-read it only if (mtime_ns, size, inode) changed — that way a
+    ``hal0 auth token add`` from the CLI (or any out-of-band editor)
+    takes effect on the very next request without an API restart or an
+    explicit reload endpoint. ``reload()`` is retained for tests and as
+    a manual escape hatch.
+
+    All mutations atomically rewrite the whole file — tokens.toml is
+    small (a handful of rows) so we don't bother with delta writes, and
+    the atomic-rename invariant is the same one the rest of hal0 relies
+    on for slot env files.
     """
 
     def __init__(self, path: Path | None = None) -> None:
@@ -191,6 +197,11 @@ class TokenStore:
         # fresh install where the file genuinely doesn't exist.
         self._loaded = False
         self._tokens: list[Token] = []
+        # File-identity tuple recorded after each load/save. We compare on
+        # every access to detect out-of-band writes (e.g. ``hal0 auth
+        # token add`` mutating tokens.toml in a separate process). None
+        # means "no snapshot recorded yet" — the next access will load.
+        self._fingerprint: tuple[int, int, int] | None = None
 
     @property
     def path(self) -> Path:
@@ -199,18 +210,42 @@ class TokenStore:
     # ── load / save ──────────────────────────────────────────────────────
 
     def reload(self) -> None:
-        """Force a re-read from disk. Called from POST /api/auth/tokens/reload
-        and from tests after writing tokens.toml directly.
+        """Force a re-read from disk regardless of the cached fingerprint.
+
+        Kept for tests that want a deterministic re-read and as a manual
+        escape hatch — the normal hot-reload path is the fingerprint
+        check inside :meth:`_ensure_loaded`, which fires on every access.
         """
         self._loaded = False
         self._tokens = []
+        self._fingerprint = None
         self._ensure_loaded()
 
+    def _current_fingerprint(self) -> tuple[int, int, int] | None:
+        """Return (mtime_ns, size, inode) for the on-disk file, or None.
+
+        None means the file is missing or unstattable — treated as a
+        distinct fingerprint from any present file so the
+        appear/disappear transitions force a reload.
+        """
+        try:
+            st = self._path.stat()
+        except (FileNotFoundError, OSError):
+            return None
+        return (st.st_mtime_ns, st.st_size, st.st_ino)
+
     def _ensure_loaded(self) -> None:
-        if self._loaded:
+        # Hot-reload: if the file's fingerprint has shifted since we last
+        # touched it, an out-of-band write (CLI `token add`, manual
+        # edit) happened and our in-memory list is stale. Drop the cache
+        # and re-read. Cheap — one stat per request, no parse unless
+        # something actually changed.
+        current = self._current_fingerprint()
+        if self._loaded and current == self._fingerprint:
             return
         self._loaded = True
         self._tokens = []
+        self._fingerprint = current
         if not self._path.exists():
             return
         try:
@@ -288,6 +323,11 @@ class TokenStore:
                 f"failed to write tokens.toml at {self._path}: {exc}",
                 details={"path": str(self._path), "reason": str(exc)},
             ) from exc
+        # Refresh the fingerprint so the next _ensure_loaded() sees the
+        # file we just wrote as "current" — without this, every save
+        # would invalidate our own cache and force a reparse on the
+        # following request.
+        self._fingerprint = self._current_fingerprint()
 
     # ── CRUD ─────────────────────────────────────────────────────────────
 

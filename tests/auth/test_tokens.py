@@ -181,8 +181,10 @@ created_at = "2026-05-15T10:00:00Z"
 """
     store.path.write_text(contents + extra, encoding="utf-8")
 
-    # Without reload, the in-memory cache is stale.
-    assert any(t.label == "external" for t in store.list()) is False
+    # The fingerprint check in _ensure_loaded() picks the change up on
+    # the next access — no explicit reload() needed. (task #12)
+    assert any(t.label == "external" for t in store.list()) is True
+    # The explicit reload() escape hatch still works and is idempotent.
     store.reload()
     assert any(t.label == "external" for t in store.list()) is True
 
@@ -213,6 +215,42 @@ def test_last_used_at_persists(store: TokenStore) -> None:
     fresh = TokenStore(store.path)
     rows = fresh.list()
     assert rows[0].last_used_at is not None
+
+
+def test_external_token_add_takes_effect_without_restart(tmp_path: Path) -> None:
+    """A token minted into tokens.toml by another process (the CLI's
+    ``hal0 auth token add`` is the motivating case) must validate on the
+    very next request without anyone calling ``store.reload()`` —
+    otherwise operators have to bounce ``hal0-api.service`` every time
+    they issue a credential. See task #12.
+    """
+    path = tmp_path / "tokens.toml"
+
+    # Process A: long-lived API. Mints an initial token and serves a
+    # request with it — same instance is reused for the second request,
+    # mirroring the FastAPI app.state singleton.
+    api_store = TokenStore(path)
+    _, raw_initial = api_store.create(label="initial", scope="all")
+    assert api_store.verify(raw_initial) is not None, (
+        "initial token must validate before the external write"
+    )
+
+    # Process B: CLI in another shell. Opens its own TokenStore against
+    # the same file, mints a token, drops out. The atomic rename in
+    # _save() guarantees the on-disk file has a fresh inode + mtime.
+    cli_store = TokenStore(path)
+    _, raw_added = cli_store.create(label="added-by-cli", scope="all")
+
+    # Process A again: NO reload() call, NO restart. The next verify()
+    # must pick the new token up via the fingerprint check.
+    matched = api_store.verify(raw_added)
+    assert matched is not None, (
+        "newly-added token failed to validate without an API restart — "
+        "fingerprint-driven reload is broken"
+    )
+    assert matched.label == "added-by-cli"
+    # And the original token still works — reload must merge, not replace.
+    assert api_store.verify(raw_initial) is not None
 
 
 def test_corrupt_toml_raises_typed_error(tmp_path: Path) -> None:
