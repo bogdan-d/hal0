@@ -80,6 +80,11 @@ tests/harness/reports.*/
 *.key
 auth.json
 
+# Operator-only docs (live notes referencing internal lab hosts; kept
+# out of public history so they don't have to be sanitised every edit).
+docs/handoff-*.md
+tests/release-gate-report.json
+
 # OS
 Thumbs.db
 .claude/worktrees/

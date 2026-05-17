@@ -13,7 +13,7 @@
 # Env (see Makefile for defaults):
 #   HAL0_TEST_HOST     SSH host (default 10.0.1.230)
 #   HAL0_TEST_USER     SSH user (default root)
-#   HAL0_TEST_SSH_KEY  SSH key  (default ~/.ssh/thinmint)
+#   HAL0_TEST_SSH_KEY  SSH key  (default ~/.ssh/id_ed25519)
 #   HAL0_TEST_PREFIX   Unique slot prefix for this run (default ci-h-<job>-<pid>)
 #   HAL0_TEST_REPORT   Output JSON path (default tests/release-gate-report.json)
 #
@@ -29,7 +29,7 @@ IFS=$'\n\t'
 
 HAL0_TEST_HOST="${HAL0_TEST_HOST:-10.0.1.230}"
 HAL0_TEST_USER="${HAL0_TEST_USER:-root}"
-HAL0_TEST_SSH_KEY="${HAL0_TEST_SSH_KEY:-${HOME}/.ssh/thinmint}"
+HAL0_TEST_SSH_KEY="${HAL0_TEST_SSH_KEY:-${HOME}/.ssh/id_ed25519}"
 HAL0_TEST_PREFIX="${HAL0_TEST_PREFIX:-ci-h-local-$$}"
 HAL0_TEST_REPORT="${HAL0_TEST_REPORT:-tests/release-gate-report.json}"
 

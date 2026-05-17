@@ -526,13 +526,13 @@ bugs but are artifacts of stale code on the test LXC:
   already plugs this at `src/hal0/api/__init__.py:351`. Same
   redeploy fix.
 
-**Resolution:** `ssh -i ~/.ssh/thinmint root@10.0.1.230 'cd /opt/hal0 && git pull && systemctl restart hal0-api'` — but the directory is **not a git repo** (`fatal: not a git repository`), so the recovery path is actually:
+**Resolution:** `ssh -i $HAL0_TEST_SSH_KEY root@$HAL0_TEST_HOST 'cd /opt/hal0 && git pull && systemctl restart hal0-api'` — but the directory is **not a git repo** (`fatal: not a git repository`), so the recovery path is actually:
 
 ```
-# from hal0-dev:
+# from your dev host, with HAL0_TEST_HOST + HAL0_TEST_SSH_KEY set:
 rsync -az --exclude='.git' --exclude='__pycache__' --exclude='.venv' \
-  /home/halo/dev/hal0/src/ root@10.0.1.230:/opt/hal0/src/
-ssh -i ~/.ssh/thinmint root@10.0.1.230 'systemctl restart hal0-api'
+  ./src/ root@$HAL0_TEST_HOST:/opt/hal0/src/
+ssh -i $HAL0_TEST_SSH_KEY root@$HAL0_TEST_HOST 'systemctl restart hal0-api'
 ```
 
 This is a deployment-process gap — the test LXC has no upgrade

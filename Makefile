@@ -4,10 +4,10 @@
 
 # ── hal0-test LXC connection knobs (release-gate) ───────────────────────────
 # Override on the command line, e.g.:
-#   make release-test HAL0_TEST_HOST=10.0.1.231 HAL0_TEST_SSH_KEY=~/.ssh/other
+#   make release-test HAL0_TEST_HOST=10.0.1.231 HAL0_TEST_SSH_KEY=~/.ssh/my-test-key
 HAL0_TEST_HOST    ?= 10.0.1.230
 HAL0_TEST_USER    ?= root
-HAL0_TEST_SSH_KEY ?= ~/.ssh/thinmint
+HAL0_TEST_SSH_KEY ?= ~/.ssh/id_ed25519
 # Unique-per-run slot prefix so concurrent agents don't collide on the
 # shared LXC. Falls back to "local-$$" when not run from CI.
 HAL0_TEST_PREFIX  ?= ci-h-$(if $(GITHUB_RUN_ID),$(GITHUB_RUN_ID),local-$$$$)

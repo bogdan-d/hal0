@@ -70,11 +70,12 @@ openwebui**. Each row produces a structured record; the full report
 lands in `tests/release-gate-report.json`.
 
 ```sh
-# Default — needs ~/.ssh/thinmint authorised on 10.0.1.230 root.
+# Set HAL0_TEST_SSH_KEY to whatever key authorises you on your test host
+# (defaults to ~/.ssh/id_ed25519; override via env or make var).
 make release-test
 
 # Override host / key:
-make release-test HAL0_TEST_HOST=10.0.1.231 HAL0_TEST_SSH_KEY=~/.ssh/other
+make release-test HAL0_TEST_HOST=10.0.1.231 HAL0_TEST_SSH_KEY=~/.ssh/my-test-key
 
 # Pretty-print the most recent report:
 make release-test-report
