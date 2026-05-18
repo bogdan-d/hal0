@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Annotated, cast
 from fastapi import Depends, Request
 
 if TYPE_CHECKING:
+    from hal0.capabilities.orchestrator import CapabilityOrchestrator
     from hal0.dispatcher.router import Dispatcher
     from hal0.hardware.probe import HardwareProbe
     from hal0.registry.store import ModelRegistry
@@ -56,7 +57,19 @@ def get_hardware(request: Request) -> HardwareProbe:
     return cast("HardwareProbe", obj)
 
 
+def get_capability_orchestrator(request: Request) -> CapabilityOrchestrator:
+    obj = _state(request, "capability_orchestrator")
+    if obj is None:
+        raise RuntimeError(
+            "capability orchestrator not initialized (lifespan did not run)"
+        )
+    return cast("CapabilityOrchestrator", obj)
+
+
 SlotManagerDep = Annotated["SlotManager", Depends(get_slot_manager)]
 RegistryDep = Annotated["ModelRegistry", Depends(get_registry)]
 DispatcherDep = Annotated["Dispatcher", Depends(get_dispatcher)]
 HardwareDep = Annotated["HardwareProbe", Depends(get_hardware)]
+CapabilityOrchestratorDep = Annotated[
+    "CapabilityOrchestrator", Depends(get_capability_orchestrator)
+]

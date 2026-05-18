@@ -27,6 +27,7 @@ import LoadingSkeleton from '../components/LoadingSkeleton.vue'
 import EmptyState from '../components/EmptyState.vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
 import SlotCard from '../components/SlotCard.vue'
+import CapabilitiesSection from '../components/capabilities/CapabilitiesSection.vue'
 
 // Mirror src/hal0/slots/__init__.py BUILTIN_SLOTS — these cannot be deleted.
 const BUILTIN_SLOTS = new Set(['primary', 'embed', 'stt', 'tts'])
@@ -600,6 +601,9 @@ const SLOT_TYPES = ['llama-server', 'flm', 'moonshine', 'kokoro']
           />
         </div>
       </template>
+
+      <!-- Capability slots — embed / voice / img cards + NPU backend rollup. -->
+      <CapabilitiesSection />
 
       <!-- Legacy row layout retained for the row-error rendering path
            (banners persist across the new grid by re-rendering the error

@@ -99,13 +99,18 @@ New / changed endpoints (all in `src/hal0/api/routes/models.py` or `slots.py`):
 
 ## Phases + ownership
 
-### Phase 1 — Backend foundation (parallel, 3 agents)
+### Phase 1 — Backend foundation (parallel, 2 agents)
 File ownership locked, no overlap:
 
-**A1: Events backbone**
-- Owns: `src/hal0/events/` (new), `src/hal0/api/routes/events.py` (new), event-related tests.
-- Tasks: events ring buffer (`deque(maxlen=500)`), subscriber pump, `GET /api/events` backfill, `GET /api/events/stream` SSE, emission helper `emit_event(type, severity, ...)` importable by other modules. Wire `system.*` emissions (restart, config_save) as smoke-test.
-- Hard gate: endpoints + helper land + smoke test passes. Do NOT add `model.*` emission (that's Phase 2). Do NOT touch frontend.
+**A1: Events backbone — SUPERSEDED**
+- Existing worktree `footer-backend-events` (commit `ac38899`) already implements this.
+- Public API to consume:
+  - `from hal0.events import EventBus, make_event`
+  - Bus instance lives on `app.state.events`
+  - Emit: `await app.state.events.emit(type=..., severity=..., source=..., message=..., data={...})`
+- Event payload shape: `{id, ts (ISO8601 UTC), type, severity ('info'|'warn'|'error'), source, message, data: dict}`
+- Routes: `GET /api/events?since&type&severity&limit` (max 1000 clamped) + `GET /api/events/stream?since` (SSE w/ backfill replay)
+- Phase 2 agents reference this API; do NOT build their own events module.
 
 **A2: Model schema + detection**
 - Owns: `src/hal0/registry/model.py`, `src/hal0/registry/detect.py` (new), `src/hal0/registry/gguf_header.py` (new), registry store migration in `src/hal0/registry/store.py` (only fields, no API), tests.
@@ -121,8 +126,8 @@ File ownership locked, no overlap:
 
 **B1: Models API**
 - Owns: `src/hal0/api/routes/models.py`, related tests.
-- Tasks: `POST /api/models/scan/preview` (new). Extend `POST /api/models/scan` to accept user-edited rows. Extend `PUT /api/models/{id}` for new editable fields. Cascade `DELETE` with ordered events. Emit `model.*` events using A1's helper.
-- Hard gate: endpoints + tests + event emission. No frontend.
+- Tasks: `POST /api/models/scan/preview` (new). Extend `POST /api/models/scan` to accept user-edited rows. Extend `PUT /api/models/{id}` for new editable fields. Cascade `DELETE` with ordered events. Emit `model.*` events via `await request.app.state.events.emit(...)` (EventBus from footer-backend-events).
+- Hard gate: endpoints + tests + event emission. No frontend. Depends on footer-backend-events being merged or rebased on top of it for the EventBus import.
 
 **B2: Slot edit modal expansion**
 - Owns: `ui/src/views/Slots.vue` (Edit modal section only), no SlotCard, no Models.vue.
@@ -158,3 +163,17 @@ File ownership locked, no overlap:
 - **Worktree base**: main worktree pinned to `main` before Phase 1 spawn so agent branches fork from `main`, not from a feature branch.
 - **Caveman tone** in all agent prompts + outputs.
 - **No scope creep**: each agent has a hard gate. Recommendations beyond the gate go in the report, not the code.
+
+## Footer work — DO NOT TOUCH (built in parallel sessions)
+
+Existing worktrees own the footer surface. All Phase 2 / 3 frontend agents are forbidden from editing these files:
+- `ui/src/components/footer/**` — `Footer.vue`, `FooterBar.vue`, `FooterPane.vue`, `ActivityTicker.vue`, `ProgressChip.vue`, `tabs/*`
+- `ui/src/composables/useEvents.js` — consume only via `import { useEvents } from '@/composables/useEvents'`
+- `ui/src/composables/useAutoscroll.js`
+- `ui/src/stores/footer.js`
+- `ui/src/views/Dashboard.vue` — footer cleanup is owned by footer PR
+- `ui/src/views/Logs.vue` — footer PR keeps as-is per scope
+
+Backend equivalents:
+- `src/hal0/events/` — owned by `footer-backend-events`
+- `src/hal0/api/routes/events.py` — owned by `footer-backend-events`

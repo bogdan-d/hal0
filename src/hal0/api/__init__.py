@@ -25,6 +25,12 @@ from hal0.api.routes import (
     events as events_routes,
 )
 from hal0.api.routes import (
+    backends as backends_routes,
+)
+from hal0.api.routes import (
+    capabilities as capabilities_routes,
+)
+from hal0.api.routes import (
     hardware,
     health,
     images,
@@ -37,6 +43,7 @@ from hal0.api.routes import (
     updater,
     v1,
 )
+from hal0.capabilities.orchestrator import CapabilityOrchestrator
 from hal0.config.loader import ConfigParseError, load_hal0_config, load_upstreams_config
 from hal0.dispatcher.router import Dispatcher
 from hal0.events import EventBus
@@ -293,6 +300,24 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.dispatcher = dispatcher
     app.state.slot_manager = slot_manager
     app.state.model_cache = model_cache
+
+    # Capability orchestrator — overlay that maps the dashboard's
+    # capability-grouped children (embed/voice/img) onto regular slots.
+    # The orchestrator is intentionally constructed AFTER the slot
+    # manager + registry are ready so initialize_if_missing() can lift
+    # current slot config into capabilities.toml on first boot.
+    capability_orchestrator = CapabilityOrchestrator(
+        slot_manager=slot_manager,
+        registry=model_registry,
+    )
+    try:
+        await capability_orchestrator.initialize_if_missing()
+    except Exception as exc:
+        # Never let an overlay seeding failure block API startup — the
+        # dashboard can still hit GET /api/capabilities and see empty
+        # selections, which is the correct "blank slate" UX.
+        log.warning("capabilities.init_failed", error=str(exc))
+    app.state.capability_orchestrator = capability_orchestrator
     # Tracks the most recent model id sent to each upstream so the
     # dashboard's synthetic slot reflects current usage instead of the
     # first-non-alias from the catalog. Populated by v1 routes after
@@ -391,6 +416,28 @@ def create_app() -> FastAPI:
         updater.router,
         prefix="/api/updates",
         tags=["updater"],
+        dependencies=_admin_auth,
+    )
+
+    # Capability slots overlay — operator-facing grouping of embed /
+    # voice / img children on top of the SlotManager. Admin-gated like
+    # the slots router itself; selections trigger underlying slot
+    # lifecycle operations.
+    app.include_router(
+        capabilities_routes.router,
+        prefix="/api/capabilities",
+        tags=["capabilities"],
+        dependencies=_admin_auth,
+    )
+
+    # Backend introspection — live status + currently-loaded children
+    # per backend (NPU / GPU-Vulkan / GPU-ROCm / CPU). Read-only and
+    # used by the dashboard footer; admin-gated for consistency with
+    # the rest of the capability surface.
+    app.include_router(
+        backends_routes.router,
+        prefix="/api/backends",
+        tags=["backends"],
         dependencies=_admin_auth,
     )
 
