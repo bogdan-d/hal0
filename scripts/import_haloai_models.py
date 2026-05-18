@@ -37,7 +37,9 @@ KEEP_UNKNOWN = {
     "devstral-small-2-24b",
     "qwen3_5-122b-a10b",
     "qwen3-zro-cdr-reason-v2-0.8b-neo-ex-q8",
-    "qwen3-zro-cdr-reason-v2-0.8b-neo3-ex-f16",
+    # qwen3-zro-cdr-reason-v2-0.8b-neo3-ex-f16 dropped at user's request
+    # (2026-05-17); leave the explicit gap so a future seed refresh doesn't
+    # silently re-add it.
     "qwen3_5-18b-reap-a3b",
     "qwen3-6-27b",
     "qwen3-6-27b-vision",

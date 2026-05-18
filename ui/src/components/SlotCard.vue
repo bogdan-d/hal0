@@ -8,6 +8,7 @@
  * component reads cleanly and respects the global theme.
  */
 import { computed, ref, watch } from 'vue'
+import { isSlotServing } from '../composables/useSlotStats.js'
 
 const props = defineProps({
   slot: { type: Object, required: true },
@@ -46,10 +47,13 @@ watch(() => props.slot.status, (next, prev) => {
 
 const m = computed(() => props.metrics || {})
 const isBuiltin = computed(() => BUILTIN_SLOTS.has(props.slot.name))
-const running = computed(() => {
-  const s = props.slot.status || props.slot.state
-  return s === 'running' || s === 'ready' || s === 'serving' || s === 'idle'
-})
+// A slot is "running" only when it can actually serve: active state +
+// either a loaded model or a self-managed provider (moonshine/kokoro/
+// vibevoice serve a baked-in model). A slot stuck in ready/serving
+// without a model is shown as not-running, matching the navbar count.
+const running = computed(() =>
+  isSlotServing({ ...props.slot, status: props.slot.status || props.slot.state }),
+)
 const busy = computed(() => !!props.actionLoading)
 
 const dotState = computed(() => {

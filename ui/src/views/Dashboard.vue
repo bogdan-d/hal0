@@ -17,7 +17,7 @@ import { computed, ref, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import { useSystemStore } from '../stores/system.js'
 import { useStats, useSlotMetrics } from '../composables/useStats.js'
-import { useSlotStats } from '../composables/useSlotStats.js'
+import { useSlotStats, isSlotServing } from '../composables/useSlotStats.js'
 import { api } from '../composables/useApi.js'
 import PageHeader from '../components/PageHeader.vue'
 import Card from '../components/Card.vue'
@@ -143,6 +143,7 @@ const stateClass = (status) =>
     starting: 'state-idle',
     pulling: 'state-idle',
     error: 'state-error',
+    'no model': 'state-warn',
     offline: 'state-offline',
     unloading: 'state-offline',
   })[status] ?? 'state-offline'
@@ -150,9 +151,22 @@ const stateClass = (status) =>
 // ── Slot-row helpers ─────────────────────────────────────────────────
 // Mirrored from SlotCard.vue (not imported — the dashboard row is the
 // compact denser cousin). Keep these in sync if SlotCard.vue's
-// equivalents change.
-const RUNNING_STATES = new Set(['running', 'ready', 'serving', 'idle'])
-const slotRunning = (slot) => RUNNING_STATES.has(slot?.status)
+// equivalents change. `slotRunning` uses the shared isSlotServing
+// predicate so a slot stuck in ready/serving without a model is
+// reported as not-running — matching the navbar/sidebar count.
+const slotRunning = (slot) => isSlotServing(slot)
+
+// State label shown in the row. When the state machine reports an
+// active state (ready/serving) but the slot has no model loaded and
+// isn't a self-managed provider, the surface state is a lie — render
+// "no model" so the row stops contradicting itself.
+function slotDisplayState(slot) {
+  const raw = slot?.status ?? 'offline'
+  if (['ready', 'serving', 'running'].includes(raw) && !isSlotServing(slot)) {
+    return 'no model'
+  }
+  return raw
+}
 
 // Hardware-target mapping: backend/provider → human chip. Same buckets
 // as SlotCard's hardwareTarget computed.
@@ -403,8 +417,8 @@ loadChatModels()
           <div class="slot-list">
             <Card v-for="slot in system.slots" :key="slot.name" class="slot-row" :padded="false">
               <div class="slot-row-main">
-                <span class="state-dot" :class="stateClass(slot.status)" aria-hidden="true" />
-                <span class="state-label" :class="stateClass(slot.status)">{{ slot.status ?? 'offline' }}</span>
+                <span class="state-dot" :class="stateClass(slotDisplayState(slot))" aria-hidden="true" />
+                <span class="state-label" :class="stateClass(slotDisplayState(slot))">{{ slotDisplayState(slot) }}</span>
                 <span class="slot-name">{{ slot.name }}</span>
                 <span
                   class="slot-model mono"
@@ -567,6 +581,7 @@ loadChatModels()
 .state-running { background: var(--hal0-accent); box-shadow: 0 0 8px var(--hal0-accent); }
 .state-idle    { background: var(--color-warning); }
 .state-error   { background: var(--color-danger); }
+.state-warn    { background: var(--color-warning); }
 .state-offline { background: var(--color-fg-faint); }
 .slot-name { font-family: var(--font-mono); font-size: 13px; font-weight: 600; color: var(--color-fg); flex-shrink: 0; }
 .slot-model { font-size: 11.5px; color: var(--color-fg-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 1; }
@@ -576,6 +591,7 @@ loadChatModels()
 .state-label.state-running { background: color-mix(in srgb, var(--hal0-accent) 14%, transparent); color: var(--hal0-accent); }
 .state-label.state-idle    { background: color-mix(in oklch, var(--color-warning) 15%, transparent); color: var(--color-warning); }
 .state-label.state-error   { background: color-mix(in oklch, var(--color-danger) 15%, transparent); color: var(--color-danger); }
+.state-label.state-warn    { background: color-mix(in oklch, var(--color-warning) 15%, transparent); color: var(--color-warning); }
 .state-label.state-offline { background: var(--color-surface-2); color: var(--color-fg-faint); }
 .slot-action-btn { padding: 4px 10px; border-radius: var(--radius); border: 1px solid var(--color-border); background: transparent; color: var(--color-fg-muted); font-size: 11.5px; cursor: pointer; flex-shrink: 0; margin-left: auto; }
 .slot-action-btn:hover { background: var(--color-surface-2); color: var(--color-fg); }

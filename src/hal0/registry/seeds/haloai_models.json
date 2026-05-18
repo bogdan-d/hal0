@@ -580,16 +580,6 @@
     "context_size": null
   },
   {
-    "id": "qwen3-zro-cdr-reason-v2-0.8b-neo3-ex-f16",
-    "owned_by": "haloai-unknown",
-    "upstream": "tiny",
-    "capability": "chat",
-    "backend": "llamacpp",
-    "size_bytes": null,
-    "params": null,
-    "context_size": null
-  },
-  {
     "id": "qwen3_5-18b-reap-a3b",
     "owned_by": "haloai-unknown",
     "upstream": "?",
