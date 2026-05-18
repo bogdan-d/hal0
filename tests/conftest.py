@@ -28,7 +28,12 @@ def client(app: FastAPI) -> Iterator[TestClient]:
 
 @pytest.fixture(scope="function")
 def tmp_hal0_home(tmp_path: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch) -> str:
-    """Set HAL0_HOME to a temporary directory for filesystem isolation."""
+    """Set HAL0_HOME to a temporary directory for filesystem isolation.
+
+    Also opts the systemd-override renderer into the HAL0_HOME branch so
+    unit-template tests write under tmp_path instead of /etc/systemd/system.
+    """
     home = str(tmp_path)
     monkeypatch.setenv("HAL0_HOME", home)
+    monkeypatch.setenv("HAL0_OVERRIDE_DIR", "hal0_home")
     return home

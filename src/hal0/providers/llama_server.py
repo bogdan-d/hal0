@@ -405,12 +405,20 @@ class LlamaServerProvider(Provider):
         # still work.
         group_add: list[str] = [str(gid) for gid in _resolve_gpu_group_ids()]
 
+        # Only request devices that actually exist on the host. Strix
+        # Halo exposes both /dev/kfd and /dev/dri; a CPU-only dev VM
+        # (or one with virtio-gpu and no AMD compute) has neither — and
+        # docker hard-fails on a missing --device. Filter at render time
+        # so the dev VM falls through to a CPU-only llama-server.
+        candidate_devices = ["/dev/kfd", "/dev/dri"]
+        devices = [d for d in candidate_devices if Path(d).exists()]
+
         return ContainerSpec(
             image=self.image_ref(slot_cfg),
             command=command,
             env=container_env,
             mounts=mounts,
-            devices=["/dev/kfd", "/dev/dri"],
+            devices=devices,
             cap_add=[],
             security_opt=["seccomp=unconfined", "apparmor=unconfined"],
             group_add=group_add,

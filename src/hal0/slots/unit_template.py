@@ -199,6 +199,12 @@ def _render_from_spec(
     for arg in spec.command:
         argv.append(_quote_for_systemd(arg))
 
+    # WorkingDirectory must match where the env file actually lives —
+    # the template hardcodes /var/lib/hal0/slots/%i but HAL0_HOME dev
+    # installs land the env (and per-slot state) elsewhere. Reset and
+    # re-emit the directive so systemd doesn't fail with "resources"
+    # before it ever invokes the ExecStart.
+    slot_workdir = env_file_path.parent
     exec_start = " \\\n  ".join(argv)
     lines = [
         f"# hal0 slot override — rendered by hal0.slots.unit_template ({provider_name})",
@@ -208,7 +214,13 @@ def _render_from_spec(
         f"Description=hal0 inference slot ({slot_name})",
         "",
         "[Service]",
+        # Reset the inherited EnvironmentFile before adding our own —
+        # drop-ins append to the list, so the template's hardcoded
+        # /var/lib/hal0/slots/%i/env stays and breaks dev installs.
+        "EnvironmentFile=",
         f"EnvironmentFile={env_file_path}",
+        "WorkingDirectory=",
+        f"WorkingDirectory={slot_workdir}",
         f"SyslogIdentifier=hal0-slot-{slot_name}",
         "ExecStart=",
         f"ExecStart={exec_start}",
@@ -223,25 +235,31 @@ def _render_from_spec(
 def override_path(slot_name: str) -> Path:
     """Return the on-disk path for the per-slot drop-in.
 
-    Production: /etc/systemd/system/hal0-slot@<slot_name>.service.d/override.conf
-    HAL0_HOME:  $HAL0_HOME/etc/systemd-system/hal0-slot@<slot>.service.d/override.conf
+    Default: /etc/systemd/system/hal0-slot@<slot_name>.service.d/override.conf
+             (systemd reads from here regardless of how hal0 is installed).
+    HAL0_HOME dry-run override: $HAL0_HOME/etc/systemd-system/... — only
+             active when ``HAL0_OVERRIDE_DIR=hal0_home`` is set, so the
+             installer's --dry-run and unit tests can exercise the
+             rendering pipeline without writing to a system directory.
 
-    The HAL0_HOME branch lets unit tests and the installer's dry-run mode
-    exercise the rendering pipeline without root.  hal0.config.paths owns
-    the HAL0_HOME resolution; we re-read it here so a test setting
-    ``monkeypatch.setenv("HAL0_HOME", ...)`` flows through.
+    Older releases unconditionally redirected the override path when
+    HAL0_HOME was set, which broke dev installs that wanted to actually
+    start a slot (systemd doesn't search the HAL0_HOME tree). The
+    explicit env var keeps the dry-run/test branch reachable without
+    silently disabling slot starts in dev mode.
     """
     import os
 
-    home = os.environ.get("HAL0_HOME", "").strip()
-    if home:
-        return (
-            Path(home)
-            / "etc"
-            / "systemd-system"
-            / f"hal0-slot@{slot_name}.service.d"
-            / "override.conf"
-        )
+    if os.environ.get("HAL0_OVERRIDE_DIR", "").strip() == "hal0_home":
+        home = os.environ.get("HAL0_HOME", "").strip()
+        if home:
+            return (
+                Path(home)
+                / "etc"
+                / "systemd-system"
+                / f"hal0-slot@{slot_name}.service.d"
+                / "override.conf"
+            )
     return Path(f"/etc/systemd/system/hal0-slot@{slot_name}.service.d/override.conf")
 
 

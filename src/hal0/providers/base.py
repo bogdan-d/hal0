@@ -270,6 +270,13 @@ class Provider(ABC):
 
         exec_start = " \\\n  ".join(argv)
 
+        # WorkingDirectory must match where the env file actually lives
+        # — the template hardcodes /var/lib/hal0/slots/%i, but a
+        # HAL0_HOME dev install lands the env elsewhere. Re-emit the
+        # directive so systemd doesn't fail with "resources" before it
+        # ever invokes the ExecStart.
+        slot_workdir = env_file_path.parent
+
         lines = [
             "# hal0 slot override — rendered by Provider.render_systemd_override",
             "# Do not edit manually; changes will be overwritten on the next slot config change.",
@@ -278,7 +285,14 @@ class Provider(ABC):
             f"Description=hal0 inference slot ({slot_name})",
             "",
             "[Service]",
+            # Reset the inherited EnvironmentFile before adding our own —
+            # systemd appends drop-in values to the list, so the template's
+            # /var/lib/hal0/slots/%i/env stays and breaks dev installs
+            # where the env actually lives under HAL0_HOME.
+            "EnvironmentFile=",
             f"EnvironmentFile={env_file_path}",
+            "WorkingDirectory=",
+            f"WorkingDirectory={slot_workdir}",
             f"SyslogIdentifier=hal0-slot-{slot_name}",
             # Clear inherited ExecStart / ExecStop, then set our own.
             "ExecStart=",
