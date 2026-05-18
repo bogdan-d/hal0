@@ -66,12 +66,24 @@ def _hf_repo_name_from_path(path: Path) -> str | None:
     return None
 
 
+Kind = Literal["llama", "moonshine", "kokoro", "flm", "unknown"]
+
+
 @dataclass
 class DetectionResult:
     """Outcome of a single-file detection pass.
 
     ``raw_hints`` carries provider-specific bits (the parsed GGUF KV pairs,
     or the matched filename tokens) so downstream UIs can show "why".
+
+    ``kind`` is the runtime family the file belongs to; the UI uses it to
+    gate which backends + capabilities are even offered. Mapping:
+
+      llama     → GGUF, backends ∈ {vulkan, rocm, cuda, cpu}, caps {chat, embed, rerank, vision}
+      moonshine → ASR provider, backend=moonshine, caps={asr}
+      kokoro    → TTS provider, backend=kokoro, caps={tts}
+      flm       → AMD NPU, backend=flm, caps={chat, embed}
+      unknown   → could not classify; user picks manually if anything
     """
 
     suggested_backends: list[str]
@@ -79,6 +91,7 @@ class DetectionResult:
     context_length: int | None = None
     confidence: Confidence = "low"
     suggested_name: str | None = None
+    kind: Kind = "unknown"
     raw_hints: dict[str, Any] = field(default_factory=dict)
 
 
@@ -103,23 +116,34 @@ def _heuristic_only(path: Path) -> DetectionResult:
     cap = _filename_capability(name)
 
     backends: list[str] = []
-    caps: list[str]
+    caps: list[str] = []
+    kind: Kind = "unknown"
     if "moonshine" in name:
         backends = ["moonshine"]
         caps = ["asr"]
+        kind = "moonshine"
     elif "kokoro" in name:
         backends = ["kokoro"]
         caps = ["tts"]
-    elif cap is not None:
-        caps = [cap]
-    else:
-        # No idea — default to chat-on-llama-server only if the extension
-        # looks like a llama-server-loadable file; otherwise leave empty.
-        if path.suffix.lower() in (".gguf",):
-            backends = list(_GGUF_BACKENDS)
-            caps = ["chat"]
-        else:
-            caps = []
+        kind = "kokoro"
+    elif cap == "asr":
+        # whisper or similar — likely moonshine-loadable
+        backends = ["moonshine"]
+        caps = ["asr"]
+        kind = "moonshine"
+    elif cap == "tts":
+        backends = ["kokoro"]
+        caps = ["tts"]
+        kind = "kokoro"
+    elif cap == "embed":
+        # embed-ish filename but extension says it's not GGUF — leave
+        # backends empty; user picks. Treat as unknown until format is clear.
+        caps = ["embed"]
+    elif path.suffix.lower() == ".gguf":
+        backends = list(_GGUF_BACKENDS)
+        caps = ["chat"]
+        kind = "llama"
+    # else: leave kind=unknown, empty backends/caps
 
     return DetectionResult(
         suggested_backends=backends,
@@ -127,6 +151,7 @@ def _heuristic_only(path: Path) -> DetectionResult:
         context_length=None,
         confidence="low",
         suggested_name=_hf_repo_name_from_path(path),
+        kind=kind,
         raw_hints={"source": "filename", "stem": path.stem, "suffix": path.suffix.lower()},
     )
 
@@ -182,6 +207,7 @@ def detect(path: str | Path) -> DetectionResult:
             context_length=ctx_len_int,
             confidence="high",
             suggested_name=suggested_name,
+            kind="llama",
             raw_hints={
                 "source": "gguf_header",
                 "architecture": arch,

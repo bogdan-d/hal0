@@ -99,8 +99,10 @@ class TestFilenameHeuristic:
         p.write_bytes(b"")
         r = detect(p)
         assert r.suggested_capabilities == ["asr"]
-        # No 'moonshine' in name → empty backends (caller will reject).
-        assert r.suggested_backends == []
+        # An ASR filename routes to the moonshine provider — that's the
+        # only ASR-capable backend hal0 ships.
+        assert r.suggested_backends == ["moonshine"]
+        assert r.kind == "moonshine"
 
     def test_bge_filename_embed(self, tmp_path: Path) -> None:
         p = tmp_path / "bge-large-en.safetensors"

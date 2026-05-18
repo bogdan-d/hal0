@@ -305,7 +305,15 @@ def scan_and_register(registry: ModelRegistry, cfg: ModelsConfig) -> dict:
     }
 
 
+def is_skippable(p: Path) -> bool:
+    """Public wrapper around the internal skip rules (shards, mmproj, hex blobs,
+    HF/ComfyUI accessory dirs). Used by ``scan/preview`` so the preview list
+    obeys the same filters as auto-discovery."""
+    return _is_skippable(p)
+
+
 __all__ = [
+    "is_skippable",
     "CandidateModel",
     "find_candidates",
     "register_candidate",

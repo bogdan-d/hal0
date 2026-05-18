@@ -24,6 +24,7 @@ from hal0.api.middleware.error_codes import BadRequest, Hal0Error
 from hal0.config.loader import load_hal0_config
 from hal0.registry.curated import CURATED, CuratedModel, HaloaiModel, get_curated
 from hal0.registry.detect import DetectionResult, detect
+from hal0.registry.discover import is_skippable
 from hal0.registry.discover import scan_and_register
 from hal0.registry.pull import (
     PullInvalidSource,
@@ -193,9 +194,11 @@ async def scan_preview(request: Request) -> dict[str, Any]:
             it = root.rglob("*") if recursive else root.iterdir()
             try:
                 for p in it:
-                    # Skip HF cache placeholder files (`.no_exist/<rev>/<file>`)
-                    # — these are empty markers, not real models.
-                    if ".no_exist" in p.parts:
+                    # Reuse the discovery skip rules so the preview list
+                    # obeys the same filters as the on-disk auto-scan:
+                    # mmproj sidecars, multi-file shards, hex blobs,
+                    # HF/ComfyUI accessory dirs, etc.
+                    if is_skippable(p):
                         continue
                     try:
                         if not p.is_file():
@@ -212,26 +215,54 @@ async def scan_preview(request: Request) -> dict[str, Any]:
                 resolved = p.resolve()
             except OSError:
                 resolved = p
+            # NOTE: do NOT run is_skippable(resolved). HF cache always
+            # resolves symlinks through `blobs/<hex>`, and the hex-stem +
+            # blobs-dir checks would reject every snapshot symlink. We
+            # trust the symlink's filename for naming; resolved is only
+            # used for the in-this-scan dedup below.
             if resolved in seen:
                 continue
             seen.add(resolved)
-            # Detect against the symlink path so HF-cache scans surface
-            # the meaningful filename / HF repo via _hf_repo_name_from_path.
-            # GGUF magic-byte sniffing handles the blob-with-no-suffix case
-            # transparently (mmap follows symlinks).
             result: DetectionResult = detect(p)
+            try:
+                size_bytes = resolved.stat().st_size
+            except OSError:
+                size_bytes = 0
             preview.append(
                 {
                     "path": str(p),
                     "resolved_path": str(resolved),
+                    "size_bytes": size_bytes,
                     "suggested_backends": list(result.suggested_backends),
                     "suggested_capabilities": list(result.suggested_capabilities),
                     "context_length": result.context_length,
                     "confidence": result.confidence,
                     "suggested_name": result.suggested_name,
+                    "kind": result.kind,
                     "raw_hints": dict(result.raw_hints),
                 }
             )
+
+    # Dedup snapshots-of-the-same-model. HF cache keeps multiple
+    # `snapshots/<rev>/` directories; the resolved-path dedup catches
+    # files that share a blob but misses files that share suggested_name +
+    # size + kind across reblobbed snapshots. Keep the first occurrence
+    # (matches the rglob walk order — usually the most recent rev first
+    # in inode order, but we surface every distinct content via
+    # resolved-path dedup above, so this is purely repo-level grouping).
+    unique: list[dict[str, Any]] = []
+    by_sig: set[tuple[str | None, int, str]] = set()
+    for row in preview:
+        sig = (
+            (row["suggested_name"] or "").strip().lower() or row["path"],
+            int(row.get("size_bytes") or 0),
+            row.get("kind", "unknown"),
+        )
+        if sig in by_sig:
+            continue
+        by_sig.add(sig)
+        unique.append(row)
+    preview = unique
 
     return {"preview": preview, "count": len(preview)}
 

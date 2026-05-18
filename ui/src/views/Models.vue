@@ -46,6 +46,39 @@ const pulling    = ref(false)
 const ALL_CAPS     = ['chat', 'embed', 'rerank', 'vision', 'asr', 'tts']
 const ALL_BACKENDS = ['vulkan', 'rocm', 'cuda', 'cpu', 'moonshine', 'kokoro', 'flm']
 
+// Per-kind compatibility — drives the chips the user sees when editing
+// a model. kokoro/moonshine aren't llama-server backends; chat isn't a
+// kokoro capability. Showing every combo invited misclicks.
+const KIND_BACKENDS = {
+  llama:     ['vulkan', 'rocm', 'cuda', 'cpu'],
+  flm:       ['flm'],
+  moonshine: ['moonshine'],
+  kokoro:    ['kokoro'],
+  unknown:   ALL_BACKENDS,
+}
+const KIND_CAPS = {
+  llama:     ['chat', 'embed', 'rerank', 'vision'],
+  flm:       ['chat', 'embed'],
+  moonshine: ['asr'],
+  kokoro:    ['tts'],
+  unknown:   ALL_CAPS,
+}
+const KIND_LABEL = {
+  llama:     'LLaMA',
+  flm:       'FLM',
+  moonshine: 'Moonshine (ASR)',
+  kokoro:    'Kokoro (TTS)',
+  unknown:   'Unknown',
+}
+const KIND_ORDER = ['llama', 'flm', 'moonshine', 'kokoro', 'unknown']
+
+function backendsForKind(kind) {
+  return KIND_BACKENDS[kind] ?? ALL_BACKENDS
+}
+function capsForKind(kind) {
+  return KIND_CAPS[kind] ?? ALL_CAPS
+}
+
 // ── Local-file tab state ──────────────────────────────────────────────
 // Two sub-modes inside the Local-file tab:
 //   - 'single': register one file via /scan/preview then POST /api/models
@@ -260,6 +293,11 @@ function slugFromPath(p) {
   return stem.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')
 }
 
+function slugFromName(name) {
+  if (!name) return ''
+  return String(name).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')
+}
+
 function toggleArrayMember(arr, v) {
   const i = arr.indexOf(v)
   if (i >= 0) arr.splice(i, 1)
@@ -295,9 +333,13 @@ async function detectSingleFile() {
       return
     }
     singleDetected.value = row
+    const kind = row.kind ?? 'unknown'
+    const allowedBackends = new Set(backendsForKind(kind))
+    const allowedCaps = new Set(capsForKind(kind))
     singleEditable.value = {
-      backends: [...(row.suggested_backends ?? [])],
-      capabilities: [...(row.suggested_capabilities ?? [])],
+      kind,
+      backends: (row.suggested_backends ?? []).filter((b) => allowedBackends.has(b)),
+      capabilities: (row.suggested_capabilities ?? []).filter((c) => allowedCaps.has(c)),
     }
     if (!localName.value) localName.value = (row.suggested_name?.trim() || slugFromPath(row.path))
   } catch (e) {
@@ -356,20 +398,24 @@ async function previewScan() {
     const rows = (data?.preview ?? []).map((r) => {
       const detected = (r.suggested_name || '').trim()
       const slug = slugFromPath(r.path)
-      const idSlug = detected
-        ? detected.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')
-        : slug
+      const kind = r.kind ?? 'unknown'
+      // Constrain detected backends/caps to the kind's allowed sets so
+      // upstream noise (e.g., GGUF with stray asr filename token) doesn't
+      // leak into the commit body.
+      const allowedBackends = new Set(backendsForKind(kind))
+      const allowedCaps = new Set(capsForKind(kind))
       return {
         path: r.path,
-        id: idSlug || slug,
+        size_bytes: r.size_bytes ?? 0,
         name: detected || slug,
-        backends: [...(r.suggested_backends ?? [])],
-        capabilities: [...(r.suggested_capabilities ?? [])],
+        kind,
+        backends: (r.suggested_backends ?? []).filter((b) => allowedBackends.has(b)),
+        capabilities: (r.suggested_capabilities ?? []).filter((c) => allowedCaps.has(c)),
         context_length: r.context_length,
         confidence: r.confidence,
-        // pre-select rows the detector is confident about; the user
-        // ticks/unticks per-row before committing.
-        selected: r.confidence === 'high',
+        // Pre-select GGUF llama models the parser was confident about.
+        // Unknown / heuristic-only rows are opt-in.
+        selected: r.confidence === 'high' && kind === 'llama',
       }
     })
     scanRows.value = rows
@@ -392,7 +438,7 @@ async function commitScan() {
     const body = {
       rows: picked.map((r) => ({
         path: r.path,
-        id: r.id,
+        id: slugFromName(r.name) || slugFromPath(r.path),
         name: r.name,
         backends: r.backends,
         capabilities: r.capabilities,
@@ -421,13 +467,26 @@ function toggleScanAll() {
 }
 
 // ── Edit metadata ──────────────────────────────────────────────────────
+function inferKindFromModel(model) {
+  const bks = new Set(model.backends ?? [])
+  if (bks.has('kokoro')) return 'kokoro'
+  if (bks.has('moonshine')) return 'moonshine'
+  if (bks.has('flm')) return 'flm'
+  if (bks.has('vulkan') || bks.has('rocm') || bks.has('cuda') || bks.has('cpu')) return 'llama'
+  return 'unknown'
+}
+
 function openEdit(model) {
   editingModel.value = model
   const d = model.defaults ?? {}
+  const kind = inferKindFromModel(model)
+  const allowedBackends = new Set(backendsForKind(kind))
+  const allowedCaps = new Set(capsForKind(kind))
   editForm.value = {
     name: model.name ?? model.id ?? '',
-    capabilities: [...(model.capabilities ?? [])],
-    backends: [...(model.backends ?? [])],
+    kind,
+    capabilities: (model.capabilities ?? []).filter((c) => allowedCaps.has(c)),
+    backends: (model.backends ?? []).filter((b) => allowedBackends.has(b)),
     defaults: {
       context_size:    d.context_size ?? null,
       n_gpu_layers:    d.n_gpu_layers ?? null,
@@ -444,6 +503,15 @@ function openEdit(model) {
   }))
   editAdvOpen.value = false
   editDetected.value = null
+}
+
+function onEditKindChange() {
+  // Changing kind resets backends + capabilities to that kind's defaults
+  // so we never end up with kokoro+chat or vulkan+tts combos that the
+  // backend would reject (or worse, silently accept).
+  const k = editForm.value.kind
+  editForm.value.backends = [...backendsForKind(k)]
+  editForm.value.capabilities = capsForKind(k).slice(0, 1) // first cap as a sane default
 }
 
 function resetDefaultField(key) {
@@ -948,13 +1016,14 @@ const QUANTS = ['Q4_K_M', 'Q5_K_M', 'Q8_0', 'F16', 'BF16']
                   <div v-if="singleDetected" class="detect-block">
                     <div class="detect-head">
                       <span class="detect-label">Detected</span>
+                      <span class="kind-badge" :class="`kind-${singleEditable.kind}`">{{ KIND_LABEL[singleEditable.kind] }}</span>
                       <span class="mono-chip">conf {{ singleDetected.confidence ?? '—' }}</span>
                       <span v-if="singleDetected.context_length" class="mono-chip">ctx {{ singleDetected.context_length }}</span>
                     </div>
                     <div class="field">
                       <label class="field-label">Capabilities</label>
                       <div class="check-row">
-                        <label v-for="c in ALL_CAPS" :key="`scap-${c}`" class="check-pill">
+                        <label v-for="c in capsForKind(singleEditable.kind)" :key="`scap-${c}`" class="check-pill">
                           <input
                             type="checkbox"
                             :checked="singleEditable.capabilities.includes(c)"
@@ -967,7 +1036,7 @@ const QUANTS = ['Q4_K_M', 'Q5_K_M', 'Q8_0', 'F16', 'BF16']
                     <div class="field">
                       <label class="field-label">Backends</label>
                       <div class="check-row">
-                        <label v-for="b in ALL_BACKENDS" :key="`sbk-${b}`" class="check-pill">
+                        <label v-for="b in backendsForKind(singleEditable.kind)" :key="`sbk-${b}`" class="check-pill">
                           <input
                             type="checkbox"
                             :checked="singleEditable.backends.includes(b)"
@@ -1012,10 +1081,10 @@ const QUANTS = ['Q4_K_M', 'Q5_K_M', 'Q8_0', 'F16', 'BF16']
                                 :aria-label="scanAllSelected ? 'Deselect all' : 'Select all'"
                               />
                             </th>
-                            <th class="col-name">Name / ID</th>
+                            <th class="col-name">Name</th>
+                            <th class="col-kind">Kind</th>
+                            <th class="col-tags">Capabilities · Backends</th>
                             <th class="col-path">Path</th>
-                            <th class="col-backends">Backends</th>
-                            <th class="col-caps">Caps</th>
                             <th class="col-ctx">Ctx</th>
                             <th class="col-conf">Conf</th>
                           </tr>
@@ -1026,43 +1095,30 @@ const QUANTS = ['Q4_K_M', 'Q5_K_M', 'Q8_0', 'F16', 'BF16']
                               <input
                                 type="checkbox"
                                 v-model="scanRows[idx].selected"
-                                :aria-label="`Include ${row.name || row.id}`"
+                                :aria-label="`Include ${row.name}`"
                               />
                             </td>
                             <td class="col-name">
                               <input v-model="scanRows[idx].name" class="scan-input scan-name" placeholder="Name" />
-                              <input v-model="scanRows[idx].id" class="scan-input mono" />
+                              <div class="scan-id-hint mono">id: {{ slugFromName(row.name) || slugFromPath(row.path) }}</div>
+                            </td>
+                            <td class="col-kind">
+                              <span class="kind-badge" :class="`kind-${row.kind}`">{{ KIND_LABEL[row.kind] }}</span>
+                            </td>
+                            <td class="col-tags">
+                              <div class="tag-row">
+                                <span v-for="c in row.capabilities" :key="`r${idx}c${c}`" class="tag tag-cap">{{ c }}</span>
+                                <span v-for="b in row.backends" :key="`r${idx}b${b}`" class="tag tag-bk">{{ b }}</span>
+                                <span v-if="row.capabilities.length === 0 && row.backends.length === 0" class="tag tag-empty">—</span>
+                              </div>
                             </td>
                             <td class="mono-cell scan-path col-path" :title="row.path">{{ row.path }}</td>
-                            <td>
-                              <div class="scan-checks">
-                                <label v-for="b in ALL_BACKENDS" :key="`r${idx}b${b}`" class="check-pill check-pill-sm">
-                                  <input
-                                    type="checkbox"
-                                    :checked="row.backends.includes(b)"
-                                    @change="toggleArrayMember(scanRows[idx].backends, b)"
-                                  />
-                                  <span>{{ b }}</span>
-                                </label>
-                              </div>
-                            </td>
-                            <td>
-                              <div class="scan-checks">
-                                <label v-for="c in ALL_CAPS" :key="`r${idx}c${c}`" class="check-pill check-pill-sm">
-                                  <input
-                                    type="checkbox"
-                                    :checked="row.capabilities.includes(c)"
-                                    @change="toggleArrayMember(scanRows[idx].capabilities, c)"
-                                  />
-                                  <span>{{ c }}</span>
-                                </label>
-                              </div>
-                            </td>
                             <td class="mono-cell">{{ row.context_length ?? '—' }}</td>
                             <td class="mono-cell">{{ row.confidence ?? '—' }}</td>
                           </tr>
                         </tbody>
                       </table>
+                      <p class="field-hint scan-foot">Capabilities + backends are pre-detected and locked here — open each model's Edit panel after registering to fine-tune.</p>
                     </div>
                   </div>
                 </div>
@@ -1149,9 +1205,17 @@ const QUANTS = ['Q4_K_M', 'Q5_K_M', 'Q8_0', 'F16', 'BF16']
               <p class="field-hint mono-text">ID: {{ editingModel.id }}</p>
 
               <div class="field">
+                <label class="field-label" for="edit-model-kind">Kind</label>
+                <select id="edit-model-kind" v-model="editForm.kind" class="field-input" @change="onEditKindChange">
+                  <option v-for="k in KIND_ORDER" :key="k" :value="k">{{ KIND_LABEL[k] }}</option>
+                </select>
+                <p class="field-hint">Picks the runtime family. Capabilities + backends below are filtered to what this kind supports.</p>
+              </div>
+
+              <div class="field">
                 <label class="field-label">Capabilities</label>
                 <div class="check-row">
-                  <label v-for="c in ALL_CAPS" :key="`ecap-${c}`" class="check-pill">
+                  <label v-for="c in capsForKind(editForm.kind)" :key="`ecap-${c}`" class="check-pill">
                     <input
                       type="checkbox"
                       :checked="editForm.capabilities.includes(c)"
@@ -1165,7 +1229,7 @@ const QUANTS = ['Q4_K_M', 'Q5_K_M', 'Q8_0', 'F16', 'BF16']
               <div class="field">
                 <label class="field-label">Backends</label>
                 <div class="check-row">
-                  <label v-for="b in ALL_BACKENDS" :key="`ebk-${b}`" class="check-pill">
+                  <label v-for="b in backendsForKind(editForm.kind)" :key="`ebk-${b}`" class="check-pill">
                     <input
                       type="checkbox"
                       :checked="editForm.backends.includes(b)"
@@ -1669,15 +1733,50 @@ const QUANTS = ['Q4_K_M', 'Q5_K_M', 'Q8_0', 'F16', 'BF16']
 .scan-preview { display: flex; flex-direction: column; gap: 6px; }
 .scan-table-wrap { overflow-x: auto; border: 1px solid var(--color-border); border-radius: var(--radius); }
 .scan-table { width: 100%; border-collapse: collapse; font-size: 11.5px; table-layout: fixed; }
-.scan-table .col-pick     { width: 32px; text-align: center; }
-.scan-table .col-name     { width: 240px; min-width: 240px; }
-.scan-table .col-path     { width: auto; }
-.scan-table .col-backends { width: 180px; }
-.scan-table .col-caps     { width: 150px; }
-.scan-table .col-ctx      { width: 64px; }
-.scan-table .col-conf     { width: 64px; }
+.scan-table .col-pick { width: 32px; text-align: center; }
+.scan-table .col-name { width: 240px; min-width: 240px; }
+.scan-table .col-kind { width: 140px; }
+.scan-table .col-tags { width: 220px; }
+.scan-table .col-path { width: auto; }
+.scan-table .col-ctx  { width: 64px; }
+.scan-table .col-conf { width: 64px; }
 .scan-table tr.row-unpicked td { opacity: 0.55; }
 .scan-table tr.row-unpicked td.col-pick { opacity: 1; }
+.scan-id-hint { font-size: 10.5px; color: var(--color-fg-faint); margin-top: 2px; line-height: 1.2; }
+.scan-foot { margin-top: 8px; }
+
+.kind-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.2px;
+  border: 1px solid var(--color-border);
+  background: var(--color-surface-2);
+  color: var(--color-fg-muted);
+  white-space: nowrap;
+}
+.kind-llama     { border-color: color-mix(in oklch, var(--hal0-accent) 60%, var(--color-border)); color: var(--hal0-accent); }
+.kind-flm       { border-color: color-mix(in oklch, var(--color-warning) 60%, var(--color-border)); color: var(--color-warning); }
+.kind-moonshine { border-color: color-mix(in oklch, var(--color-info, var(--hal0-accent)) 60%, var(--color-border)); color: var(--color-info, var(--hal0-accent)); }
+.kind-kokoro    { border-color: color-mix(in oklch, var(--color-success) 60%, var(--color-border)); color: var(--color-success); }
+.kind-unknown   { border-color: var(--color-border); color: var(--color-fg-faint); }
+
+.tag-row { display: flex; flex-wrap: wrap; gap: 3px; }
+.tag {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 3px;
+  border: 1px solid var(--color-border);
+  background: var(--color-surface);
+  color: var(--color-fg-muted);
+  white-space: nowrap;
+}
+.tag-cap   { border-style: solid; }
+.tag-bk    { border-style: dashed; }
+.tag-empty { color: var(--color-fg-faint); }
 .scan-table th {
   text-align: left; padding: 6px 8px;
   background: var(--hal0-bg-sunken);
