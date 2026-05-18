@@ -143,6 +143,53 @@ const stateClass = (status) =>
     unloading: 'state-offline',
   })[status] ?? 'state-offline'
 
+// ── Slot-row helpers ─────────────────────────────────────────────────
+// Mirrored from SlotCard.vue (not imported — the dashboard row is the
+// compact denser cousin). Keep these in sync if SlotCard.vue's
+// equivalents change.
+const RUNNING_STATES = new Set(['running', 'ready', 'serving', 'idle'])
+const slotRunning = (slot) => RUNNING_STATES.has(slot?.status)
+
+// Hardware-target mapping: backend/provider → human chip. Same buckets
+// as SlotCard's hardwareTarget computed.
+function hardwareTarget(slot) {
+  const backend = (slot?.backend || '').toLowerCase()
+  const provider = (slot?.provider || '').toLowerCase()
+  if (backend === 'flm' || provider === 'flm') return { id: 'npu', label: 'NPU' }
+  if (backend === 'cuda' || backend === 'rocm') return { id: 'gpu', label: 'GPU' }
+  if (backend === 'vulkan' || backend === 'metal') return { id: 'igpu', label: 'iGPU' }
+  if (backend === 'cpu') return { id: 'cpu', label: 'CPU' }
+  if (provider === 'kokoro' || provider === 'moonshine') return { id: 'igpu', label: 'iGPU' }
+  return { id: 'unknown', label: backend || provider || 'slot' }
+}
+
+// Model label with the same fallback chain SlotCard uses, truncated
+// shorter to fit the dense single-line row.
+function modelLabel(slot) {
+  const raw = slot?.model_name || slot?.model || slot?.model_id || ''
+  const s = typeof raw === 'string' ? raw : (raw?.default ?? '')
+  if (!s) return 'no model'
+  return s.length > 28 ? s.slice(0, 26) + '…' : s
+}
+
+// Per-slot metric formatters. Backend doesn't yet expose ttft directly;
+// show em-dash so the chip layout stays stable when the field lands.
+function slotTps(name) {
+  const v = metrics.value[name]?.tokens_per_sec ?? metrics.value[name]?.tps
+  return v ? `${v.toFixed(1)} tok/s` : '— tok/s'
+}
+function slotTtft(name) {
+  const m = metrics.value[name] || {}
+  const v = m.ttft_ms ?? m.first_token_ms ?? m.time_to_first_token_ms
+  return v ? `${Math.round(v)}ms` : '— ms'
+}
+function slotMem(name) {
+  const m = metrics.value[name] || {}
+  const mb = m.mem_rss_mb ?? m.rss_mb ?? m.gtt_mb ?? m.vram_mb
+  if (!mb || mb <= 0) return '— GB'
+  return mb >= 1024 ? `${(mb / 1024).toFixed(1)}GB` : `${mb.toFixed(0)}MB`
+}
+
 // ── Chat panel ───────────────────────────────────────────────────────
 const chatModels = ref([])
 const chatModel = ref('')
@@ -351,17 +398,21 @@ loadChatModels()
         <template v-else>
           <div class="slot-list">
             <Card v-for="slot in system.slots" :key="slot.name" class="slot-row" :padded="false">
-              <div class="slot-info">
+              <div class="slot-row-main">
                 <span class="state-dot" :class="stateClass(slot.status)" aria-hidden="true" />
-                <div class="slot-name-wrap">
-                  <span class="slot-name">{{ slot.name }}</span>
-                  <span v-if="slot.model" class="slot-model">{{ slot.model }}</span>
-                </div>
-              </div>
-              <div class="slot-meta">
-                <span class="mono-chip" v-if="slot.port">:{{ slot.port }}</span>
                 <span class="state-label" :class="stateClass(slot.status)">{{ slot.status ?? 'offline' }}</span>
+                <span class="slot-name">{{ slot.name }}</span>
+                <span class="slot-model mono" :title="slot.model_name || slot.model || slot.model_id || ''">{{ modelLabel(slot) }}</span>
+                <span class="hw-chip" :class="`hw-${hardwareTarget(slot).id}`">{{ hardwareTarget(slot).label }}</span>
+                <span v-if="slot.port" class="mono-chip">:{{ slot.port }}</span>
                 <button class="slot-action-btn" type="button" @click="router.push('/slots')">Manage →</button>
+              </div>
+              <div class="slot-row-stats" :class="{ dim: !slotRunning(slot) }">
+                <span class="stat-chip" :title="`Tokens per second from /api/slots/metrics`">{{ slotTps(slot.name) }}</span>
+                <span class="stat-chip-sep">·</span>
+                <span class="stat-chip" :title="`Time to first token (not yet emitted by backend — placeholder)`">{{ slotTtft(slot.name) }}</span>
+                <span class="stat-chip-sep">·</span>
+                <span class="stat-chip" :title="`Resident memory (RSS or GTT)`">{{ slotMem(slot.name) }}</span>
               </div>
             </Card>
           </div>
@@ -498,26 +549,43 @@ loadChatModels()
 .section-link { margin-left: auto; font-size: 11px; }
 
 /* ── Slot summary list ──────────────────────────────────────────── */
+/* Dense two-line row: top has identity + chips + Manage; bottom has
+   the per-slot metric strip (tok/s · ttft · mem). Mirrors SlotCard's
+   identity surface without committing to the full card grid. */
 .slot-list { display: flex; flex-direction: column; gap: 6px; }
-.slot-row { display: flex; align-items: center; justify-content: space-between; padding: 12px 16px; gap: 12px; }
-.slot-info { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.slot-row { display: flex; flex-direction: column; padding: 10px 14px 8px; gap: 4px; }
+.slot-row-main { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .state-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
 .state-running { background: var(--hal0-accent); box-shadow: 0 0 8px var(--hal0-accent); }
 .state-idle    { background: var(--color-warning); }
 .state-error   { background: var(--color-danger); }
 .state-offline { background: var(--color-fg-faint); }
-.slot-name-wrap { display: flex; flex-direction: column; min-width: 0; }
-.slot-name { font-family: var(--font-mono); font-size: 13px; font-weight: 600; color: var(--color-fg); }
-.slot-model { font-size: 11px; color: var(--color-fg-faint); font-family: var(--font-mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.slot-meta { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
-.mono-chip { font-family: var(--font-mono); font-size: 11px; padding: 2px 7px; border-radius: 4px; background: var(--color-surface-2); border: 1px solid var(--color-border); color: var(--color-fg-faint); font-feature-settings: 'zero' 1, 'ss02' 1, 'tnum' 1; }
-.state-label { font-family: var(--font-mono); font-size: 10.5px; padding: 2px 8px; border-radius: 4px; text-transform: uppercase; letter-spacing: 0.06em; }
+.slot-name { font-family: var(--font-mono); font-size: 13px; font-weight: 600; color: var(--color-fg); flex-shrink: 0; }
+.slot-model { font-size: 11.5px; color: var(--color-fg-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 1; }
+.mono-chip { font-family: var(--font-mono); font-size: 11px; padding: 2px 7px; border-radius: 4px; background: var(--color-surface-2); border: 1px solid var(--color-border); color: var(--color-fg-faint); font-feature-settings: 'zero' 1, 'ss02' 1, 'tnum' 1; flex-shrink: 0; }
+.state-label { font-family: var(--font-mono); font-size: 10.5px; padding: 2px 8px; border-radius: 4px; text-transform: uppercase; letter-spacing: 0.06em; flex-shrink: 0; }
 .state-label.state-running { background: color-mix(in srgb, var(--hal0-accent) 14%, transparent); color: var(--hal0-accent); }
 .state-label.state-idle    { background: color-mix(in oklch, var(--color-warning) 15%, transparent); color: var(--color-warning); }
 .state-label.state-error   { background: color-mix(in oklch, var(--color-danger) 15%, transparent); color: var(--color-danger); }
 .state-label.state-offline { background: var(--color-surface-2); color: var(--color-fg-faint); }
-.slot-action-btn { padding: 4px 10px; border-radius: var(--radius); border: 1px solid var(--color-border); background: transparent; color: var(--color-fg-muted); font-size: 11.5px; cursor: pointer; }
+.slot-action-btn { padding: 4px 10px; border-radius: var(--radius); border: 1px solid var(--color-border); background: transparent; color: var(--color-fg-muted); font-size: 11.5px; cursor: pointer; flex-shrink: 0; margin-left: auto; }
 .slot-action-btn:hover { background: var(--color-surface-2); color: var(--color-fg); }
+
+/* Hardware chip — same colour buckets SlotCard uses, slimmer for the
+   inline row. NPU amber, GPU red, iGPU green, CPU muted. */
+.hw-chip { font-family: var(--font-mono); font-size: 10px; padding: 2px 6px; border-radius: 4px; letter-spacing: 0.04em; border: 1px solid var(--color-border); background: var(--color-surface-2); color: var(--color-fg-muted); flex-shrink: 0; }
+.hw-chip.hw-npu  { color: var(--color-warning); border-color: color-mix(in oklch, var(--color-warning), transparent 60%); background: color-mix(in oklch, var(--color-warning), transparent 88%); }
+.hw-chip.hw-gpu  { color: var(--color-danger);  border-color: color-mix(in oklch, var(--color-danger),  transparent 60%); background: color-mix(in oklch, var(--color-danger),  transparent 88%); }
+.hw-chip.hw-igpu { color: var(--color-success); border-color: color-mix(in oklch, var(--color-success), transparent 60%); background: color-mix(in oklch, var(--color-success), transparent 88%); }
+.hw-chip.hw-cpu  { color: var(--color-fg-muted); border-color: var(--color-border-hi); }
+.hw-chip.hw-unknown { opacity: 0.6; text-transform: lowercase; }
+
+/* Metric strip — aligned under the model name so the eye scans
+   identity → live numbers without crossing to a separate region. */
+.slot-row-stats { display: flex; align-items: center; gap: 8px; padding-left: 18px; font-family: var(--font-mono); font-size: 11.5px; color: var(--color-fg-muted); font-feature-settings: 'zero' 1, 'ss02' 1, 'tnum' 1; }
+.slot-row-stats.dim { color: var(--color-fg-faint); opacity: 0.7; }
+.stat-chip { white-space: nowrap; }
+.stat-chip-sep { color: var(--color-fg-faint); opacity: 0.6; }
 
 /* ── Chat panel ─────────────────────────────────────────────────── */
 .chat-card { padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; }
