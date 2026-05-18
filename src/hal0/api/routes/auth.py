@@ -298,6 +298,15 @@ async def set_password(request: Request) -> dict[str, Any]:
 
     new_hash = hash_password(new_password)
     store.set_password_hash(new_hash)
+    event_bus = getattr(request.app.state, "events", None)
+    if event_bus is not None:
+        await event_bus.emit(
+            "system.auth_changed",
+            "info",
+            "system",
+            "owner password rotated" if has_existing else "owner password set",
+            data={"rotated": has_existing},
+        )
     return {
         "ok": True,
         "password_set": True,

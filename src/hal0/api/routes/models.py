@@ -9,6 +9,7 @@ plus any locally-registered models from the ModelRegistry.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import time
@@ -258,6 +259,126 @@ def _resolve_pull_source(request: Request, model_id: str) -> tuple[str, str]:
     )
 
 
+async def _run_pull_with_events(
+    job: PullJob,
+    *,
+    hf_repo: str,
+    hf_file: str,
+    registry: Any,
+    hf_token: str | None,
+    event_bus: Any | None,
+) -> None:
+    """Wrap ``run_pull`` so footer-visible progress events fan out.
+
+    Emits ``pull.progress`` at each 10% decile (computed lazily — we
+    snapshot the deciles already reached on the job's ``_last_decile``
+    attr) plus terminal events on success / failure / cancellation. The
+    HF download itself is untouched; we listen to the same progress
+    signal SSE listens to so the byte counts stay authoritative.
+    """
+    if event_bus is None:
+        await run_pull(
+            job, hf_repo=hf_repo, hf_file=hf_file, registry=registry, hf_token=hf_token
+        )
+        return
+
+    async def _emit_progress() -> None:
+        last_decile: int = getattr(job, "_last_pull_decile", -1)
+        while job.state in ("queued", "running"):
+            event = job.progress_event
+            try:
+                await asyncio.wait_for(event.wait(), timeout=2.0)
+            except TimeoutError:
+                continue
+            if job.bytes_total > 0:
+                pct = int((job.bytes_downloaded / job.bytes_total) * 100)
+                decile = pct // 10
+                if decile > last_decile and decile >= 1:
+                    last_decile = decile
+                    job._last_pull_decile = last_decile
+                    speed = _speed_bps(job)
+                    eta = _eta_s(job, speed)
+                    await event_bus.emit(
+                        "pull.progress",
+                        "info",
+                        f"pull:{job.model_id}",
+                        f"{job.model_id}: {decile * 10}%",
+                        data={
+                            "model_id": job.model_id,
+                            "downloaded": job.bytes_downloaded,
+                            "total": job.bytes_total,
+                            "pct": decile * 10,
+                            "speed_bps": speed,
+                            "eta_s": eta,
+                        },
+                    )
+
+    progress_task = asyncio.create_task(_emit_progress())
+    try:
+        await run_pull(
+            job, hf_repo=hf_repo, hf_file=hf_file, registry=registry, hf_token=hf_token
+        )
+    finally:
+        progress_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await progress_task
+
+    if job.state == "completed":
+        await event_bus.emit(
+            "pull.completed",
+            "info",
+            f"pull:{job.model_id}",
+            f"{job.model_id}: download complete",
+            data={
+                "model_id": job.model_id,
+                "downloaded": job.bytes_downloaded,
+                "total": job.bytes_total,
+                "sha256": job.sha256,
+                "path": job.path,
+            },
+        )
+    elif job.state == "failed":
+        await event_bus.emit(
+            "pull.failed",
+            "error",
+            f"pull:{job.model_id}",
+            f"{job.model_id}: {job.error or 'pull failed'}",
+            data={
+                "model_id": job.model_id,
+                "downloaded": job.bytes_downloaded,
+                "total": job.bytes_total,
+                "error": job.error,
+                "error_code": job.error_code,
+            },
+        )
+    elif job.state == "cancelled":
+        await event_bus.emit(
+            "pull.cancelled",
+            "warn",
+            f"pull:{job.model_id}",
+            f"{job.model_id}: pull cancelled",
+            data={
+                "model_id": job.model_id,
+                "downloaded": job.bytes_downloaded,
+                "total": job.bytes_total,
+            },
+        )
+
+
+def _speed_bps(job: PullJob) -> float:
+    """Approximate average bytes/s since the job started."""
+    elapsed = max(time.time() - (job.started_at or time.time()), 0.001)
+    return job.bytes_downloaded / elapsed
+
+
+def _eta_s(job: PullJob, speed_bps: float) -> float | None:
+    """Estimate seconds-to-completion from current rolling speed."""
+    if speed_bps <= 0 or job.bytes_total <= 0:
+        return None
+    remaining = max(job.bytes_total - job.bytes_downloaded, 0)
+    return remaining / speed_bps
+
+
 @router.post("/{model_id}/pull", status_code=202, dependencies=_writer)
 async def pull_model(
     model_id: str,
@@ -288,15 +409,26 @@ async def pull_model(
     job = make_job(model_id)
     jobs[model_id] = job
 
+    event_bus = getattr(request.app.state, "events", None)
+    if event_bus is not None:
+        await event_bus.emit(
+            "pull.queued",
+            "info",
+            f"pull:{model_id}",
+            f"{model_id}: queued ({hf_repo}/{hf_file})",
+            data={"model_id": model_id, "hf_repo": hf_repo, "hf_file": hf_file},
+        )
+
     hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
     registry = request.app.state.model_registry
     background.add_task(
-        run_pull,
+        _run_pull_with_events,
         job,
         hf_repo=hf_repo,
         hf_file=hf_file,
         registry=registry,
         hf_token=hf_token,
+        event_bus=event_bus,
     )
     return {
         "id": job.job_id,

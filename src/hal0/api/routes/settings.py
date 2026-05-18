@@ -135,6 +135,18 @@ async def update_settings(request: Request) -> dict[str, Any]:
         ) from exc
 
     request.app.state.hal0_config = merged
+    event_bus = getattr(request.app.state, "events", None)
+    if event_bus is not None:
+        # Surface a footer chip when the operator saves the config. The
+        # data field intentionally carries only the top-level keys touched
+        # by the PATCH so secrets / api keys don't leak into the ring.
+        await event_bus.emit(
+            "system.config_save",
+            "info",
+            "system",
+            "hal0 config saved",
+            data={"keys": sorted(body.keys())},
+        )
     return _config_to_dict(merged)
 
 
