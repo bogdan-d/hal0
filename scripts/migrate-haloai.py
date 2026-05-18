@@ -40,6 +40,7 @@ if (_REPO_ROOT / "src" / "hal0").is_dir():
     sys.path.insert(0, str(_REPO_ROOT / "src"))
 
 from hal0.registry.model import Model  # noqa: E402
+from hal0.registry.store import model_to_toml_dict  # noqa: E402
 
 log = structlog.get_logger(__name__)
 
@@ -285,7 +286,7 @@ def render_registry(models: list[Model]) -> bytes:
     """Render Model list as ``registry.toml`` bytes — matches ModelRegistry._atomic_write."""
     payload = {
         "models": {
-            m.id: {k: v for k, v in m.model_dump(mode="python").items() if k != "id"}
+            m.id: {k: v for k, v in model_to_toml_dict(m).items() if k != "id"}
             for m in sorted(models, key=lambda m: m.id)
         }
     }

@@ -19,6 +19,34 @@ from pydantic import BaseModel, Field, field_validator
 Capability = str  # e.g. "chat", "embed", "rerank", "vision", "asr", "tts"
 
 
+class ModelDefaults(BaseModel):
+    """Per-model default knobs surfaced as launcher defaults.
+
+    All fields optional. ``extra_args`` is appended verbatim to the
+    launcher arg list and is later merged with the slot's own
+    ``[server].extra_args`` by :func:`hal0.launchers.flag_merge.merge_flags`.
+    """
+
+    model_config = {"populate_by_name": True, "str_strip_whitespace": True}
+
+    context_size: int | None = Field(
+        default=None,
+        description="Default n_ctx the launcher should use when this model is bound.",
+    )
+    n_gpu_layers: int | None = Field(
+        default=None,
+        description="Default --n-gpu-layers; -1 = all, 0 = CPU only.",
+    )
+    rope_freq_base: float | None = Field(
+        default=None,
+        description="Default --rope-freq-base override.",
+    )
+    extra_args: str | None = Field(
+        default=None,
+        description="Freeform CLI flag string appended after merge with slot extra_args.",
+    )
+
+
 class Model(BaseModel):
     """A model entry in the hal0 registry.
 
@@ -81,9 +109,30 @@ class Model(BaseModel):
         description="Freeform tags, e.g. ['curated', 'vision'].",
     )
 
+    backends: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Slot backend names this model can run under. "
+            "GGUF → ['vulkan','rocm','cuda','cpu']; moonshine → ['moonshine']; "
+            "kokoro → ['kokoro']. Empty = unknown / not yet detected."
+        ),
+    )
+
+    defaults: ModelDefaults | None = Field(
+        default=None,
+        description=(
+            "Optional per-model launcher defaults. "
+            "None means the slot config is used as-is."
+        ),
+    )
+
     metadata: dict[str, Any] = Field(
         default_factory=dict,
-        description="Provider-specific or user-defined extra metadata.",
+        description=(
+            "Provider-specific or user-defined extra metadata. "
+            "Reserved keys: 'context_length' (int, GGUF arch max), "
+            "'upstream_url' (str, dispatcher route hint)."
+        ),
     )
 
     @field_validator("id")

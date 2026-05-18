@@ -378,11 +378,46 @@ class ModelRegistry:
             self._invalidate()
 
 
+def model_to_toml_dict(m: Model) -> dict[str, Any]:
+    """Public alias for :func:`_model_to_toml`.
+
+    Exposed so out-of-tree callers (migration scripts, archival tools)
+    use the same None-stripping logic as the registry's atomic write
+    path. Otherwise pydantic v2's ``model_dump`` emits ``defaults=None``
+    for unset ``ModelDefaults``, which ``tomli_w`` refuses to serialise.
+    """
+    return _model_to_toml(m)
+
+
 def _model_to_toml(m: Model) -> dict[str, Any]:
-    """Serialise a Model to the TOML-friendly dict, dropping the synthetic id."""
+    """Serialise a Model to the TOML-friendly dict.
+
+    Drops the synthetic ``id`` (it's the table key on disk) and any
+    top-level ``None`` values (TOML has no null). For the nested
+    ``defaults`` table we also strip ``None`` leaves so optional
+    ModelDefaults fields aren't written as empty entries that would
+    fail TOML serialisation.
+    """
     data = m.model_dump(mode="python", exclude_none=False)
     data.pop("id", None)
-    return data
+
+    # Top-level None → drop. Nested 'defaults' table: drop None leaves
+    # too, and collapse to no key at all when nothing is set.
+    cleaned: dict[str, Any] = {}
+    for k, v in data.items():
+        if v is None:
+            continue
+        if k == "defaults" and isinstance(v, dict):
+            sub = {sk: sv for sk, sv in v.items() if sv is not None}
+            if not sub:
+                continue
+            cleaned[k] = sub
+            continue
+        if k == "metadata" and isinstance(v, dict):
+            cleaned[k] = {mk: mv for mk, mv in v.items() if mv is not None}
+            continue
+        cleaned[k] = v
+    return cleaned
 
 
 __all__ = [
@@ -390,4 +425,5 @@ __all__ = [
     "ModelNotFound",
     "ModelRegistry",
     "RegistryError",
+    "model_to_toml_dict",
 ]
