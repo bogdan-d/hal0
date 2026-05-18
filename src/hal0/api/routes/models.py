@@ -13,15 +13,17 @@ import contextlib
 import json
 import os
 import time
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Request
 from fastapi.responses import StreamingResponse
 
 from hal0.api.middleware.auth import require_writer
-from hal0.api.middleware.error_codes import Hal0Error
+from hal0.api.middleware.error_codes import BadRequest, Hal0Error
 from hal0.config.loader import load_hal0_config
 from hal0.registry.curated import CURATED, CuratedModel, HaloaiModel, get_curated
+from hal0.registry.detect import DetectionResult, detect
 from hal0.registry.discover import scan_and_register
 from hal0.registry.pull import (
     PullInvalidSource,
@@ -142,18 +144,258 @@ async def list_catalogue() -> dict[str, Any]:
     }
 
 
+@router.post("/scan/preview", dependencies=_writer)
+async def scan_preview(request: Request) -> dict[str, Any]:
+    """Walk the requested paths and return :class:`DetectionResult` rows.
+
+    Inspection-only: no registry mutation, no event emission. The UI uses
+    this to populate the "Scan directory" preview table where the user
+    edits backends + capabilities + id before committing via POST /scan.
+
+    Body::
+
+        {
+          "paths":     ["/abs/dir/or/file", ...],   # required
+          "recursive": bool                          # default False
+        }
+
+    Files matching the configured ``[models].file_extensions`` are
+    selected when walking directories. A path that is a file is detected
+    directly regardless of extension.
+    """
+    try:
+        body = await request.json()
+    except Exception as exc:
+        raise BadRequest("body must be valid JSON", details={"error": str(exc)}) from exc
+    if not isinstance(body, dict):
+        raise BadRequest("body must be a JSON object")
+
+    raw_paths = body.get("paths") or []
+    if not isinstance(raw_paths, list) or not raw_paths:
+        raise BadRequest("'paths' must be a non-empty list of absolute paths")
+    recursive = bool(body.get("recursive", False))
+
+    cfg = load_hal0_config()
+    extensions = {e.lower() for e in cfg.models.file_extensions}
+
+    preview: list[dict[str, Any]] = []
+    seen: set[Path] = set()
+    for raw in raw_paths:
+        if not isinstance(raw, str) or not raw.strip():
+            continue
+        root = Path(raw).expanduser()
+        if not root.exists():
+            continue
+        candidates: list[Path] = []
+        if root.is_file():
+            candidates = [root]
+        elif root.is_dir():
+            it = root.rglob("*") if recursive else root.iterdir()
+            try:
+                for p in it:
+                    try:
+                        if not p.is_file():
+                            continue
+                    except OSError:
+                        continue
+                    if p.suffix.lower() not in extensions:
+                        continue
+                    candidates.append(p)
+            except OSError:
+                continue
+        for p in candidates:
+            try:
+                resolved = p.resolve()
+            except OSError:
+                resolved = p
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            result: DetectionResult = detect(resolved)
+            preview.append(
+                {
+                    "path": str(resolved),
+                    "suggested_backends": list(result.suggested_backends),
+                    "suggested_capabilities": list(result.suggested_capabilities),
+                    "context_length": result.context_length,
+                    "confidence": result.confidence,
+                    "raw_hints": dict(result.raw_hints),
+                }
+            )
+
+    return {"preview": preview, "count": len(preview)}
+
+
 @router.post("/scan", dependencies=_writer)
 async def scan_models(request: Request) -> dict[str, Any]:
-    """Walk the configured model roots and register any new files.
+    """Walk model roots and register new files — legacy auto-scan, or
+    commit a user-edited preview when ``rows`` is supplied.
 
-    Reads the latest ``[models]`` section from disk so a freshly-saved
-    root list takes effect without an API restart. Returns ``added`` /
-    ``skipped`` / ``scanned_roots`` so the UI can render a toast.
+    Two body shapes:
+
+    * **Legacy / empty body** — walk the configured ``[models].roots`` and
+      auto-register every new candidate via the discover module. Each
+      added model fires a ``model.registered`` event with
+      ``source='scan'``.
+
+    * **``{"rows": [...]}``** — commit pre-vetted preview rows. Each row
+      may carry user-edited ``backends`` / ``capabilities`` / ``defaults``
+      / ``name`` / ``id`` overrides; otherwise we fall back to the
+      detection output for that path. User overrides always win — that's
+      the whole point of the preview round-trip.
+
+    Returns ``{added, skipped, scanned_roots}`` in both modes so the UI's
+    toast-render path is unchanged.
     """
-    cfg = load_hal0_config()
     registry = request.app.state.model_registry
+    event_bus = getattr(request.app.state, "events", None)
+
+    body: dict[str, Any] = {}
+    with contextlib.suppress(Exception):
+        body = await request.json()
+    rows = body.get("rows") if isinstance(body, dict) else None
+
+    if isinstance(rows, list) and rows:
+        result = await _commit_scan_rows(rows, registry, event_bus)
+        return result
+
+    cfg = load_hal0_config()
     result = scan_and_register(registry, cfg.models)
+    if event_bus is not None:
+        for mid in result.get("added", []):
+            try:
+                model = registry.get(mid)
+            except Exception:
+                continue
+            await event_bus.emit(
+                "model.registered",
+                "info",
+                f"model:{mid}",
+                f"{mid}: registered (scan)",
+                data={
+                    "id": mid,
+                    "backends": list(getattr(model, "backends", []) or []),
+                    "capabilities": list(getattr(model, "capabilities", []) or []),
+                    "source": "scan",
+                },
+            )
     return result
+
+
+async def _commit_scan_rows(
+    rows: list[Any],
+    registry: Any,
+    event_bus: Any | None,
+) -> dict[str, Any]:
+    """Persist user-edited preview rows into the registry.
+
+    Each row is a dict with at least ``path``. Optional fields override
+    detection: ``id``, ``name``, ``backends``, ``capabilities``,
+    ``defaults`` (nested ``ModelDefaults`` shape). Missing fields are
+    backfilled by re-running ``detect()`` on the path so the operator can
+    edit only what matters and still get high-confidence defaults for the
+    rest.
+    """
+    from hal0.registry.model import Model, ModelDefaults
+    from hal0.registry.store import ModelAlreadyExists
+
+    added: list[str] = []
+    skipped: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            skipped.append({"path": "", "reason": "row_not_an_object"})
+            continue
+        raw_path = row.get("path")
+        if not isinstance(raw_path, str) or not raw_path.strip():
+            skipped.append({"path": "", "reason": "missing_path"})
+            continue
+        path = Path(raw_path).expanduser()
+        try:
+            resolved = path.resolve() if path.exists() else path
+        except OSError:
+            resolved = path
+
+        detection = detect(resolved)
+        backends = row.get("backends")
+        capabilities = row.get("capabilities")
+        if not isinstance(backends, list):
+            backends = list(detection.suggested_backends)
+        if not isinstance(capabilities, list):
+            capabilities = list(detection.suggested_capabilities)
+
+        suggested_id = row.get("id") or _suggest_id_from_path(resolved)
+        name = row.get("name") or resolved.stem
+
+        defaults_payload = row.get("defaults")
+        defaults_obj: ModelDefaults | None = None
+        if isinstance(defaults_payload, dict) and defaults_payload:
+            try:
+                defaults_obj = ModelDefaults.model_validate(defaults_payload)
+            except Exception as exc:
+                skipped.append(
+                    {"path": str(resolved), "reason": f"invalid_defaults:{exc}"}
+                )
+                continue
+
+        size_bytes = 0
+        with contextlib.suppress(OSError):
+            size_bytes = resolved.stat().st_size
+
+        metadata: dict[str, Any] = {"discovered": True, "source": "scan"}
+        if detection.context_length is not None:
+            metadata["context_length"] = detection.context_length
+
+        try:
+            model = Model(
+                id=str(suggested_id),
+                name=str(name),
+                path=str(resolved),
+                size_bytes=size_bytes,
+                capabilities=[str(c) for c in capabilities],
+                backends=[str(b) for b in backends],
+                defaults=defaults_obj,
+                metadata=metadata,
+            )
+        except (TypeError, ValueError) as exc:
+            skipped.append({"path": str(resolved), "reason": f"invalid_model:{exc}"})
+            continue
+
+        try:
+            registry.add(model)
+        except ModelAlreadyExists:
+            skipped.append({"path": str(resolved), "reason": "already_registered"})
+            continue
+        added.append(model.id)
+        if event_bus is not None:
+            await event_bus.emit(
+                "model.registered",
+                "info",
+                f"model:{model.id}",
+                f"{model.id}: registered (scan)",
+                data={
+                    "id": model.id,
+                    "backends": list(model.backends),
+                    "capabilities": list(model.capabilities),
+                    "source": "scan",
+                },
+            )
+
+    return {
+        "added": added,
+        "skipped": skipped,
+        "scanned_roots": [],
+    }
+
+
+def _suggest_id_from_path(p: Path) -> str:
+    """Derive a registry-friendly id from a file path.
+
+    Re-uses :func:`hal0.registry.discover._normalise_id` so single-file
+    register and full-root scan land on the same id for the same file.
+    """
+    from hal0.registry.discover import _normalise_id
+
+    return _normalise_id(p.stem)
 
 
 @router.post("", status_code=201, dependencies=_writer)
@@ -164,6 +406,10 @@ async def create_model(request: Request) -> dict[str, Any]:
     The model must already exist on disk (e.g. dropped into
     ``/var/lib/hal0/models/``) — this endpoint records metadata, it does
     not download. Use POST /api/models/{id}/pull for downloads.
+
+    Optional ``source`` (top-level, not part of ``Model``) tags the
+    emitted ``model.registered`` event so the footer can colour-code
+    catalogue picks vs hand-registered files. Defaults to ``"manual"``.
     """
     from hal0.registry.store import Model
 
@@ -171,14 +417,32 @@ async def create_model(request: Request) -> dict[str, Any]:
     try:
         body = await request.json()
     except Exception as exc:
-        raise Hal0Error("body must be valid JSON", details={"error": str(exc)}) from exc
+        raise BadRequest("body must be valid JSON", details={"error": str(exc)}) from exc
     if not isinstance(body, dict):
-        raise Hal0Error("body must be a JSON object")
+        raise BadRequest("body must be a JSON object")
+    # Pop ``source`` before validation — it's an event-only tag, not a
+    # Model field. Default to "manual" for hand-registered single files.
+    source = body.pop("source", "manual")
     try:
         model = Model(**body)
     except (TypeError, ValueError) as exc:
-        raise Hal0Error(f"invalid Model payload: {exc}") from exc
+        raise BadRequest(f"invalid Model payload: {exc}") from exc
     registry.add(model)
+
+    event_bus = getattr(request.app.state, "events", None)
+    if event_bus is not None:
+        await event_bus.emit(
+            "model.registered",
+            "info",
+            f"model:{model.id}",
+            f"{model.id}: registered ({source})",
+            data={
+                "id": model.id,
+                "backends": list(model.backends),
+                "capabilities": list(model.capabilities),
+                "source": str(source),
+            },
+        )
     return _model_to_dict(model)
 
 
@@ -208,24 +472,211 @@ async def get_model(model_id: str, request: Request) -> dict[str, Any]:
 
 @router.put("/{model_id}", dependencies=_writer)
 async def update_model(model_id: str, request: Request) -> dict[str, Any]:
-    """Apply partial updates to a registered model's metadata."""
+    """Apply partial updates to a registered model's metadata.
+
+    Body accepts any subset of: ``name``, ``capabilities``, ``backends``,
+    ``defaults`` (nested ``ModelDefaults``), plus the legacy fields
+    (``license``, ``tags``, ``metadata`` …). Emits ``model.updated`` with
+    ``changed_fields`` so the footer ticker can render a "you edited X"
+    chip.
+    """
     registry = request.app.state.model_registry
     try:
         body = await request.json()
     except Exception as exc:
-        raise Hal0Error("body must be valid JSON", details={"error": str(exc)}) from exc
+        raise BadRequest("body must be valid JSON", details={"error": str(exc)}) from exc
     if not isinstance(body, dict):
-        raise Hal0Error("body must be a JSON object")
+        raise BadRequest("body must be a JSON object")
+
+    # Snapshot the pre-update model so we can diff the field set the
+    # client actually changed (vs the wire-format keys, which may include
+    # unchanged values). Without this the footer's "changed X, Y" toast
+    # would lie whenever the UI sends the full row.
+    try:
+        before = registry.get(model_id).model_dump(mode="python")
+    except Exception:
+        before = {}
+
     model = registry.update(model_id, body)
+
+    after = model.model_dump(mode="python")
+    changed: list[str] = []
+    for key in body.keys():
+        if key == "id":
+            continue
+        if before.get(key) != after.get(key):
+            changed.append(key)
+
+    event_bus = getattr(request.app.state, "events", None)
+    if event_bus is not None:
+        await event_bus.emit(
+            "model.updated",
+            "info",
+            f"model:{model.id}",
+            f"{model.id}: updated ({', '.join(changed) or 'no-op'})",
+            data={"id": model.id, "changed_fields": changed},
+        )
     return _model_to_dict(model)
 
 
+# ── DELETE + cascade helpers ───────────────────────────────────────────────
+
+
+def _slots_referencing_model(request: Request, model_id: str) -> list[dict[str, Any]]:
+    """Return slot configs (as raw dicts) whose ``[model].default`` is ``model_id``.
+
+    Reads slot TOMLs directly so the cascade also catches slots whose
+    SlotManager hasn't been touched this process — the source of truth is
+    the TOML on disk. Each returned dict carries at minimum ``name`` +
+    the parsed config body (used by callers to clear the default field).
+    """
+    import tomllib
+
+    from hal0.config import paths as cfg_paths
+
+    cfg_dir = cfg_paths.slots_config_dir()
+    if not cfg_dir.exists():
+        return []
+    affected: list[dict[str, Any]] = []
+    for p in sorted(cfg_dir.glob("*.toml")):
+        if p.name.startswith("."):
+            continue
+        try:
+            with open(p, "rb") as f:
+                data = tomllib.load(f)
+        except (OSError, tomllib.TOMLDecodeError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        model_sect = data.get("model")
+        default = ""
+        if isinstance(model_sect, dict):
+            default = str(model_sect.get("default") or "")
+        if default != model_id:
+            continue
+        name = data.get("name") or p.stem
+        affected.append({"name": str(name), "path": str(p), "config": data})
+    return affected
+
+
+def _clear_slot_default(slot_path: Path, slot_cfg: dict[str, Any]) -> None:
+    """Rewrite a slot TOML with ``[model].default = ""`` cleared in-place.
+
+    Best-effort: a write failure logs a warning but does not abort the
+    cascade — the model row is already going away, and a slot left
+    pointing at a vanished id will surface as ``model.not_found`` on its
+    next ``load()`` (which is the correct UX).
+    """
+    import tomli_w
+
+    new_cfg = dict(slot_cfg)
+    model_sect = new_cfg.get("model")
+    if isinstance(model_sect, dict):
+        new_model = dict(model_sect)
+        new_model["default"] = ""
+        new_cfg["model"] = new_model
+    try:
+        slot_path.write_bytes(tomli_w.dumps(new_cfg).encode("utf-8"))
+    except OSError:
+        # Cascade continues; the dangling reference is surfaced later.
+        pass
+
+
+async def _unload_slot_if_running(request: Request, slot_name: str) -> None:
+    """Best-effort unload of a referencing slot.
+
+    Imports the SlotManager off ``app.state`` (lifespan-wired) and asks
+    it to unload, catching every failure so one stuck slot can't block
+    the cascade. The SlotManager itself emits ``slot.state`` events for
+    each transition — we rely on that instead of duplicating the emit
+    here, which keeps ``slot.state`` ordering authoritative.
+    """
+    sm = getattr(request.app.state, "slot_manager", None)
+    if sm is None:
+        return
+    try:
+        snap = await sm.status(slot_name)
+    except Exception:
+        return
+    if snap.state.value == "offline":
+        return
+    with contextlib.suppress(Exception):
+        await sm.unload(slot_name)
+
+
 @router.delete("/{model_id}", dependencies=_writer)
-async def delete_model(model_id: str, request: Request) -> dict[str, object]:
-    """Remove a model from the local registry (does not delete files)."""
+async def delete_model(
+    model_id: str,
+    request: Request,
+    force_cascade: bool = True,
+) -> dict[str, object]:
+    """Remove a model from the registry, cascading through referencing slots.
+
+    Query param ``force_cascade`` (default ``true``) controls behaviour
+    when at least one slot has this model as its ``[model].default``:
+
+    * ``force_cascade=true`` (default): unload every running referrer,
+      clear ``[model].default = ""`` in each slot's TOML, delete the
+      registry row, then emit ``model.deleted`` *last* — so subscribers
+      see the slot transitions before the model disappears.
+    * ``force_cascade=false``: return 409 with the ``affected_slots`` list
+      so the UI can render a confirm-cascade dialog.
+
+    The actual model file on disk is never touched — that's the
+    operator's call. Registry rows hold metadata, not bytes.
+    """
     registry = request.app.state.model_registry
+    if not registry.has(model_id):
+        # Mirror the registry's typed envelope. We don't raise ModelNotFound
+        # directly to avoid importing it at module scope; the registry's
+        # remove() returns False silently, so we need an explicit guard.
+        from hal0.registry.store import ModelNotFound
+
+        raise ModelNotFound(
+            f"model {model_id!r} not in registry",
+            details={"model_id": model_id},
+        )
+
+    affected = _slots_referencing_model(request, model_id)
+    affected_names = [entry["name"] for entry in affected]
+
+    if affected and not force_cascade:
+        from hal0.errors import Conflict
+
+        raise Conflict(
+            f"model {model_id!r} is referenced by {len(affected)} slot(s); "
+            f"retry with force_cascade=true to cascade",
+            code="model.in_use",
+            details={"model_id": model_id, "affected_slots": affected_names},
+        )
+
+    # Cascade order is load-bearing for the footer's ticker UX:
+    #   1. unload running referrers (each fires slot.state)
+    #   2. clear [model].default in slot TOMLs
+    #   3. registry delete
+    #   4. emit model.deleted LAST
+    for entry in affected:
+        await _unload_slot_if_running(request, entry["name"])
+    for entry in affected:
+        _clear_slot_default(Path(entry["path"]), entry["config"])
+
     removed = registry.remove(model_id)
-    return {"id": model_id, "deleted": bool(removed)}
+
+    event_bus = getattr(request.app.state, "events", None)
+    if event_bus is not None:
+        await event_bus.emit(
+            "model.deleted",
+            "info",
+            f"model:{model_id}",
+            f"{model_id}: deleted"
+            + (f" (cascaded {len(affected_names)} slot(s))" if affected_names else ""),
+            data={"id": model_id, "affected_slots": affected_names},
+        )
+    return {
+        "id": model_id,
+        "deleted": bool(removed),
+        "affected_slots": affected_names,
+    }
 
 
 def _resolve_pull_source(request: Request, model_id: str) -> tuple[str, str]:
