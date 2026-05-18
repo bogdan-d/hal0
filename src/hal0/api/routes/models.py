@@ -19,7 +19,7 @@ from fastapi.responses import StreamingResponse
 
 from hal0.api.middleware.auth import require_writer
 from hal0.api.middleware.error_codes import Hal0Error
-from hal0.registry.curated import get_curated
+from hal0.registry.curated import CURATED, CuratedModel, HaloaiModel, get_curated
 from hal0.registry.pull import (
     PullInvalidSource,
     PullJob,
@@ -100,6 +100,27 @@ async def list_models(request: Request) -> dict[str, Any]:
                 }
             )
     return {"models": data, "count": len(data), "filtered_aliases": filtered}
+
+
+@router.get("/catalogue")
+async def list_catalogue() -> dict[str, Any]:
+    """Curated catalogue split into pullable (HF) and upstream-routed entries."""
+    pullable: list[dict[str, Any]] = []
+    upstream: list[dict[str, Any]] = []
+    for entry in CURATED:
+        if isinstance(entry, CuratedModel):
+            pullable.append(entry.model_dump(mode="json"))
+        elif isinstance(entry, HaloaiModel):
+            upstream.append(entry.model_dump(mode="json"))
+    return {
+        "pullable": pullable,
+        "upstream": upstream,
+        "counts": {
+            "pullable": len(pullable),
+            "upstream": len(upstream),
+            "total": len(pullable) + len(upstream),
+        },
+    }
 
 
 @router.post("", status_code=201, dependencies=_writer)

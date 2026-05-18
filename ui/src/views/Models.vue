@@ -59,12 +59,27 @@ function jobFor(modelId) {
   return pullJobs[modelId] ?? null
 }
 
-// Curated presets (shown in pull modal)
-const CURATED = [
-  { id: 'qwen3-4b',    name: 'Qwen3 4B',    size_gb: 4.1,  license: 'Apache 2.0', desc: 'Fast, multilingual, vision-capable' },
-  { id: 'llama32-3b',  name: 'Llama 3.2 3B', size_gb: 2.0, license: 'Llama',      desc: 'General purpose, small' },
-  { id: 'phi3-mini',   name: 'Phi-3 Mini',   size_gb: 2.4, license: 'MIT',        desc: 'Efficient reasoning' },
-]
+// Curated catalogue — populated on mount from GET /api/models/catalogue.
+// Split into two shapes:
+//   - pullableCatalogue: CuratedModel entries with HF coordinates (Pull button).
+//   - upstreamCatalogue: HaloaiModel entries that route to a configured upstream.
+const pullableCatalogue = ref([])
+const upstreamCatalogue = ref([])
+
+// Hardware-target mapping for upstream backends. Mirrors the chip palette
+// used by Dashboard.hardwareTarget so the colour vocabulary stays consistent
+// across views.
+function backendTarget(backend) {
+  const b = (backend || '').toLowerCase()
+  if (b === 'flm') return { id: 'npu', label: 'NPU' }
+  if (b === 'llamacpp') return { id: 'igpu', label: 'iGPU' }
+  if (b === 'kokoro' || b === 'moonshine' || b === 'vibevoice') return { id: 'igpu', label: 'iGPU' }
+  if (b === 'minimax') return { id: 'remote', label: 'remote' }
+  if (b === 'cuda' || b === 'rocm') return { id: 'gpu', label: 'GPU' }
+  if (b === 'vulkan' || b === 'metal') return { id: 'igpu', label: 'iGPU' }
+  if (b === 'cpu') return { id: 'cpu', label: 'CPU' }
+  return { id: 'unknown', label: b || 'unknown' }
+}
 
 // Edit metadata
 const editingModel   = ref(null)
@@ -89,6 +104,17 @@ async function loadModels() {
   }
 }
 
+async function loadCatalogue() {
+  try {
+    const data = await api('/api/models/catalogue')
+    pullableCatalogue.value = Array.isArray(data?.pullable) ? data.pullable : []
+    upstreamCatalogue.value = Array.isArray(data?.upstream) ? data.upstream : []
+  } catch (e) {
+    // Catalogue is supplementary; surface a toast but don't block the page.
+    toasts.error(`Failed to load catalogue: ${e.message}`)
+  }
+}
+
 // ── Filtering ──────────────────────────────────────────────────────────
 const filteredModels = computed(() => {
   const q = search.value.trim().toLowerCase()
@@ -108,9 +134,10 @@ function slotsForModel(modelId) {
 async function pullCurated(preset) {
   pulling.value = true
   const job = ensureJob(preset.id)
+  const label = preset.display_name ?? preset.name ?? preset.id
   try {
     await job.start(preset.id)
-    toasts.success(`Pulling "${preset.name}" — progress shown inline`)
+    toasts.success(`Pulling "${label}" — progress shown inline`)
     showPull.value = false
     // Make sure the row exists so the user can watch progress. The
     // backend will register the model in its registry; until then we
@@ -118,7 +145,7 @@ async function pullCurated(preset) {
     if (!models.value.some((m) => m.id === preset.id)) {
       models.value = [
         ...models.value,
-        { id: preset.id, name: preset.name, size_gb: preset.size_gb, _pending: true },
+        { id: preset.id, name: label, size_gb: preset.size_gb, _pending: true },
       ]
     }
   } catch (e) {
@@ -264,6 +291,9 @@ function handleKey(e) {
 onMounted(async () => {
   window.addEventListener('keydown', handleKey)
   await loadModels()
+  // Catalogue loads in parallel with reattach — both are independent of
+  // each other and of the installed-models list.
+  loadCatalogue()
   // Reattach any in-flight pull jobs so the user sees live progress
   // even if they navigated away mid-download (Team I gap #3).
   await reattachInFlightPulls()
@@ -456,6 +486,86 @@ const QUANTS = ['Q4_K_M', 'Q5_K_M', 'Q8_0', 'F16', 'BF16']
           </div>
         </Card>
       </template>
+
+      <!-- ── Catalogue ──────────────────────────────────────────────
+           Discovery surface: every model the user *could* run, split
+           by how they'd run it. Pullable rows download into the local
+           registry; upstream rows route to a configured haloai-style
+           service. -->
+      <section class="catalogue-section" aria-labelledby="catalogue-title">
+        <header class="catalogue-header">
+          <h2 id="catalogue-title" class="catalogue-title">Catalogue</h2>
+          <span class="catalogue-counts mono">
+            {{ pullableCatalogue.length }} pullable · {{ upstreamCatalogue.length }} upstream-routed
+          </span>
+        </header>
+
+        <!-- Pullable -->
+        <div class="catalogue-group" aria-labelledby="catalogue-pullable-title">
+          <h3 id="catalogue-pullable-title" class="catalogue-subtitle">Pullable</h3>
+          <Card :padded="false" v-if="pullableCatalogue.length > 0">
+            <ul class="cat-list">
+              <li
+                v-for="entry in pullableCatalogue"
+                :key="entry.id"
+                class="cat-row"
+              >
+                <div class="cat-row-main">
+                  <div class="cat-row-title">
+                    <span class="cat-name">{{ entry.display_name }}</span>
+                    <span class="cat-id mono">{{ entry.id }}</span>
+                  </div>
+                  <p class="cat-desc">{{ entry.description }}</p>
+                </div>
+                <div class="cat-row-meta">
+                  <span class="mono-chip">{{ entry.size_gb }} GB</span>
+                  <span class="mono-chip">{{ entry.license }}</span>
+                  <span class="cap-chip">{{ entry.capability }}</span>
+                </div>
+                <button
+                  class="btn-sm-accent"
+                  type="button"
+                  :disabled="pulling"
+                  @click="pullCurated(entry)"
+                >
+                  <span v-if="jobFor(entry.id)?.inFlight.value" class="spinner" aria-hidden="true" />
+                  {{ jobFor(entry.id)?.inFlight.value ? 'Pulling…' : 'Pull' }}
+                </button>
+              </li>
+            </ul>
+          </Card>
+          <Card v-else><LoadingSkeleton :lines="2" /></Card>
+        </div>
+
+        <!-- Upstream-routed -->
+        <div class="catalogue-group" aria-labelledby="catalogue-upstream-title">
+          <h3 id="catalogue-upstream-title" class="catalogue-subtitle">Upstream-routed</h3>
+          <p class="catalogue-subnote">These models route to an upstream service if one is configured.</p>
+          <Card :padded="false" v-if="upstreamCatalogue.length > 0">
+            <ul class="cat-list">
+              <li
+                v-for="entry in upstreamCatalogue"
+                :key="entry.id"
+                class="cat-row"
+              >
+                <div class="cat-row-main">
+                  <div class="cat-row-title">
+                    <span class="cat-id mono cat-id-strong">{{ entry.id }}</span>
+                  </div>
+                </div>
+                <div class="cat-row-meta">
+                  <span class="cap-chip">{{ entry.capability }}</span>
+                  <span class="hw-chip" :class="`hw-${backendTarget(entry.backend).id}`">
+                    {{ backendTarget(entry.backend).label }}
+                  </span>
+                  <span class="owned-by mono">{{ entry.owned_by }}</span>
+                </div>
+              </li>
+            </ul>
+          </Card>
+          <Card v-else><LoadingSkeleton :lines="2" /></Card>
+        </div>
+      </section>
     </div>
 
     <!-- ── Pull model modal ──────────────────────────────────────── -->
@@ -480,13 +590,13 @@ const QUANTS = ['Q4_K_M', 'Q5_K_M', 'Q8_0', 'F16', 'BF16']
               <!-- Curated tab -->
               <div v-if="pullTab === 'curated'" class="curated-list" role="tabpanel">
                 <div
-                  v-for="preset in CURATED"
+                  v-for="preset in pullableCatalogue"
                   :key="preset.id"
                   class="curated-row"
                 >
                   <div class="curated-info">
-                    <span class="curated-name">{{ preset.name }}</span>
-                    <span class="curated-desc">{{ preset.desc }}</span>
+                    <span class="curated-name">{{ preset.display_name }}</span>
+                    <span class="curated-desc">{{ preset.description }}</span>
                   </div>
                   <div class="curated-meta">
                     <span class="mono-chip">{{ preset.size_gb }} GB</span>
@@ -501,6 +611,9 @@ const QUANTS = ['Q4_K_M', 'Q5_K_M', 'Q8_0', 'F16', 'BF16']
                     <span v-if="jobFor(preset.id)?.inFlight.value" class="spinner" aria-hidden="true" />
                     {{ jobFor(preset.id)?.inFlight.value ? 'Pulling…' : 'Pull' }}
                   </button>
+                </div>
+                <div v-if="pullableCatalogue.length === 0" class="curated-empty">
+                  Loading catalogue…
                 </div>
               </div>
 
@@ -815,6 +928,66 @@ const QUANTS = ['Q4_K_M', 'Q5_K_M', 'Q8_0', 'F16', 'BF16']
 
 .spinner { width: 11px; height: 11px; border: 2px solid rgba(255,255,255,0.3); border-top-color: white; border-radius: 50%; animation: spin 0.7s linear infinite; flex-shrink: 0; }
 @keyframes spin { to { transform: rotate(360deg); } }
+
+/* ── Catalogue ────────────────────────────────────────────────── */
+.catalogue-section { display: flex; flex-direction: column; gap: 14px; margin-top: 8px; }
+.catalogue-header { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.catalogue-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--hal0-accent);
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  margin: 0;
+}
+.catalogue-counts { font-size: 11px; color: var(--color-fg-faint); }
+.catalogue-group { display: flex; flex-direction: column; gap: 6px; }
+.catalogue-subtitle { font-size: 12.5px; font-weight: 600; color: var(--color-fg); margin: 0; }
+.catalogue-subnote { font-size: 11.5px; color: var(--color-fg-faint); font-style: italic; margin: 0 0 2px 0; }
+
+.cat-list { list-style: none; padding: 0; margin: 0; }
+.cat-row {
+  display: flex; align-items: center; gap: 12px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--color-border);
+}
+.cat-row:last-child { border-bottom: none; }
+.cat-row:hover { background: var(--color-surface-2); }
+.cat-row-main { flex: 1; display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.cat-row-title { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.cat-name { font-size: 13px; font-weight: 600; color: var(--color-fg); }
+.cat-id { font-size: 10.5px; color: var(--color-fg-faint); }
+.cat-id-strong { font-size: 12.5px; color: var(--color-fg); font-weight: 500; }
+.cat-desc { font-size: 11.5px; color: var(--color-fg-faint); margin: 0; }
+.cat-row-meta { display: flex; align-items: center; gap: 6px; flex-shrink: 0; flex-wrap: wrap; justify-content: flex-end; }
+
+.cap-chip {
+  font-family: var(--font-mono); font-size: 10.5px;
+  padding: 2px 7px; border-radius: 4px;
+  background: color-mix(in oklch, var(--hal0-accent) 10%, transparent);
+  border: 1px solid color-mix(in oklch, var(--hal0-accent) 28%, transparent);
+  color: var(--hal0-accent);
+}
+.owned-by { font-size: 10.5px; color: var(--color-fg-faint); }
+
+/* Hardware chips — mirror Dashboard's palette. */
+.hw-chip {
+  font-family: var(--font-mono); font-size: 10px;
+  padding: 2px 6px; border-radius: 4px; letter-spacing: 0.04em;
+  border: 1px solid var(--color-border);
+  background: var(--color-surface-2);
+  color: var(--color-fg-muted);
+  flex-shrink: 0;
+}
+.hw-chip.hw-npu  { color: var(--color-warning); border-color: color-mix(in oklch, var(--color-warning), transparent 60%); background: color-mix(in oklch, var(--color-warning), transparent 88%); }
+.hw-chip.hw-gpu  { color: var(--color-danger);  border-color: color-mix(in oklch, var(--color-danger),  transparent 60%); background: color-mix(in oklch, var(--color-danger),  transparent 88%); }
+.hw-chip.hw-igpu { color: var(--color-success); border-color: color-mix(in oklch, var(--color-success), transparent 60%); background: color-mix(in oklch, var(--color-success), transparent 88%); }
+.hw-chip.hw-cpu  { color: var(--color-fg-muted); border-color: var(--color-border-hi); }
+.hw-chip.hw-remote { color: var(--color-fg-faint); border-color: var(--color-border-hi); opacity: 0.85; }
+.hw-chip.hw-unknown { opacity: 0.6; text-transform: lowercase; }
+
+.curated-empty { font-size: 12px; color: var(--color-fg-faint); padding: 8px 4px; }
 
 .fade-enter-active, .fade-leave-active { transition: opacity 0.12s; }
 .fade-enter-from, .fade-leave-to { opacity: 0; }
