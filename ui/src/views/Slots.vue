@@ -27,6 +27,9 @@ import EmptyState from '../components/EmptyState.vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
 import SlotCard from '../components/SlotCard.vue'
 
+// Mirror src/hal0/slots/__init__.py BUILTIN_SLOTS — these cannot be deleted.
+const BUILTIN_SLOTS = new Set(['primary', 'embed', 'stt', 'tts'])
+
 const { metrics: slotMetrics, history: slotHistory } = useSlotMetrics(2500)
 
 const route  = useRoute()
@@ -764,6 +767,15 @@ const SLOT_TYPES = ['llama-server', 'flm', 'moonshine', 'kokoro']
               <p class="field-hint">Changes take effect on next load/restart.</p>
             </div>
             <div class="modal-footer">
+              <button
+                v-if="editingSlot && !BUILTIN_SLOTS.has(editingSlot.name)"
+                class="btn-ghost edit-delete"
+                type="button"
+                :disabled="editing"
+                @click="() => { const s = editingSlot; editingSlot = null; deletingSlot = s }"
+              >
+                Delete slot
+              </button>
               <button class="btn-ghost" type="button" @click="editingSlot = null" :disabled="editing">Cancel</button>
               <button class="btn-primary" type="button" @click="submitEdit" :disabled="editing">
                 <span v-if="editing" class="spinner" aria-hidden="true" />
@@ -1094,6 +1106,13 @@ const SLOT_TYPES = ['llama-server', 'flm', 'moonshine', 'kokoro']
   transition: border-color 0.15s, color 0.15s;
 }
 .btn-ghost:hover:not(:disabled) { border-color: var(--color-border-hi); color: var(--color-fg); }
+
+.edit-delete { margin-right: auto; color: var(--color-danger); }
+.edit-delete:hover:not(:disabled) {
+  border-color: color-mix(in oklch, var(--color-danger) 50%, var(--color-border));
+  background: color-mix(in oklch, var(--color-danger) 10%, transparent);
+  color: var(--color-danger);
+}
 .btn-ghost:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .kbd-hint { font-family: var(--font-mono); font-size: 11px; color: var(--color-fg-faint); }
