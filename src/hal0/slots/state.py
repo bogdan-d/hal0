@@ -119,6 +119,16 @@ def is_transition_legal(from_state: SlotState, to_state: SlotState) -> bool:
     return to_state in LEGAL_TRANSITIONS.get(from_state, frozenset())
 
 
+#: Providers that serve a baked-in model and don't require an explicit model_id.
+#: Must stay in sync with ui/src/composables/useSlotStats.js SELF_MANAGED_PROVIDERS.
+SELF_MANAGED_PROVIDERS: frozenset[str] = frozenset({"kokoro", "moonshine", "vibevoice"})
+
+
+def provider_requires_model(provider: str | None) -> bool:
+    """True when a slot of this provider needs an explicit model_id to serve."""
+    return (provider or "").lower() not in SELF_MANAGED_PROVIDERS
+
+
 # ── Typed errors ─────────────────────────────────────────────────────────────
 #
 # TIER1: Replaces haloai's silent `{"ok": False, "error": "..."}` dict-return
@@ -301,6 +311,7 @@ def read_state(path: Path | str) -> SlotStateRecord | None:
 
 __all__ = [
     "LEGAL_TRANSITIONS",
+    "SELF_MANAGED_PROVIDERS",
     "IllegalSlotTransition",
     "SlotConfigError",
     "SlotError",
@@ -311,6 +322,7 @@ __all__ = [
     "SlotState",
     "SlotStateRecord",
     "is_transition_legal",
+    "provider_requires_model",
     "read_state",
     "write_state_atomic",
 ]

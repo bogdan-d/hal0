@@ -46,6 +46,7 @@ from hal0.slots.state import (
     SlotState,
     SlotStateRecord,
     is_transition_legal,
+    provider_requires_model,
     read_state,
     write_state_atomic,
 )
@@ -311,10 +312,36 @@ class SlotManager:
         carried_extra: dict[str, Any] = dict(prior.extra) if prior else {}
         if extra:
             carried_extra.update(extra)
+        effective_model_id = (
+            model_id if model_id is not None else (prior.model_id if prior else None)
+        )
+        # Belt-and-suspenders: never persist READY/SERVING with no model
+        # when the provider needs one.  The state.json files on hal0-test
+        # showed exactly this shape — state=ready, model_id="" — when
+        # adoption + force-restart paths bypassed the normal lifecycle.
+        if to_state in (SlotState.READY, SlotState.SERVING) and not effective_model_id:
+            provider_hint = (
+                carried_extra.get("provider")
+                or (extra or {}).get("provider")
+                or (prior.extra.get("provider") if prior else None)
+            )
+            if provider_hint and provider_requires_model(str(provider_hint)):
+                log.warning(
+                    "slot.modelless_ready_blocked",
+                    extra={
+                        "slot": name,
+                        "from": current.value,
+                        "requested": to_state.value,
+                        "provider": provider_hint,
+                    },
+                    stack_info=False,
+                )
+                to_state = SlotState.IDLE
+                carried_extra["modelless_ready_blocked"] = True
         record = SlotStateRecord(
             name=name,
             state=to_state,
-            model_id=model_id if model_id is not None else (prior.model_id if prior else None),
+            model_id=effective_model_id,
             port=port or (prior.port if prior else 0),
             updated_at=time.time(),
             message=message,
@@ -696,6 +723,24 @@ class SlotManager:
                 adopted = await self._maybe_adopt_running_slot(slot_name, cfg)
                 if adopted is not None:
                     return adopted
+        elif (
+            observed in (SlotState.READY, SlotState.SERVING)
+            and active
+            and not rec.model_id
+        ):
+            # Migration / self-healing: a stale state.json from before the
+            # adoption guard could have READY/SERVING with model_id="".
+            # Re-run adoption when the provider actually needs a model so
+            # the record either picks up a live model_id from /v1/models
+            # or demotes to IDLE.  Gate on the empty-model-id check so the
+            # hot path stays cheap on healthy records.
+            provider_hint = rec.extra.get("provider")
+            if provider_hint and provider_requires_model(str(provider_hint)):
+                cfg = await self._maybe_load_config(slot_name)
+                if cfg:
+                    adopted = await self._maybe_adopt_running_slot(slot_name, cfg)
+                    if adopted is not None:
+                        return adopted
         # Re-hydrate the top-level backend from the slot's TOML when the
         # state.json record predates the extras-carry change (older state
         # files were written without ``extra.backend``). The dashboard's
@@ -1493,11 +1538,29 @@ class SlotManager:
             )
             return None
         model_id = _model_default(cfg) or None
-        extras = {
+        extras: dict[str, Any] = {
             "backend": cfg.get("backend", "vulkan"),
             "provider": cfg.get("provider", "llama-server"),
             "adopted": True,
         }
+        # Modelless adoption to READY is the original bug: a slot with
+        # no [model] default and an empty /v1/models would land at READY
+        # with model_id=None.  For providers that need an explicit model
+        # we either sniff one from /v1/models or demote to IDLE.
+        detected_model: str | None = None
+        if (
+            resolved == SlotState.READY
+            and model_id is None
+            and provider_requires_model(provider)
+        ):
+            detected_model = await _fetch_first_concrete_model(port)
+            if detected_model:
+                model_id = detected_model
+                extras["detected_model"] = detected_model
+            else:
+                resolved = SlotState.IDLE
+                extras["degraded_to_idle"] = True
+                detail = f"{detail}; no model_id available — demoted to idle"
         # ``force=True`` is required: the legal-transition map does not
         # contain offline→ready or offline→idle.  Adoption is the
         # exception — the state machine is recovering from drift, not
@@ -1518,6 +1581,8 @@ class SlotManager:
                 "port": port,
                 "resolved": resolved.value,
                 "detail": detail,
+                "detected_model": detected_model,
+                "degraded_to_idle": extras.get("degraded_to_idle", False),
             },
         )
         # Build the Slot snapshot directly from the just-written record.
@@ -1676,6 +1741,62 @@ def _provider_health_strategy(provider: str) -> str:
     if p in ("moonshine",):
         return "health_with_model_loaded"
     return "chat_sentinel"
+
+
+# Duplicated from hal0.api.routes.models._ALIAS_NAMES to avoid pulling the
+# FastAPI surface into the pure-systemd slot layer (ARCHITECTURE.md "Key
+# boundaries"). Keep in sync.
+_ROUTING_ALIAS_NAMES: frozenset[str] = frozenset(
+    {
+        "primary",
+        "medium",
+        "tiny",
+        "embed",
+        "rerank",
+        "npu",
+        "coding",
+        "coder",
+        "whisper",
+        "moonshine",
+        "vibevoice",
+        "kokoro",
+        "tts-1",
+        "tts-1-hd",
+        "bge-reranker",
+        "nomic-embed",
+    }
+)
+
+
+def _is_routing_alias(model_id: str) -> bool:
+    """Drop haloai:* + known routing shortcuts when sniffing real model ids."""
+    if not model_id:
+        return True
+    if model_id.startswith("haloai:"):
+        return True
+    return model_id in _ROUTING_ALIAS_NAMES
+
+
+async def _fetch_first_concrete_model(port: int) -> str | None:
+    """Best-effort: GET /v1/models on the slot and return the first non-alias id."""
+    url = f"http://127.0.0.1:{port}/v1/models"
+    try:
+        async with httpx.AsyncClient(timeout=_HEALTH_PROBE_TIMEOUT_S) as client:
+            resp = await client.get(url)
+    except httpx.HTTPError:
+        return None
+    if resp.status_code != 200:
+        return None
+    try:
+        data = resp.json()
+    except Exception:
+        return None
+    entries = data.get("data", []) if isinstance(data, dict) else []
+    for entry in entries:
+        mid = entry.get("id") if isinstance(entry, dict) else None
+        if isinstance(mid, str) and not _is_routing_alias(mid):
+            return mid
+    return None
 
 
 async def _sentinel_inference(

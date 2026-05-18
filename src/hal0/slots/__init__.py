@@ -17,10 +17,12 @@ Key exports:
 from __future__ import annotations
 
 from hal0.slots.manager import Slot, SlotManager
-from hal0.slots.state import SlotState
+from hal0.slots.state import SELF_MANAGED_PROVIDERS, SlotState, provider_requires_model
 
 __all__ = [
+    "SELF_MANAGED_PROVIDERS",
     "Slot",
     "SlotManager",
     "SlotState",
+    "provider_requires_model",
 ]
