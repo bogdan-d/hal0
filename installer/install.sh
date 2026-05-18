@@ -192,9 +192,18 @@ if ! preflight_python; then
     # Version warning already printed; keep going.
 fi
 
-# preflight_docker is soft (always returns 0 with a warning when
-# Docker is absent), so we don't need to guard the call.
-preflight_docker
+# preflight_docker in HAL0_DOCKER_REQUIRED mode auto-installs docker.io
+# on apt hosts and hard-fails (returns non-zero) on others with the
+# right remediation one-liner. We do NOT flip the flag in dev mode —
+# dev installs skip the openwebui unit and the slot containers, so a
+# missing docker is a warning, not a blocker. Operator who genuinely
+# wants docker on their dev tree can apt install it by hand.
+if [[ "${DEV_MODE}" -eq 0 ]]; then
+    HAL0_DOCKER_REQUIRED=1 preflight_docker || \
+        die "docker preflight failed — see remediation above, then re-run install.sh"
+else
+    preflight_docker
+fi
 
 # Disk + port-collision checks only matter for the live install — dev
 # mode lays files under $PWD/.hal0ai and never binds 8080/3001. We

@@ -10,9 +10,20 @@
 # none of them exit the calling shell):
 #   preflight_systemd          — systemctl on PATH
 #   preflight_python           — `${PY:-python3}` resolvable + version 3.11–3.14
-#   preflight_docker           — `docker info` reachable (soft; returns 0 with
-#                                a warning, since the API can run without
-#                                Docker until a slot is launched)
+#   preflight_docker           — `docker info` reachable. Soft by default
+#                                (returns 0 with a warning, since the API
+#                                can run without Docker until a slot is
+#                                launched and `hal0 doctor` should report
+#                                the full picture rather than abort). Set
+#                                HAL0_DOCKER_REQUIRED=1 to flip it hard:
+#                                on apt-based hosts the function then
+#                                auto-installs docker.io + enables the
+#                                docker.service; on rpm/pacman/etc. it
+#                                emits the exact one-liner to run and
+#                                returns non-zero. install.sh sets the
+#                                flag so a fresh box doesn't end up with
+#                                hal0-openwebui.service restart-looping
+#                                with status=203/EXEC.
 #   preflight_disk MIN_GB DIR  — at least MIN_GB free in DIR (default 20 / /var/lib)
 #   preflight_ports P1 [P2…]   — none of the named TCP ports are LISTENing
 #   preflight_all              — run all of the above; aggregate non-zero
@@ -25,6 +36,10 @@
 #                        when running `hal0 doctor` on a fresh container)
 #   HAL0_DOCTOR_PORTS  — space-separated port list for preflight_ports
 #                        (default "8080 3001")
+#   HAL0_DOCKER_REQUIRED — when "1", preflight_docker auto-installs
+#                        docker.io on apt hosts and hard-fails (returns
+#                        non-zero) elsewhere. Default empty → soft mode
+#                        for `hal0 doctor`.
 
 # shellcheck shell=bash
 
@@ -70,15 +85,86 @@ preflight_python() {
 }
 
 preflight_docker() {
+    # Fast path: docker is on PATH and the daemon answers. Same as before.
     if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
         info "docker: $(docker version --format '{{.Server.Version}}' 2>/dev/null || echo unknown)"
         return 0
     fi
-    warn "docker is not available — slot launches will fail until it is installed"
-    # Soft check — return 0 so preflight_all stays green when the API
-    # can still come up without Docker.  Operators who need Docker
-    # right now will see the warning.
-    return 0
+
+    # Docker is missing or the daemon is unreachable. Two modes:
+    #
+    #   HAL0_DOCKER_REQUIRED=1 (set by install.sh) — try to fix it on apt
+    #     hosts, hard-fail with remediation elsewhere. hal0-openwebui
+    #     and the slot containers genuinely need docker; letting the
+    #     installer finish "successfully" only to have systemd restart-
+    #     loop the unit with status=203/EXEC is worse than refusing to
+    #     proceed (real fallout: LXC 105 burned ~191 restarts before a
+    #     human noticed).
+    #
+    #   Unset (default, e.g. `hal0 doctor`) — keep the legacy soft
+    #     behaviour: warn and return 0 so the rest of the report runs.
+    if [[ "${HAL0_DOCKER_REQUIRED:-0}" != "1" ]]; then
+        warn "docker is not available — slot launches will fail until it is installed"
+        return 0
+    fi
+
+    # ── required mode ───────────────────────────────────────────────────
+    # If the binary is there but the daemon isn't reachable, we don't
+    # try to "fix" it by reinstalling — surfacing a clear "daemon down"
+    # message is more honest than an apt-get that won't help.
+    if command -v docker >/dev/null 2>&1; then
+        err "docker binary present but 'docker info' failed — is the daemon running?"
+        warn "  start it with: systemctl enable --now docker"
+        return 1
+    fi
+
+    # Apt-based host → auto-install docker.io. The package name is
+    # deliberate: Debian/Ubuntu ship the upstream-maintained docker.io
+    # in main, which is what our docs already point operators at. We
+    # don't add Docker Inc.'s third-party repo here — it's a heavier
+    # change that an operator can opt into manually.
+    if command -v apt-get >/dev/null 2>&1; then
+        info "installing docker.io (required for OpenWebUI + ComfyUI containers)"
+        # -q to keep apt's per-line progress chatter out of the spinner-
+        # less preflight phase; -y for non-interactive. We don't pipe to
+        # /dev/null — if the install fails the operator needs to see why.
+        if ! DEBIAN_FRONTEND=noninteractive apt-get install -y -q docker.io; then
+            err "apt-get install docker.io failed — see output above"
+            return 1
+        fi
+        # Enable + start the daemon so the very next step (which may be
+        # `docker pull` for OpenWebUI) actually has something to talk to.
+        if command -v systemctl >/dev/null 2>&1; then
+            systemctl enable --now docker >/dev/null 2>&1 || \
+                warn "could not 'systemctl enable --now docker' — start it manually if the daemon isn't running"
+        fi
+        # Re-probe. If the daemon still isn't reachable (e.g. inside an
+        # unprivileged container) we surface that rather than press on.
+        if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+            info "docker: $(docker version --format '{{.Server.Version}}' 2>/dev/null || echo unknown)"
+            return 0
+        fi
+        err "docker installed but daemon still unreachable — check 'systemctl status docker' and 'journalctl -u docker -n 40'"
+        return 1
+    fi
+
+    # Non-apt host: emit the right one-liner for the package manager we
+    # can see, then hard-fail. Operator runs it, reruns install.sh.
+    err "docker not installed — hal0 requires docker for OpenWebUI + slot containers"
+    if command -v dnf >/dev/null 2>&1; then
+        warn "  install with: sudo dnf install -y docker && sudo systemctl enable --now docker"
+    elif command -v yum >/dev/null 2>&1; then
+        warn "  install with: sudo yum install -y docker && sudo systemctl enable --now docker"
+    elif command -v pacman >/dev/null 2>&1; then
+        warn "  install with: sudo pacman -S --noconfirm docker && sudo systemctl enable --now docker"
+    elif command -v zypper >/dev/null 2>&1; then
+        warn "  install with: sudo zypper install -y docker && sudo systemctl enable --now docker"
+    elif command -v apk >/dev/null 2>&1; then
+        warn "  install with: sudo apk add docker && sudo rc-update add docker default && sudo service docker start"
+    else
+        warn "  no recognised package manager — install docker from https://docs.docker.com/engine/install/ then re-run install.sh"
+    fi
+    return 1
 }
 
 preflight_disk() {
