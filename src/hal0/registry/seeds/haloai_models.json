@@ -658,5 +658,25 @@
     "size_bytes": null,
     "params": null,
     "context_size": null
+  },
+  {
+    "id": "qwen-image-2512-bf16",
+    "owned_by": "comfyui",
+    "upstream": "img",
+    "capability": "image",
+    "backend": "comfyui",
+    "size_bytes": 40861031488,
+    "params": null,
+    "context_size": null
+  },
+  {
+    "id": "qwen-image-2512-fp8",
+    "owned_by": "comfyui",
+    "upstream": "img",
+    "capability": "image",
+    "backend": "comfyui",
+    "size_bytes": 20430679144,
+    "params": null,
+    "context_size": null
   }
 ]

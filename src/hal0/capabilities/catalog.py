@@ -183,6 +183,18 @@ def _backend_variants(entry: Any) -> list[str]:
             if isinstance(b, str) and b and b not in raw:
                 raw.append(b)
 
+    # ── Defaults by entry shape ───────────────────────────────────────────
+    # Curated image entries (the FirstRun image picks) carry no ``backend``
+    # field — :class:`CuratedModel` has no such attribute. Treat the
+    # presence of ``comfyui_subdir`` or ``capability == "image"`` as a
+    # signal to route through ComfyUI, which fan-outs to gpu-vulkan + cpu
+    # via the provider-runtime branch below.
+    if not raw:
+        comfy_subdir = getattr(entry, "comfyui_subdir", "") or ""
+        cap_str = getattr(entry, "capability", "") or ""
+        if comfy_subdir or cap_str == "image":
+            raw.append("comfyui")
+
     out: list[str] = []
     for b in raw:
         low = b.lower()
@@ -298,6 +310,14 @@ def catalogs_by_slot(
 
     Mirrors the capability layout the orchestrator hard-codes — embed has
     two children (embed, rerank), voice has two (stt, tts), img has one.
+
+    The ``chat`` bucket is included so backend-card UIs (notably
+    :file:`ui/src/components/capabilities/NPUBackendCard.vue`) can walk
+    every ``(slot, capability)`` pair when listing NPU-capable models —
+    without this entry chat-on-NPU models would be invisible to the
+    "+ load NPU model" picker (chat lives in the dedicated ``primary``
+    slot, not in a capability slot). Operator selection for chat still
+    flows through the primary slot config, NOT through capability apply.
     """
     return {
         "embed": {
@@ -310,6 +330,9 @@ def catalogs_by_slot(
         },
         "img": {
             "img": models_for_capability("image", registry=registry),
+        },
+        "chat": {
+            "chat": models_for_capability("chat", registry=registry),
         },
     }
 
