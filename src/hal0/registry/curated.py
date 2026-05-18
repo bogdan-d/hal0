@@ -18,6 +18,10 @@ without touching the curated list.
 
 from __future__ import annotations
 
+import json
+from functools import lru_cache
+from pathlib import Path
+
 from pydantic import BaseModel, Field
 
 # ── Schema ─────────────────────────────────────────────────────────────────
@@ -337,9 +341,83 @@ def get_curated(model_id: str) -> CuratedModel | None:
     return CURATED_BY_ID.get(model_id)
 
 
+# ── haloai upstream seed ───────────────────────────────────────────────────
+# The haloai LXC exposes a large /v1/models surface (FastFlowLM NPU
+# models, llamacpp chat, kokoro/vibevoice/moonshine voice, minimax). A
+# frozen snapshot of the curated subset lives at
+# ``seeds/haloai_models.json`` so the UI's Models view and ``hal0 model
+# list`` can show real upstream model ids without hitting the network at
+# import time. Refresh with ``scripts/import_haloai_models.py``.
+
+
+class HaloaiModel(BaseModel):
+    """One upstream-routed model imported from the haloai catalogue.
+
+    Unlike :class:`CuratedModel` (which describes a pullable GGUF/safetensors
+    file with HF coordinates), a HaloaiModel is a route into an existing
+    upstream service. There is no file to download — the id is what the
+    upstream's OpenAI-compatible API answers to.
+    """
+
+    model_config = {"populate_by_name": True, "str_strip_whitespace": True}
+
+    id: str = Field(..., description="OpenAI-compatible model id the upstream answers to.")
+    owned_by: str = Field(..., description="Upstream's owned_by tag (FastFlowLM, llamacpp, …).")
+    upstream: str = Field(default="", description="Logical upstream/slot name (npu, primary, …).")
+    capability: str = Field(
+        default="chat",
+        description="Primary capability: chat | embed | rerank | asr | tts | vision | image.",
+    )
+    backend: str = Field(
+        default="llamacpp",
+        description="Backend runtime: flm | llamacpp | kokoro | moonshine | vibevoice | minimax.",
+    )
+    size_bytes: int | None = Field(default=None, description="On-disk size if reported by upstream.")
+    params: int | None = Field(default=None, description="Parameter count if reported by upstream.")
+    context_size: int | None = Field(default=None, description="Native context window if known.")
+
+
+_HALOAI_SEED_PATH = Path(__file__).parent / "seeds" / "haloai_models.json"
+
+
+@lru_cache(maxsize=1)
+def _load_haloai_seed() -> list[HaloaiModel]:
+    """Read the frozen haloai snapshot from disk. Cached after first call."""
+    if not _HALOAI_SEED_PATH.is_file():
+        return []
+    with _HALOAI_SEED_PATH.open("rb") as f:
+        raw = json.load(f)
+    return [HaloaiModel.model_validate(entry) for entry in raw]
+
+
+def _build_curated() -> list[CuratedModel | HaloaiModel]:
+    """Merge the hand-rolled curated list with the haloai seed.
+
+    Local :data:`CURATED_MODELS` entries win on id collision — their
+    fields are intentionally tuned for the FirstRun wizard's UX and must
+    not be clobbered by a seed refresh.
+    """
+    seen: set[str] = {m.id for m in CURATED_MODELS}
+    merged: list[CuratedModel | HaloaiModel] = list(CURATED_MODELS)
+    for entry in _load_haloai_seed():
+        if entry.id in seen:
+            continue
+        seen.add(entry.id)
+        merged.append(entry)
+    return merged
+
+
+#: Merged catalogue surfaced by ``hal0 model list`` and the UI's Models view.
+#: Built lazily on first access; safe to import at module load time because
+#: no network call is made — the haloai entries come from a frozen JSON seed.
+CURATED: list[CuratedModel | HaloaiModel] = _build_curated()
+
+
 __all__ = [
+    "CURATED",
     "CURATED_BY_ID",
     "CURATED_MODELS",
     "CuratedModel",
+    "HaloaiModel",
     "get_curated",
 ]
