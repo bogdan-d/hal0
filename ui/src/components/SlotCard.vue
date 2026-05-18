@@ -7,8 +7,10 @@
  * with hal0's CSS-variable design tokens — no Tailwind utility soup so the
  * component reads cleanly and respects the global theme.
  */
-import { computed, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { isSlotServing } from '../composables/useSlotStats.js'
+import { api } from '../composables/useApi.js'
+import { useToastsStore } from '../stores/toasts.js'
 
 const props = defineProps({
   slot: { type: Object, required: true },
@@ -19,7 +21,13 @@ const props = defineProps({
   actionLoading: { type: String, default: null },
 })
 
-defineEmits(['action', 'select-model', 'logs', 'edit', 'delete'])
+// `swap` was the interim B2 fallback (parent routed to openEdit). C1 wires
+// the inline popover directly to /api/slots/{name}/swap — emit `swapped` on
+// success so parents that want to refetch can do so without listening to the
+// events ring.
+const emit = defineEmits(['action', 'select-model', 'logs', 'edit', 'delete', 'swapped'])
+
+const toasts = useToastsStore()
 
 // Mirror src/hal0/slots/__init__.py's BUILTIN_SLOTS tuple.  These slots
 // are always present and can be restarted / load / unload / swap-modeled,
@@ -107,6 +115,230 @@ const hardwareTarget = computed(() => {
   return { id: 'unknown', label: backend || provider || 'slot' }
 })
 
+// -----------------------------------------------------------------------------
+// Inline model-swap popover (C1)
+// -----------------------------------------------------------------------------
+// Module-level cache: one fetch per session, refetched lazily every 30s. All
+// SlotCard instances share it so opening five popovers doesn't fire five
+// /api/models requests. Stored at module scope (outside setup) on purpose.
+const MODEL_CACHE = { data: null, ts: 0 }
+const MODEL_TTL_MS = 30_000
+
+async function loadModelsCached() {
+  const now = Date.now()
+  if (MODEL_CACHE.data && (now - MODEL_CACHE.ts) < MODEL_TTL_MS) {
+    return MODEL_CACHE.data
+  }
+  const data = await api('/api/models')
+  MODEL_CACHE.data = Array.isArray(data) ? data : (data?.models || [])
+  MODEL_CACHE.ts = now
+  return MODEL_CACHE.data
+}
+
+// FLM slots multiplex chat/embed/asr — the swap action becomes "edit set"
+// which is out of scope for C1. Hide the inline affordance for them; users
+// edit the model set through the standard Edit modal.
+const isFlmSlot = computed(() => {
+  const b = (props.slot.backend || '').toLowerCase()
+  const p = (props.slot.provider || '').toLowerCase()
+  return b === 'flm' || p === 'flm'
+})
+const swapAvailable = computed(() => !isFlmSlot.value)
+
+const swapOpen = ref(false)
+const swapModels = ref([])
+const swapLoading = ref(false)
+const swapError = ref('')
+const swapSubmitting = ref(false)
+const swapIndex = ref(-1)            // keyboard focus index into filteredModels
+const swapPlacement = ref('below')   // 'below' | 'above'
+const swapPos = ref({ left: 0, top: 0, width: 240 })
+
+const swapTriggerRef = ref(null)
+const swapPopoverRef = ref(null)
+
+const currentModelId = computed(() => {
+  const raw = props.slot.model_id || props.slot.model || props.slot.model_name || ''
+  return typeof raw === 'string' ? raw : (raw?.default ?? '')
+})
+
+const filteredModels = computed(() => {
+  const slotBackend = (props.slot.backend || '').toLowerCase()
+  return (swapModels.value || []).filter((m) => {
+    const backends = Array.isArray(m.backends) ? m.backends.map((b) => String(b).toLowerCase()) : []
+    // Universal-safe: empty backends list means "compatible with anything"
+    // (legacy registry entries pre-A2 migration).
+    if (backends.length === 0) return true
+    if (!slotBackend) return true
+    return backends.includes(slotBackend)
+  })
+})
+
+// VRAM/RAM fit heuristic — mirrors Slots.vue's modelFit so the popover
+// agrees with the create/edit modal. `slot.context_size` is the per-slot ctx
+// from config; `model.size_gb` is approximate weights size. 10% overhead.
+function modelFit(model) {
+  if (!model || model.size_gb == null) return null
+  const reqMb = Number(model.size_gb) * 1024 * 1.1
+  const ctxMb = Number(props.slot.context_size || 0) / 256  // ~256 tok/MB cache rule-of-thumb
+  const totalMb = reqMb + ctxMb
+  // No hardware envelope on the card — use a soft cap so we can flag the
+  // obviously-too-big without false-positives on the merely-large.
+  if (totalMb > 96 * 1024) return false
+  if (totalMb > 64 * 1024) return null
+  return true
+}
+
+function computePosition() {
+  const trigger = swapTriggerRef.value
+  if (!trigger) return
+  const rect = trigger.getBoundingClientRect()
+  const POPOVER_W = Math.max(rect.width, 260)
+  const POPOVER_MAX_H = 280
+  const vh = window.innerHeight
+  const vw = window.innerWidth
+  const spaceBelow = vh - rect.bottom
+  const spaceAbove = rect.top
+  const placeAbove = spaceBelow < 200 && spaceAbove > spaceBelow
+  swapPlacement.value = placeAbove ? 'above' : 'below'
+
+  let left = rect.left
+  // Clamp horizontally so the popover never spills off-screen.
+  if (left + POPOVER_W > vw - 8) left = Math.max(8, vw - POPOVER_W - 8)
+  if (left < 8) left = 8
+
+  const top = placeAbove
+    ? Math.max(8, rect.top - Math.min(POPOVER_MAX_H, spaceAbove) - 6)
+    : rect.bottom + 6
+
+  swapPos.value = { left, top, width: POPOVER_W }
+}
+
+async function openSwap() {
+  if (!swapAvailable.value) return
+  if (swapOpen.value) {
+    closeSwap()
+    return
+  }
+  swapOpen.value = true
+  swapError.value = ''
+  swapIndex.value = -1
+  computePosition()
+  // Listeners for outside-click + resize/scroll reposition.
+  document.addEventListener('mousedown', onDocMouseDown, true)
+  window.addEventListener('resize', onWindowChange, true)
+  window.addEventListener('scroll', onWindowChange, true)
+
+  // Lazy fetch — if cache stale, show stale data immediately then refresh.
+  if (MODEL_CACHE.data) swapModels.value = MODEL_CACHE.data
+  swapLoading.value = true
+  try {
+    swapModels.value = await loadModelsCached()
+  } catch (err) {
+    swapError.value = err?.message || 'failed to load models'
+  } finally {
+    swapLoading.value = false
+  }
+  // Focus first option after popover renders.
+  await nextTick()
+  const first = swapPopoverRef.value?.querySelector('[role="option"]')
+  if (first) {
+    swapIndex.value = 0
+    first.focus()
+  }
+}
+
+function closeSwap() {
+  swapOpen.value = false
+  swapIndex.value = -1
+  document.removeEventListener('mousedown', onDocMouseDown, true)
+  window.removeEventListener('resize', onWindowChange, true)
+  window.removeEventListener('scroll', onWindowChange, true)
+  // Restore focus to the trigger for keyboard users.
+  if (swapTriggerRef.value) swapTriggerRef.value.focus()
+}
+
+function onDocMouseDown(ev) {
+  const trigger = swapTriggerRef.value
+  const pop = swapPopoverRef.value
+  if (trigger && trigger.contains(ev.target)) return
+  if (pop && pop.contains(ev.target)) return
+  closeSwap()
+}
+
+function onWindowChange() {
+  if (!swapOpen.value) return
+  computePosition()
+}
+
+function onPopoverKey(ev) {
+  if (!swapOpen.value) return
+  const opts = swapPopoverRef.value?.querySelectorAll('[role="option"]') || []
+  if (ev.key === 'Escape') {
+    ev.preventDefault()
+    closeSwap()
+  } else if (ev.key === 'ArrowDown') {
+    ev.preventDefault()
+    if (opts.length === 0) return
+    swapIndex.value = Math.min(opts.length - 1, swapIndex.value + 1)
+    opts[swapIndex.value]?.focus()
+  } else if (ev.key === 'ArrowUp') {
+    ev.preventDefault()
+    if (opts.length === 0) return
+    swapIndex.value = Math.max(0, swapIndex.value - 1)
+    opts[swapIndex.value]?.focus()
+  } else if (ev.key === 'Enter') {
+    ev.preventDefault()
+    const m = filteredModels.value[swapIndex.value]
+    if (m) selectSwapModel(m)
+  } else if (ev.key === 'Home') {
+    ev.preventDefault()
+    if (opts.length === 0) return
+    swapIndex.value = 0
+    opts[0]?.focus()
+  } else if (ev.key === 'End') {
+    ev.preventDefault()
+    if (opts.length === 0) return
+    swapIndex.value = opts.length - 1
+    opts[swapIndex.value]?.focus()
+  }
+}
+
+async function selectSwapModel(model) {
+  if (!model || swapSubmitting.value) return
+  const modelId = model.id || model.name || model
+  if (modelId === currentModelId.value) {
+    closeSwap()
+    return
+  }
+  swapSubmitting.value = true
+  try {
+    // Per spec: inline swap does NOT change ctx_size. Body is model_id only.
+    await api(`/api/slots/${encodeURIComponent(props.slot.name)}/swap`, {
+      method: 'POST',
+      body: JSON.stringify({ model_id: modelId }),
+    })
+    toasts.success(`swapped ${props.slot.name} → ${model.name || modelId}`)
+    emit('swapped', { slot: props.slot.name, model_id: modelId })
+    closeSwap()
+  } catch (err) {
+    const msg = err?.message || 'swap failed'
+    toasts.error(`swap failed: ${msg}`)
+    swapError.value = msg
+  } finally {
+    swapSubmitting.value = false
+  }
+}
+
+onBeforeUnmount(() => {
+  // Defensive: tear down global listeners even if the card unmounts mid-open
+  // (e.g. parent re-renders the slots list during a swap).
+  document.removeEventListener('mousedown', onDocMouseDown, true)
+  window.removeEventListener('resize', onWindowChange, true)
+  window.removeEventListener('scroll', onWindowChange, true)
+  if (flashTimer) clearTimeout(flashTimer)
+})
+
 function fmtUptime(s) {
   if (!s || s < 60) return '—'
   const mins = Math.floor(s / 60), hrs = Math.floor(mins / 60), days = Math.floor(hrs / 24)
@@ -178,9 +410,87 @@ const sparkSvg = computed(() => {
         >{{ truncateModel(m) }}</span>
       </template>
       <template v-else>
-        <span class="sc-model mono" :title="modelLabel">{{ modelLabel }}</span>
+        <!-- Non-FLM slots get an inline swap trigger on the model label.
+             FLM slots multiplex multi-model sets — out of scope for C1, the
+             label stays read-only and the affordance is hidden. -->
+        <button
+          v-if="swapAvailable"
+          ref="swapTriggerRef"
+          type="button"
+          class="sc-model sc-model-trigger mono"
+          :title="`Swap model (${modelLabel})`"
+          :aria-haspopup="'listbox'"
+          :aria-expanded="swapOpen"
+          :aria-label="`Swap model for ${slot.name}, current ${modelLabel}`"
+          @click.stop="openSwap"
+        >
+          <span class="sc-model-text">{{ modelLabel }}</span>
+          <svg class="sc-swap-caret" width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" aria-hidden="true">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M6 9l6 6 6-6"/>
+          </svg>
+        </button>
+        <span v-else class="sc-model mono" :title="modelLabel">{{ modelLabel }}</span>
       </template>
     </div>
+
+    <!-- Inline swap popover. Teleported to <body> so dense grid containers
+         and footer z-index stacking don't clip it. Position computed from
+         trigger getBoundingClientRect on open + on resize/scroll. -->
+    <Teleport to="body">
+      <div
+        v-if="swapOpen"
+        ref="swapPopoverRef"
+        class="sc-swap-popover"
+        :class="[`is-${swapPlacement}`]"
+        :style="{ left: swapPos.left + 'px', top: swapPos.top + 'px', minWidth: swapPos.width + 'px' }"
+        role="listbox"
+        :aria-label="`Compatible models for ${slot.name}`"
+        :aria-busy="swapLoading || swapSubmitting"
+        tabindex="-1"
+        @keydown="onPopoverKey"
+      >
+        <div class="sc-swap-head">
+          <span class="sc-swap-title mono">swap model</span>
+          <span class="sc-swap-sub mono">backend: {{ slot.backend || '—' }}</span>
+        </div>
+
+        <div v-if="swapLoading && filteredModels.length === 0" class="sc-swap-empty mono">loading…</div>
+        <div v-else-if="swapError" class="sc-swap-empty sc-swap-err mono">{{ swapError }}</div>
+        <div v-else-if="filteredModels.length === 0" class="sc-swap-empty mono">
+          no compatible models for backend "{{ slot.backend || '—' }}"
+        </div>
+
+        <ul v-else class="sc-swap-list">
+          <li
+            v-for="(m, i) in filteredModels"
+            :key="m.id || m.name || i"
+            role="option"
+            :tabindex="swapOpen ? 0 : -1"
+            class="sc-swap-row"
+            :class="{
+              'is-current': (m.id || m.name) === currentModelId,
+              'is-focused': i === swapIndex,
+              'fit-yes': modelFit(m) === true,
+              'fit-no':  modelFit(m) === false,
+            }"
+            :aria-selected="(m.id || m.name) === currentModelId"
+            :aria-disabled="swapSubmitting"
+            @click="selectSwapModel(m)"
+            @focus="swapIndex = i"
+          >
+            <span class="sc-swap-name mono">{{ m.name || m.id }}</span>
+            <span class="sc-swap-meta mono">
+              <span v-if="m.size_gb != null" class="sc-swap-size">{{ Number(m.size_gb).toFixed(1) }}G</span>
+              <span v-if="modelFit(m) === true"  class="sc-swap-fit fit-yes" title="should fit">fits</span>
+              <span v-else-if="modelFit(m) === false" class="sc-swap-fit fit-no" title="may exceed envelope">large</span>
+            </span>
+            <span v-if="(m.id || m.name) === currentModelId" class="sc-swap-current mono">current</span>
+          </li>
+        </ul>
+
+        <div v-if="swapSubmitting" class="sc-swap-foot mono">swapping…</div>
+      </div>
+    </Teleport>
 
     <div class="sc-meta">
       <span class="sc-chip" :class="`hw-${hardwareTarget.id}`">{{ hardwareTarget.label }}</span>
@@ -473,4 +783,162 @@ const sparkSvg = computed(() => {
 .sc-btn.good:hover:not(:disabled)   { color: var(--color-success); background: color-mix(in oklch, var(--color-success), transparent 90%); }
 .sc-btn.warn:hover:not(:disabled)   { color: var(--color-warning); background: color-mix(in oklch, var(--color-warning), transparent 90%); }
 .sc-btn.danger:hover:not(:disabled) { color: var(--color-danger);  background: color-mix(in oklch, var(--color-danger), transparent 90%); }
+
+/* Inline swap trigger — looks like the static model label but reveals a
+   caret on hover so the affordance is discoverable. Keeps the same font
+   metrics so layout doesn't shift between FLM (read-only) and non-FLM
+   (clickable) slots. */
+.sc-model-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  background: transparent;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--color-fg-muted);
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  text-align: left;
+}
+.sc-model-trigger .sc-model-text {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sc-model-trigger .sc-swap-caret {
+  flex-shrink: 0;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+.sc-model-trigger:hover,
+.sc-model-trigger:focus-visible,
+.sc-model-trigger[aria-expanded="true"] {
+  color: var(--color-fg);
+}
+.sc-model-trigger:hover .sc-swap-caret,
+.sc-model-trigger:focus-visible .sc-swap-caret,
+.sc-model-trigger[aria-expanded="true"] .sc-swap-caret {
+  opacity: 0.8;
+}
+.sc-model-trigger:focus-visible { outline: 1px solid var(--color-accent); outline-offset: 2px; }
+</style>
+
+<!-- Popover is teleported to <body>. Scoped styles travel with the root
+     teleport node via Vue's scope-hash, but to keep things robust the
+     selectors stay inside the scoped block. -->
+<style scoped>
+.sc-swap-popover {
+  position: fixed;
+  z-index: 9999;
+  max-height: 280px;
+  display: flex;
+  flex-direction: column;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border-hi);
+  border-radius: var(--radius-md);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+  overflow: hidden;
+  color: var(--color-fg);
+}
+.sc-swap-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--color-border);
+  background: var(--color-surface-2);
+}
+.sc-swap-title {
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--hal0-accent);
+}
+.sc-swap-sub {
+  font-size: 10px;
+  color: var(--color-fg-faint);
+}
+.sc-swap-list {
+  list-style: none;
+  margin: 0;
+  padding: 4px 0;
+  overflow-y: auto;
+  max-height: 240px;
+}
+.sc-swap-row {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  font-size: 11px;
+  cursor: pointer;
+  color: var(--color-fg-muted);
+  border-left: 2px solid transparent;
+}
+.sc-swap-row:hover,
+.sc-swap-row.is-focused,
+.sc-swap-row:focus-visible {
+  background: var(--color-surface-3);
+  color: var(--color-fg);
+  outline: none;
+  border-left-color: var(--hal0-accent);
+}
+.sc-swap-row.is-current {
+  color: var(--hal0-accent);
+}
+.sc-swap-name {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sc-swap-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10px;
+  color: var(--color-fg-faint);
+}
+.sc-swap-size { font-feature-settings: 'tnum' 1; }
+.sc-swap-fit {
+  padding: 1px 5px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-border);
+}
+.sc-swap-fit.fit-yes {
+  color: var(--color-success);
+  border-color: color-mix(in oklch, var(--color-success), transparent 60%);
+  background: color-mix(in oklch, var(--color-success), transparent 88%);
+}
+.sc-swap-fit.fit-no {
+  color: var(--color-warning);
+  border-color: color-mix(in oklch, var(--color-warning), transparent 60%);
+  background: color-mix(in oklch, var(--color-warning), transparent 88%);
+}
+.sc-swap-current {
+  font-size: 9px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--hal0-accent);
+}
+.sc-swap-empty {
+  padding: 12px 10px;
+  font-size: 11px;
+  color: var(--color-fg-faint);
+  text-align: center;
+}
+.sc-swap-empty.sc-swap-err { color: var(--color-danger); }
+.sc-swap-foot {
+  padding: 4px 10px;
+  border-top: 1px solid var(--color-border);
+  font-size: 10px;
+  color: var(--color-fg-faint);
+  background: var(--color-surface-2);
+}
+.sc-swap-popover.is-above { transform-origin: bottom left; }
+.sc-swap-popover.is-below { transform-origin: top left; }
 </style>
