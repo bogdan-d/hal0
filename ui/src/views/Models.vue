@@ -987,8 +987,8 @@ const QUANTS = ['Q4_K_M', 'Q5_K_M', 'Q8_0', 'F16', 'BF16']
                       <table class="scan-table">
                         <thead>
                           <tr>
+                            <th>Name / ID</th>
                             <th>Path</th>
-                            <th>ID / Name</th>
                             <th>Backends</th>
                             <th>Caps</th>
                             <th>Ctx</th>
@@ -997,11 +997,11 @@ const QUANTS = ['Q4_K_M', 'Q5_K_M', 'Q8_0', 'F16', 'BF16']
                         </thead>
                         <tbody>
                           <tr v-for="(row, idx) in scanRows" :key="row.path">
-                            <td class="mono-cell scan-path" :title="row.path">{{ row.path }}</td>
                             <td>
+                              <input v-model="scanRows[idx].name" class="scan-input scan-name" placeholder="Name" />
                               <input v-model="scanRows[idx].id" class="scan-input mono" />
-                              <input v-model="scanRows[idx].name" class="scan-input" placeholder="Name" />
                             </td>
+                            <td class="mono-cell scan-path" :title="row.path">{{ row.path }}</td>
                             <td>
                               <div class="scan-checks">
                                 <label v-for="b in ALL_BACKENDS" :key="`r${idx}b${b}`" class="check-pill check-pill-sm">
@@ -1655,7 +1655,16 @@ const QUANTS = ['Q4_K_M', 'Q5_K_M', 'Q8_0', 'F16', 'BF16']
   color: var(--color-fg-muted);
 }
 .scan-table tr:last-child td { border-bottom: none; }
-.scan-path { max-width: 240px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.scan-path {
+  max-width: 320px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  direction: rtl;            /* keep the meaningful tail visible on truncation */
+  text-align: left;
+  unicode-bidi: plaintext;
+}
+.scan-name { font-weight: 500; }
 .scan-input {
   width: 100%;
   padding: 3px 6px;
