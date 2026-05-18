@@ -69,13 +69,28 @@ def _is_alias(model_id: str) -> bool:
 
 @router.get("")
 async def list_models(request: Request) -> dict[str, Any]:
-    """Aggregate models from every upstream.  Dashboard reads this."""
+    """Aggregate models from the local registry + every upstream.
+
+    Local registry entries (a real file on disk) win on id collision —
+    the upstream might still advertise the id, but the user has the
+    bytes locally and that's the truth. Each row carries ``installed``
+    so the UI can render an installed/advertised badge.
+    """
+    registry = request.app.state.model_registry
     upstreams = request.app.state.upstreams
     cache = getattr(request.app.state, "model_cache", {})
     now = int(time.time())
     data: list[dict[str, Any]] = []
     seen: set[str] = set()
     filtered = 0
+    for entry in registry.list():
+        dumped = _model_to_dict(entry)
+        dumped["installed"] = True
+        dumped.setdefault("object", "model")
+        dumped.setdefault("created", now)
+        dumped.setdefault("owned_by", "local")
+        data.append(dumped)
+        seen.add(entry.id)
     for u in upstreams.list():
         try:
             ids = cache.get(u.name) or await upstreams.fetch_models(u.name)
@@ -97,6 +112,7 @@ async def list_models(request: Request) -> dict[str, Any]:
                     "created": now,
                     "owned_by": u.name,
                     "upstream": u.name,
+                    "installed": False,
                 }
             )
     return {"models": data, "count": len(data), "filtered_aliases": filtered}

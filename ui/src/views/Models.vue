@@ -488,16 +488,14 @@ const QUANTS = ['Q4_K_M', 'Q5_K_M', 'Q8_0', 'F16', 'BF16']
       </template>
 
       <!-- ── Catalogue ──────────────────────────────────────────────
-           Discovery surface: every model the user *could* run, split
-           by how they'd run it. Pullable rows download into the local
-           registry; upstream rows route to a configured haloai-style
-           service. -->
+           Discovery surface: pullable curated models. The upstream-
+           routed catalogue subsection is hidden until upstream routing
+           is reworked (see PLAN.md follow-up); the endpoint still
+           returns both lists so it can come back later. -->
       <section class="catalogue-section" aria-labelledby="catalogue-title">
         <header class="catalogue-header">
           <h2 id="catalogue-title" class="catalogue-title">Catalogue</h2>
-          <span class="catalogue-counts mono">
-            {{ pullableCatalogue.length }} pullable · {{ upstreamCatalogue.length }} upstream-routed
-          </span>
+          <span class="catalogue-counts mono">{{ pullableCatalogue.length }} pullable</span>
         </header>
 
         <!-- Pullable -->
@@ -531,35 +529,6 @@ const QUANTS = ['Q4_K_M', 'Q5_K_M', 'Q8_0', 'F16', 'BF16']
                   <span v-if="jobFor(entry.id)?.inFlight.value" class="spinner" aria-hidden="true" />
                   {{ jobFor(entry.id)?.inFlight.value ? 'Pulling…' : 'Pull' }}
                 </button>
-              </li>
-            </ul>
-          </Card>
-          <Card v-else><LoadingSkeleton :lines="2" /></Card>
-        </div>
-
-        <!-- Upstream-routed -->
-        <div class="catalogue-group" aria-labelledby="catalogue-upstream-title">
-          <h3 id="catalogue-upstream-title" class="catalogue-subtitle">Upstream-routed</h3>
-          <p class="catalogue-subnote">These models route to an upstream service if one is configured.</p>
-          <Card :padded="false" v-if="upstreamCatalogue.length > 0">
-            <ul class="cat-list">
-              <li
-                v-for="entry in upstreamCatalogue"
-                :key="entry.id"
-                class="cat-row"
-              >
-                <div class="cat-row-main">
-                  <div class="cat-row-title">
-                    <span class="cat-id mono cat-id-strong">{{ entry.id }}</span>
-                  </div>
-                </div>
-                <div class="cat-row-meta">
-                  <span class="cap-chip">{{ entry.capability }}</span>
-                  <span class="hw-chip" :class="`hw-${backendTarget(entry.backend).id}`">
-                    {{ backendTarget(entry.backend).label }}
-                  </span>
-                  <span class="owned-by mono">{{ entry.owned_by }}</span>
-                </div>
               </li>
             </ul>
           </Card>
