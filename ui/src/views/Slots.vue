@@ -15,7 +15,7 @@
  * - `n` key opens New Slot form, Esc closes it.
  */
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { useSystemStore } from '../stores/system.js'
 import { useToastsStore } from '../stores/toasts.js'
 import { useSlotMetrics } from '../composables/useStats.js'
@@ -33,6 +33,7 @@ const BUILTIN_SLOTS = new Set(['primary', 'embed', 'stt', 'tts'])
 const { metrics: slotMetrics, history: slotHistory } = useSlotMetrics(2500)
 
 const route  = useRoute()
+const router = useRouter()
 const system = useSystemStore()
 const toasts = useToastsStore()
 
@@ -52,18 +53,26 @@ const createErrors = ref({})
 const creating = ref(false)
 
 // Edit slot drawer
-const editingSlot = ref(null)
-const editForm    = ref({})
-const editing     = ref(false)
+const editingSlot      = ref(null)
+const editForm         = ref({})
+const editOriginal     = ref({})   // snapshot for change detection
+const editing          = ref(false)
+const showAdvanced     = ref(false) // ▸ Advanced disclosure (Edit modal)
+const ctxSizeDirty     = ref(false) // user manually touched edit ctx_size
+const ctxSizeDirtyNew  = ref(false) // user manually touched create ctx_size
+
+// Restart-required confirm (post-save)
+const pendingRestartSlot = ref(null)
+const restarting         = ref(false)
 
 // Delete confirm
 const deletingSlot = ref(null)
 const deleting     = ref(false)
 
-// Swap model
-const swapSlot  = ref(null)
-const swapModel = ref('')
-const swapping  = ref(false)
+// Fields that require a slot restart to apply
+const RESTART_FIELDS = new Set(['ctx_size', 'n_gpu_layers'])
+// Slot states considered "live" for swap-vs-config dispatch
+const RUNNING_STATES = new Set(['running', 'serving', 'ready'])
 
 // Logs drawer
 const logsSlot    = ref(null)
@@ -147,47 +156,9 @@ async function doLoad(slot) {
   await slotAction(slot.name, 'load', { model })
 }
 
-async function doSwap() {
-  if (!swapSlot.value || !swapModel.value) return
-  const name = swapSlot.value.name
-  const modelId = swapModel.value
-  swapping.value = true
-  try {
-    // Step 1: hot-swap the running container (runtime only).  Body shape
-    // is {model_id} — must match src/hal0/api/routes/slots.py::swap_slot.
-    await api(`/api/slots/${name}/swap`, {
-      method: 'POST',
-      body: JSON.stringify({ model_id: modelId }),
-    })
-
-    // Step 2: persist to /etc/hal0/slots/<name>.toml so the change
-    // survives a restart.  Treated as a soft failure — runtime swap
-    // already succeeded, so we keep the modal closed and warn instead.
-    let persisted = true
-    try {
-      await api(`/api/install/slots/${name}/model`, {
-        method: 'PUT',
-        body: JSON.stringify({ model_id: modelId }),
-      })
-    } catch (persistErr) {
-      persisted = false
-      toasts.warning(
-        `Swapped "${name}" → ${modelId}, but failed to persist: ${persistErr.message}. ` +
-        `Change will revert on next restart.`
-      )
-    }
-    if (persisted) {
-      toasts.success(`Swapped "${name}" → ${modelId} (persisted)`)
-    }
-    swapSlot.value = null
-    swapModel.value = ''
-    await system.fetchStatus()
-  } catch (e) {
-    toasts.error(e.message)
-  } finally {
-    swapping.value = false
-  }
-}
+// Standalone Swap modal removed in B2 — swap is now dispatched from the
+// Edit modal's Save button when only the model changed on a running slot.
+// SlotCard inline swap dropdown (C1) calls /api/slots/{name}/swap directly.
 
 // ── Create slot ────────────────────────────────────────────────────────
 function validateCreate() {
@@ -250,29 +221,186 @@ async function submitCreate() {
 // ── Edit slot ──────────────────────────────────────────────────────────
 function openEdit(slot) {
   editingSlot.value = slot
-  editForm.value = {
-    backend:    slot.backend ?? 'vulkan',
-    model:      slot.model ?? '',
-    ctx_size:   slot.ctx_size ?? 4096,
-    auto_start: slot.auto_start ?? false,
+  const initial = {
+    backend:        slot.backend ?? 'vulkan',
+    model:          slot.model ?? '',
+    ctx_size:       slot.ctx_size ?? 4096,
+    auto_start:     slot.auto_start ?? false,
+    // Advanced — Model
+    n_gpu_layers:   slot.n_gpu_layers ?? -1,
+    rope_freq_base: slot.rope_freq_base ?? 0,
+    // Advanced — Server
+    workers:        slot.workers ?? 1,
+    idle_timeout_s: slot.idle_timeout_s ?? 300,
+    extra_args:     slot.extra_args ?? '',
   }
+  editForm.value = { ...initial }
+  editOriginal.value = { ...initial }
+  showAdvanced.value = false
+  ctxSizeDirty.value = false
+}
+
+// Currently-selected model object for the Edit modal (for hints/preview/defaults)
+const editSelectedModel = computed(
+  () => models.value.find((m) => m.id === editForm.value.model) ?? null,
+)
+const createSelectedModel = computed(
+  () => models.value.find((m) => m.id === createForm.value.model) ?? null,
+)
+
+// Models compatible with a given backend (slot.backend ∈ model.backends).
+// Models without a backends list (legacy/unscanned) are treated as universal
+// to avoid hiding everything on a fresh registry.
+function filterCompatibleModels(backend) {
+  return models.value.filter((m) => {
+    const bs = Array.isArray(m.backends) ? m.backends : []
+    if (bs.length === 0) return true
+    return bs.includes(backend)
+  })
+}
+const compatibleEditModels   = computed(() => filterCompatibleModels(editForm.value.backend))
+const compatibleCreateModels = computed(() => filterCompatibleModels(createForm.value.backend))
+
+// Auto-fill ctx_size on model pick, unless the user has already typed in
+// the ctx_size field (dirty flag). Triggered from the model <select> @change.
+function applyModelDefaults(form, dirtyRef) {
+  const m = models.value.find((x) => x.id === form.model)
+  if (!m) return
+  if (!dirtyRef.value) {
+    form.ctx_size = m.defaults?.context_size ?? 4096
+  }
+}
+function onEditModelChange()   { applyModelDefaults(editForm.value,   ctxSizeDirty) }
+function onCreateModelChange() { applyModelDefaults(createForm.value, ctxSizeDirtyNew) }
+
+// CTA when zero compatible models for the current backend: close the modal
+// and route to /models where the user can register one. B3 will swap this
+// to deep-link the Add modal; until then, the route alone is enough.
+function gotoAddModel() {
+  editingSlot.value = null
+  showCreate.value = false
+  router.push('/models')
+}
+
+// ── Flag merge preview (mirrors src/hal0/launchers/flag_merge.py) ─────
+//
+// Tokenises model-defaults and slot extra_args, lets slot flags overwrite
+// model-default flags by name, except for append-list flags that accept
+// repeats (--lora / --draft-model / --override-kv). Malformed input falls
+// back to dumb concat — same policy as the backend.
+const APPEND_LIST_FLAGS = new Set(['--lora', '--draft-model', '--override-kv'])
+
+function tokenise(s) {
+  if (!s) return []
+  return String(s).trim().split(/\s+/).filter(Boolean)
+}
+function mergeFlagsPreview(modelDefaults, slotExtra) {
+  const modelToks = tokenise(modelDefaults)
+  const slotToks  = tokenise(slotExtra)
+  try {
+    // Collect slot's named flags (skip append-list flags from dedup set).
+    const slotNames = new Set()
+    for (const t of slotToks) {
+      if (t.startsWith('--') && !APPEND_LIST_FLAGS.has(t)) slotNames.add(t)
+    }
+    // Strip matching --flag (value?) pairs from model defaults.
+    const cleanedModel = []
+    let i = 0
+    while (i < modelToks.length) {
+      const tok = modelToks[i]
+      if (tok.startsWith('--') && slotNames.has(tok)) {
+        i++
+        // skip the value if next token isn't another flag
+        if (i < modelToks.length && !modelToks[i].startsWith('--')) i++
+        continue
+      }
+      cleanedModel.push(tok)
+      i++
+    }
+    return [...cleanedModel, ...slotToks].join(' ')
+  } catch {
+    return [...modelToks, ...slotToks].join(' ')
+  }
+}
+const effectiveFlagsPreview = computed(() =>
+  mergeFlagsPreview(
+    editSelectedModel.value?.defaults?.extra_args ?? '',
+    editForm.value.extra_args ?? '',
+  ),
+)
+
+// What changed since openEdit? Returns a set of field names.
+function changedEditFields() {
+  const changed = new Set()
+  for (const k of Object.keys(editForm.value)) {
+    if (editForm.value[k] !== editOriginal.value[k]) changed.add(k)
+  }
+  return changed
 }
 
 async function submitEdit() {
   if (!editingSlot.value) return
   editing.value = true
   try {
-    await api(`/api/slots/${editingSlot.value.name}/config`, {
+    const changed = changedEditFields()
+    const slot = editingSlot.value
+    const isLive = RUNNING_STATES.has(slot.status)
+    const slotName = slot.name
+
+    // Fast path: only `model` changed AND the slot is live → /swap.
+    // No config rewrite needed; swap already updates the running container
+    // and the model field gets re-read on next config load.
+    if (changed.size === 1 && changed.has('model') && isLive && editForm.value.model) {
+      await api(`/api/slots/${slotName}/swap`, {
+        method: 'POST',
+        body: JSON.stringify({ model_id: editForm.value.model }),
+      })
+      toasts.success(`Swapped "${slotName}" → ${editForm.value.model}`)
+      editingSlot.value = null
+      await system.fetchStatus()
+      return
+    }
+
+    // Slow path: PUT full config. Backend shallow-merges flat keys into
+    // sectioned schema (verified against PUT /api/slots/{name}/config).
+    if (changed.size === 0) {
+      editingSlot.value = null
+      return
+    }
+    await api(`/api/slots/${slotName}/config`, {
       method: 'PUT',
       body: JSON.stringify(editForm.value),
     })
-    toasts.success(`Slot "${editingSlot.value.name}" updated`)
+    toasts.success(`Slot "${slotName}" updated`)
+
+    // Restart prompt: only when restart-required fields changed AND the
+    // slot is live. Otherwise the new config takes effect on next load.
+    const restartNeeded = [...changed].some((f) => RESTART_FIELDS.has(f))
+    if (restartNeeded && isLive) {
+      pendingRestartSlot.value = slot
+    }
     editingSlot.value = null
     await system.fetchStatus()
   } catch (e) {
     toasts.error(e.message)
   } finally {
     editing.value = false
+  }
+}
+
+async function confirmRestart() {
+  if (!pendingRestartSlot.value) return
+  restarting.value = true
+  const name = pendingRestartSlot.value.name
+  try {
+    await api(`/api/slots/${name}/restart`, { method: 'POST' })
+    toasts.success(`Restart "${name}" queued`)
+    pendingRestartSlot.value = null
+    await system.fetchStatus()
+  } catch (e) {
+    toasts.error(`restart ${name}: ${e.message}`)
+  } finally {
+    restarting.value = false
   }
 }
 
@@ -333,7 +461,7 @@ function handleKey(e) {
     if (showCreate.value) { showCreate.value = false }
     else if (editingSlot.value) { editingSlot.value = null }
     else if (logsSlot.value) { closeLogs() }
-    else if (swapSlot.value) { swapSlot.value = null }
+    else if (pendingRestartSlot.value) { pendingRestartSlot.value = null }
   }
 }
 
@@ -496,6 +624,7 @@ const SLOT_TYPES = ['llama-server', 'flm', 'moonshine', 'kokoro']
             @action="(a) => a === 'load' ? doLoad(slot) : slotAction(slot.name, a)"
             @logs="openLogs(slot)"
             @edit="openEdit(slot)"
+            @swap="openEdit(slot)"
             @delete="deletingSlot = slot"
           />
         </div>
@@ -580,15 +709,10 @@ const SLOT_TYPES = ['llama-server', 'flm', 'moonshine', 'kokoro']
                   </svg>
                   Restart
                 </button>
-                <button
-                  class="btn-act btn-sm"
-                  type="button"
-                  :disabled="!!actionBusy[slot.name]"
-                  @click="() => { swapSlot = slot; swapModel = slot.model ?? '' }"
-                  :title="`Swap model in slot ${slot.name}`"
-                >
-                  Swap
-                </button>
+                <!-- Swap button removed in B2 — model swap is dispatched
+                     from the Edit modal's Save when only the model changed
+                     on a running slot. C1 will add an inline dropdown to
+                     SlotCard. -->
                 <button
                   class="btn-act btn-sm btn-danger-ghost"
                   type="button"
@@ -682,24 +806,33 @@ const SLOT_TYPES = ['llama-server', 'flm', 'moonshine', 'kokoro']
                 </select>
               </div>
 
-              <!-- Model (hardware-aware) -->
+              <!-- Model (filtered by backend, hardware-aware) -->
               <div class="field">
                 <label class="field-label" for="slot-model">Initial model</label>
-                <select id="slot-model" v-model="createForm.model" class="field-input">
-                  <option value="">None (load later)</option>
-                  <option v-for="m in models" :key="m.id" :value="m.id">
-                    {{ m.name ?? m.id }}
-                    {{ m.size_gb ? `— ${m.size_gb}GB` : '' }}
-                    {{ modelFit(m) === true ? '✓ fits' : modelFit(m) === false ? '✗ may not fit' : '' }}
-                  </option>
-                </select>
-                <p v-if="availMemMb" class="field-hint">{{ (availMemMb / 1024).toFixed(1) }}GB available. ✓ = fits, ✗ = may exceed memory.</p>
+                <template v-if="compatibleCreateModels.length === 0">
+                  <div class="empty-models">
+                    <p class="empty-models-msg">No models compatible with backend <code class="mono">{{ createForm.backend }}</code>.</p>
+                    <button type="button" class="btn-ghost btn-sm" @click="gotoAddModel">Add a model →</button>
+                  </div>
+                </template>
+                <template v-else>
+                  <select id="slot-model" v-model="createForm.model" class="field-input" @change="onCreateModelChange">
+                    <option value="">None (load later)</option>
+                    <option v-for="m in compatibleCreateModels" :key="m.id" :value="m.id">
+                      {{ m.name ?? m.id }}
+                      {{ m.size_gb ? `— ${m.size_gb}GB` : '' }}
+                      {{ modelFit(m) === true ? '✓ fits' : modelFit(m) === false ? '✗ may not fit' : '' }}
+                    </option>
+                  </select>
+                  <p v-if="availMemMb" class="field-hint">{{ (availMemMb / 1024).toFixed(1) }}GB available. ✓ = fits, ✗ = may exceed memory.</p>
+                </template>
               </div>
 
               <!-- Context size -->
               <div class="field">
                 <label class="field-label" for="slot-ctx">Context size (tokens)</label>
-                <input id="slot-ctx" v-model.number="createForm.ctx_size" type="number" min="256" max="131072" step="512" class="field-input" :class="{ 'field-error': createErrors.ctx_size }" />
+                <input id="slot-ctx" v-model.number="createForm.ctx_size" @input="ctxSizeDirtyNew = true" type="number" min="256" max="131072" step="512" class="field-input" :class="{ 'field-error': createErrors.ctx_size }" />
+                <p v-if="createSelectedModel?.metadata?.context_length" class="field-hint">max {{ createSelectedModel.metadata.context_length }}</p>
                 <p v-if="createErrors.ctx_size" class="field-err">{{ createErrors.ctx_size }}</p>
               </div>
 
@@ -741,30 +874,114 @@ const SLOT_TYPES = ['llama-server', 'flm', 'moonshine', 'kokoro']
               </button>
             </div>
             <div class="modal-body">
+              <!-- Read-only provider + port summary -->
+              <div class="readonly-row">
+                <div class="ro-cell">
+                  <span class="ro-label">Provider</span>
+                  <span class="ro-value mono">{{ editingSlot.type ?? '—' }}</span>
+                </div>
+                <div class="ro-cell">
+                  <span class="ro-label">
+                    Port
+                    <span class="restart-icon" title="Restart required to apply">⟳</span>
+                  </span>
+                  <span class="ro-value mono">{{ editingSlot.port ?? '—' }}</span>
+                </div>
+              </div>
+
+              <!-- Backend -->
               <div class="field">
                 <label class="field-label" for="edit-backend">Backend</label>
                 <select id="edit-backend" v-model="editForm.backend" class="field-input">
                   <option v-for="b in BACKENDS" :key="b" :value="b">{{ b }}</option>
                 </select>
               </div>
+
+              <!-- Model (filtered by backend) -->
               <div class="field">
                 <label class="field-label" for="edit-model">Model</label>
-                <select id="edit-model" v-model="editForm.model" class="field-input">
-                  <option value="">None</option>
-                  <option v-for="m in models" :key="m.id" :value="m.id">
-                    {{ m.name ?? m.id }}{{ m.size_gb ? ` — ${m.size_gb}GB` : '' }} {{ modelFitLabel(m) }}
-                  </option>
-                </select>
+                <template v-if="compatibleEditModels.length === 0">
+                  <div class="empty-models">
+                    <p class="empty-models-msg">No models compatible with backend <code class="mono">{{ editForm.backend }}</code>.</p>
+                    <button type="button" class="btn-ghost btn-sm" @click="gotoAddModel">Add a model →</button>
+                  </div>
+                </template>
+                <template v-else>
+                  <select id="edit-model" v-model="editForm.model" class="field-input" @change="onEditModelChange">
+                    <option value="">None</option>
+                    <option v-for="m in compatibleEditModels" :key="m.id" :value="m.id">
+                      {{ m.name ?? m.id }}{{ m.size_gb ? ` — ${m.size_gb}GB` : '' }} {{ modelFitLabel(m) }}
+                    </option>
+                  </select>
+                </template>
               </div>
+
+              <!-- Context size -->
               <div class="field">
-                <label class="field-label" for="edit-ctx">Context size (tokens)</label>
-                <input id="edit-ctx" v-model.number="editForm.ctx_size" type="number" min="256" max="131072" step="512" class="field-input" />
+                <label class="field-label" for="edit-ctx">
+                  Context size (tokens)
+                  <span class="restart-icon" title="Restart required to apply">⟳</span>
+                </label>
+                <input id="edit-ctx" v-model.number="editForm.ctx_size" @input="ctxSizeDirty = true" type="number" min="256" max="131072" step="512" class="field-input" />
+                <p v-if="editSelectedModel?.metadata?.context_length" class="field-hint">max {{ editSelectedModel.metadata.context_length }}</p>
               </div>
+
               <label class="field-check">
                 <input type="checkbox" v-model="editForm.auto_start" />
                 Auto-start
               </label>
-              <p class="field-hint">Changes take effect on next load/restart.</p>
+
+              <!-- ── Advanced disclosure ──────────────────────── -->
+              <button
+                type="button"
+                class="adv-toggle"
+                :aria-expanded="showAdvanced"
+                @click="showAdvanced = !showAdvanced"
+              >
+                <span class="adv-caret" :class="{ 'is-open': showAdvanced }">▸</span>
+                Advanced
+              </button>
+
+              <div v-if="showAdvanced" class="adv-body">
+                <h3 class="adv-group">Model</h3>
+                <div class="field">
+                  <label class="field-label" for="edit-ngl">
+                    n_gpu_layers
+                    <span class="restart-icon" title="Restart required to apply">⟳</span>
+                  </label>
+                  <input id="edit-ngl" v-model.number="editForm.n_gpu_layers" type="number" min="-1" step="1" class="field-input" />
+                  <p class="field-hint">-1 = offload all layers</p>
+                </div>
+                <div class="field">
+                  <label class="field-label" for="edit-rope">rope_freq_base</label>
+                  <input id="edit-rope" v-model.number="editForm.rope_freq_base" type="number" min="0" step="1" class="field-input" />
+                  <p class="field-hint">0 = use model default</p>
+                </div>
+
+                <h3 class="adv-group">Server</h3>
+                <div class="field">
+                  <label class="field-label" for="edit-workers">workers</label>
+                  <input id="edit-workers" v-model.number="editForm.workers" type="number" min="1" step="1" class="field-input" />
+                </div>
+                <div class="field">
+                  <label class="field-label" for="edit-idle">idle_timeout_s</label>
+                  <input id="edit-idle" v-model.number="editForm.idle_timeout_s" type="number" min="0" step="30" class="field-input" />
+                  <p class="field-hint">0 = disable idle unload</p>
+                </div>
+                <div class="field">
+                  <label class="field-label" for="edit-extra">extra_args</label>
+                  <textarea id="edit-extra" v-model="editForm.extra_args" rows="2" class="field-input mono" placeholder="--threads 4 --batch-size 512"></textarea>
+                </div>
+
+                <!-- Effective flags preview -->
+                <div class="field">
+                  <label class="field-label">Effective flags (preview)</label>
+                  <textarea readonly rows="2" class="field-input mono field-readonly" :value="effectiveFlagsPreview" aria-label="Merged launcher flags"></textarea>
+                  <p class="field-hint">Slot flags override model defaults on collision; <code class="mono">--lora</code> / <code class="mono">--draft-model</code> / <code class="mono">--override-kv</code> append.</p>
+                </div>
+              </div>
+
+              <p class="field-hint">Changes take effect on next load/restart unless flagged ⟳.</p>
             </div>
             <div class="modal-footer">
               <button
@@ -787,44 +1004,17 @@ const SLOT_TYPES = ['llama-server', 'flm', 'moonshine', 'kokoro']
       </Transition>
     </Teleport>
 
-    <!-- ── Swap model modal ───────────────────────────────────── -->
-    <Teleport to="body">
-      <Transition name="fade">
-        <div v-if="swapSlot" class="modal-overlay" @click.self="swapSlot = null">
-          <div class="modal-box modal-sm" role="dialog" aria-modal="true" aria-labelledby="swap-title">
-            <div class="modal-header">
-              <h2 id="swap-title" class="modal-title">Swap model: {{ swapSlot?.name }}</h2>
-              <button class="modal-close" type="button" @click="swapSlot = null" aria-label="Close">
-                <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>
-              </button>
-            </div>
-            <div class="modal-body">
-              <div class="field">
-                <label class="field-label" for="swap-model">New model</label>
-                <select id="swap-model" v-model="swapModel" class="field-input">
-                  <option value="">Select model…</option>
-                  <option v-for="m in models" :key="m.id" :value="m.id">
-                    {{ m.name ?? m.id }}{{ m.size_gb ? ` — ${m.size_gb}GB` : '' }} {{ modelFitLabel(m) }}
-                  </option>
-                </select>
-              </div>
-              <p class="field-hint">
-                The slot will reload with the new model — in-flight requests complete first.
-                The change is also written to <code class="mono">/etc/hal0/slots/{{ swapSlot?.name }}.toml</code>
-                so it survives a restart.
-              </p>
-            </div>
-            <div class="modal-footer">
-              <button class="btn-ghost" type="button" @click="swapSlot = null" :disabled="swapping">Cancel</button>
-              <button class="btn-primary" type="button" :disabled="!swapModel || swapping" @click="doSwap">
-                <span v-if="swapping" class="spinner" aria-hidden="true" />
-                {{ swapping ? 'Swapping…' : 'Swap model' }}
-              </button>
-            </div>
-          </div>
-        </div>
-      </Transition>
-    </Teleport>
+    <!-- ── Restart-required confirm ───────────────────────────── -->
+    <ConfirmDialog
+      :open="!!pendingRestartSlot"
+      :title="`Restart slot &quot;${pendingRestartSlot?.name ?? ''}&quot;?`"
+      message="Some changes you made require a restart to take effect (ctx_size, n_gpu_layers, port). Restart now to apply them?"
+      confirm-label="Restart slot"
+      :loading="restarting"
+      @update:open="(v) => { if (!v) pendingRestartSlot = null }"
+      @confirm="confirmRestart"
+      @cancel="pendingRestartSlot = null"
+    />
 
     <!-- ── Logs drawer ────────────────────────────────────────── -->
     <Teleport to="body">
@@ -1068,6 +1258,74 @@ const SLOT_TYPES = ['llama-server', 'flm', 'moonshine', 'kokoro']
   font-size: 13px; color: var(--color-fg-muted); cursor: pointer;
 }
 .field-check input { cursor: pointer; }
+
+.mono { font-family: var(--font-mono); }
+.field-readonly {
+  opacity: 0.85;
+  background: var(--color-surface-3, var(--color-surface-2));
+  cursor: default;
+}
+
+/* ── Empty-state CTA (zero compatible models) ─────────────── */
+.empty-models {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 10px 12px;
+  border: 1px dashed var(--color-border);
+  border-radius: var(--radius);
+  background: var(--color-surface-2);
+}
+.empty-models-msg { font-size: 12px; color: var(--color-fg-faint); margin: 0; }
+
+/* ── Read-only provider + port summary ────────────────────── */
+.readonly-row {
+  display: flex; gap: 16px; padding: 8px 10px;
+  background: var(--color-surface-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+}
+.ro-cell { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.ro-label { font-size: 10.5px; font-weight: 600; color: var(--color-fg-faint); text-transform: uppercase; letter-spacing: 0.04em; display: flex; align-items: center; gap: 4px; }
+.ro-value { font-size: 13px; color: var(--color-fg); }
+
+/* ── Restart-required marker ─────────────────────────────── */
+.restart-icon {
+  display: inline-block;
+  margin-left: 4px;
+  font-size: 11px;
+  color: var(--color-warning, #d97706);
+  cursor: help;
+  line-height: 1;
+}
+
+/* ── Advanced disclosure ──────────────────────────────────── */
+.adv-toggle {
+  display: flex; align-items: center; gap: 6px;
+  padding: 8px 0;
+  background: transparent; border: none;
+  color: var(--color-fg-muted);
+  font-size: 12.5px; font-weight: 600;
+  cursor: pointer;
+  text-align: left;
+}
+.adv-toggle:hover { color: var(--color-fg); }
+.adv-caret {
+  display: inline-block; transition: transform 0.15s;
+  font-size: 10px; color: var(--color-fg-faint);
+}
+.adv-caret.is-open { transform: rotate(90deg); }
+.adv-body {
+  display: flex; flex-direction: column; gap: 14px;
+  padding: 12px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  background: var(--color-surface-2);
+}
+.adv-group {
+  font-size: 11px; font-weight: 700;
+  color: var(--color-fg-faint);
+  text-transform: uppercase; letter-spacing: 0.06em;
+  margin: 0;
+}
 
 /* ── Logs drawer ──────────────────────────────────────────────── */
 .logs-box {
