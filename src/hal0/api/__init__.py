@@ -22,6 +22,9 @@ from hal0.api.routes import (
     config as config_routes,
 )
 from hal0.api.routes import (
+    events as events_routes,
+)
+from hal0.api.routes import (
     hardware,
     health,
     images,
@@ -36,6 +39,7 @@ from hal0.api.routes import (
 )
 from hal0.config.loader import ConfigParseError, load_upstreams_config
 from hal0.dispatcher.router import Dispatcher
+from hal0.events import EventBus
 from hal0.hardware.probe import HardwareProbe
 from hal0.registry.store import ModelRegistry
 from hal0.slots.manager import SlotManager
@@ -205,7 +209,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     # SlotManager owns slot state.  Built before Dispatcher so it can be
     # threaded in and forward() can flip slots into SERVING per request.
-    slot_manager = SlotManager()
+    # Construct the event bus first so the SlotManager can side-channel
+    # every transition through it — the footer subscribes to /api/events.
+    event_bus = EventBus()
+    slot_manager = SlotManager(event_bus=event_bus)
 
     dispatcher = Dispatcher(
         upstream_registry=upstreams,
@@ -240,6 +247,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # and status routes snapshot ``as_dict()`` rather than hold the
     # dataclass across event-loop ticks.
     app.state.model_pull_jobs = {}
+    # Dashboard footer event bus. Constructed above (so SlotManager could
+    # be wired with the same instance); published on app.state here so
+    # request handlers can reach it via ``request.app.state.events``.
+    app.state.events = event_bus
+    await event_bus.emit(
+        "system.restart",
+        "info",
+        "system",
+        f"hal0 {__version__} starting",
+        data={"version": __version__},
+    )
     # /api/upstreams hands the dashboard the cached model list so the
     # "models advertised" column reflects live state without an extra
     # round trip per upstream.
@@ -355,6 +373,11 @@ def create_app() -> FastAPI:
     # the rest is declared by absence rather than by allowlist.
     app.include_router(health.router, prefix="/api", tags=["health"])
     app.include_router(config_routes.router, prefix="/api/config", tags=["config"])
+
+    # Dashboard footer event surface — read-only, public for the same
+    # reason as /api/status: the footer renders during first-run before
+    # any credential exists. No mutating endpoints live on this router.
+    app.include_router(events_routes.router, prefix="/api/events", tags=["events"])
 
     # Image cache — generated PNGs from /v1/images/generations.  Admin
     # auth gate: cached PNGs live at predictable /api/images/cache/<uuid>
