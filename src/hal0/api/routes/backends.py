@@ -101,33 +101,46 @@ def _mem_totals_for_backend(backend_id: str) -> tuple[int, int]:
     return 0, 0
 
 
+_BACKEND_CANONICAL = {
+    "vulkan": "gpu-vulkan",
+    "rocm": "gpu-rocm",
+    "flm": "npu",
+    "kokoro": "gpu-vulkan",
+    "moonshine": "gpu-vulkan",
+    "cpu": "cpu",
+}
+
+
 async def _loaded_children_for_backend(
     backend_id: str, slot_manager: SlotManagerDep
 ) -> list[dict[str, Any]]:
     """Return the children currently loaded on this backend.
 
-    Walks every (slot, child) pair, asks SlotManager for a live
-    snapshot, and surfaces the ones whose ``backend`` (translated via
-    the catalog mapping) matches ``backend_id`` and are in a live state.
+    Two passes:
+
+      1. Walk every (capability slot, child) pair in ``_CHILD_TO_SLOT``
+         and surface the ones whose backend matches. These rows carry
+         ``source="capability"`` so the UI knows they're managed via the
+         capability picker (no × control).
+
+      2. Walk every other slot (e.g. ``primary``, ad-hoc NPU loads from
+         the backend card) and surface the ones whose backend matches.
+         These rows carry ``source="slot"`` — direct loads the operator
+         created from the NPU card and can unload from there.
     """
     out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    # Pass 1: capability-mapped slots.
     for (slot, child), slot_name in _CHILD_TO_SLOT.items():
+        seen.add(slot_name)
         try:
             snap = await slot_manager.status(slot_name)
         except Exception:
             continue
-        # Only live slots count toward "loaded".
         if snap.state.value in {"offline", "error", "unloading"}:
             continue
-        slot_backend = snap.backend or ""
-        canonical = {
-            "vulkan": "gpu-vulkan",
-            "rocm": "gpu-rocm",
-            "flm": "npu",
-            "kokoro": "gpu-vulkan",
-            "moonshine": "gpu-vulkan",
-            "cpu": "cpu",
-        }.get(slot_backend, slot_backend)
+        canonical = _BACKEND_CANONICAL.get(snap.backend or "", snap.backend or "")
         if canonical != backend_id:
             continue
         size_mb = 0
@@ -138,8 +151,41 @@ async def _loaded_children_for_backend(
             {
                 "slot": slot,
                 "child": child,
+                "slotName": slot_name,
                 "modelId": snap.model_id or "",
                 "sizeMb": size_mb,
+                "source": "capability",
+            }
+        )
+
+    # Pass 2: any other live slot (direct loads, primary, etc.) whose
+    # backend matches. Lets the NPU backend card see ad-hoc FLM slots
+    # created via POST /api/slots so its "Loaded on NPU" list stays
+    # authoritative regardless of how the slot was created.
+    try:
+        all_slots = await slot_manager.list()
+    except Exception:
+        all_slots = []
+    for snap in all_slots:
+        if snap.name in seen:
+            continue
+        if snap.state.value in {"offline", "error", "unloading"}:
+            continue
+        canonical = _BACKEND_CANONICAL.get(snap.backend or "", snap.backend or "")
+        if canonical != backend_id:
+            continue
+        size_mb = 0
+        meta = snap.metadata or {}
+        if isinstance(meta.get("size_mb"), int):
+            size_mb = int(meta["size_mb"])
+        out.append(
+            {
+                "slot": snap.name,
+                "child": snap.name,
+                "slotName": snap.name,
+                "modelId": snap.model_id or "",
+                "sizeMb": size_mb,
+                "source": "slot",
             }
         )
     return out

@@ -8,10 +8,11 @@
  *      The "Loaded on NPU" list and memory bar both read from the live
  *      `{ loaded, memUsedMb, memTotalMb, totalReqPerSec }` snapshot.
  *
- *   2. Operator affordance: "+ load NPU model" (preview only). Lets the
- *      operator queue an extra model client-side; v1.1 will wire this to
- *      a backend endpoint. Local `extras` ref stays in this component on
- *      purpose — it's UI scratch state, not capability-store state.
+ *   2. Operator affordance: "+ load NPU model". Posts a fresh slot to
+ *      /api/slots with backend=flm + provider=flm, then loads it. The
+ *      live poll on /api/backends/npu picks up the new slot on its next
+ *      tick and renders it in "Loaded on NPU" with source="slot". The ×
+ *      control on those rows unloads + deletes the slot.
  *
  * Long-term home for this card is the Hardware view (as one of a row of
  * backend cards). Surfaced here next to the capability cards because it
@@ -19,14 +20,17 @@
  */
 import { computed, ref } from 'vue'
 import { useCapabilities, useBackend } from '../../composables/useCapabilities.js'
+import { api } from '../../composables/useApi.js'
+import { useToastsStore } from '../../stores/toasts.js'
 
 const cap = useCapabilities()
-const { data: npu, error: npuError } = useBackend('npu')
+const { data: npu, error: npuError, refresh: refreshNpu } = useBackend('npu')
+const toasts = useToastsStore()
 
 const showAdvanced = ref(false)
 const showAdd = ref(false)
 const addPick = ref('')
-const extras = ref([])  // [{ capability, modelId, size_gb }] — preview-only, see header
+const busy = ref(false)  // disables add/remove buttons while a mutation is in-flight
 
 // Static fallback while /api/backends/npu hasn't responded yet — keeps
 // the card from flickering empty on first paint.
@@ -61,11 +65,11 @@ const npuModels = computed(() => {
   return out
 })
 
-// IDs already on the live "loaded" list or claimed by a local extra.
+// IDs already on the live "loaded" list. Used to gray out / hide picker
+// options for models that are already serving on the NPU.
 const claimedIds = computed(() => {
   const set = new Set()
   for (const item of snap.value.loaded ?? []) set.add(item.modelId)
-  for (const e of extras.value) set.add(e.modelId)
   return set
 })
 
@@ -73,29 +77,20 @@ const addOptions = computed(() =>
   npuModels.value.filter((m) => !claimedIds.value.has(m.id)),
 )
 
-// Combined "serving" list — live backend `loaded` + locally-added extras.
-// `path` is the canonical "{slot}.{child}" tag used to render the
-// capability prefix in the row.
-const serving = computed(() => {
-  const live = (snap.value.loaded ?? []).map((c) => ({
+// "Serving" list — live backend `loaded`, with `source` lifted from the
+// backend response (capability vs slot) so the × control only shows on
+// direct loads the operator can actually unload from this card.
+const serving = computed(() =>
+  (snap.value.loaded ?? []).map((c) => ({
     path: `${c.slot}.${c.child}`,
     modelId: c.modelId,
-    source: 'slot',
+    source: c.source || (c.slotName ? 'slot' : 'capability'),
     sizeMb: c.sizeMb,
-  }))
-  const extra = extras.value.map((e) => ({
-    path: `npu.${e.capability}`,
-    modelId: e.modelId,
-    source: 'extra',
-    sizeMb: Math.round((e.size_gb || 0) * 1024),
-  }))
-  return [...live, ...extra]
-})
-
-const extraMemMb = computed(() =>
-  extras.value.reduce((n, e) => n + Math.round((e.size_gb || 0) * 1024), 0),
+    slotName: c.slotName || c.slot,
+  })),
 )
-const totalUsedMb = computed(() => (snap.value.memUsedMb || 0) + extraMemMb.value)
+
+const totalUsedMb = computed(() => snap.value.memUsedMb || 0)
 const memPct = computed(() => {
   const tot = snap.value.memTotalMb || 0
   if (!tot) return 0
@@ -105,20 +100,94 @@ const memWarn = computed(() => memPct.value >= 85)
 
 function fmtGb(mb) { return ((mb || 0) / 1024).toFixed(1) }
 
-function addExtra() {
-  if (!addPick.value) return
+// Slugify a model id into a safe slot name. Slot names must be filename-
+// safe (used as /etc/hal0/slots/<name>.toml). Prefix with "npu-" so the
+// origin of the slot is obvious in the slots list.
+function slotNameFor(modelId) {
+  const slug = String(modelId)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 48)
+  return `npu-${slug || 'model'}`
+}
+
+// Pick the next free port in 8081-8099, skipping anything the current
+// snapshot already shows. Best-effort — the backend re-validates and
+// will 4xx on collision.
+function nextFreePort(usedPorts) {
+  for (let p = 8082; p <= 8099; p++) {
+    if (!usedPorts.has(p)) return p
+  }
+  return 8082
+}
+
+async function addExtra() {
+  if (!addPick.value || busy.value) return
   const m = npuModels.value.find((x) => x.id === addPick.value)
   if (!m) return
-  extras.value.push({
-    capability: m.capability,
-    modelId: m.id,
-    size_gb: m.size_gb,
-  })
-  addPick.value = ''
-  showAdd.value = false
+
+  busy.value = true
+  try {
+    // Build a port-avoid set from the current snapshot's loaded list.
+    // We don't have ports here, so the only collision avoidance is
+    // "different from the orchestrator-default ports". Backend will
+    // re-validate on create().
+    const usedPorts = new Set()
+    const slotName = slotNameFor(m.id)
+    const port = nextFreePort(usedPorts)
+
+    const body = {
+      name: slotName,
+      port,
+      backend: 'flm',
+      provider: 'flm',
+      enabled: true,
+      model: { default: m.id },
+    }
+    await api('/api/slots', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    })
+    // Slot exists but is OFFLINE — kick it into load with the chosen model.
+    await api(`/api/slots/${encodeURIComponent(slotName)}/load`, {
+      method: 'POST',
+      body: JSON.stringify({ model_id: m.id }),
+    })
+    toasts.success(`Loading ${m.id} on NPU…`)
+    addPick.value = ''
+    showAdd.value = false
+    // Refresh so the new slot appears without waiting for the next 5s poll.
+    await refreshNpu()
+  } catch (err) {
+    toasts.error(`load failed: ${err.message ?? err}`)
+  } finally {
+    busy.value = false
+  }
 }
-function removeExtra(idx) {
-  extras.value.splice(idx, 1)
+
+async function removeExtra(item) {
+  if (!item?.slotName || busy.value) return
+  busy.value = true
+  try {
+    // Best-effort unload (no-op if already offline), then delete.
+    try {
+      await api(`/api/slots/${encodeURIComponent(item.slotName)}/unload`, {
+        method: 'POST',
+      })
+    } catch {
+      // Tolerate unload failure — the slot may already be offline.
+    }
+    await api(`/api/slots/${encodeURIComponent(item.slotName)}`, {
+      method: 'DELETE',
+    })
+    toasts.success(`Unloaded ${item.modelId}`)
+    await refreshNpu()
+  } catch (err) {
+    toasts.error(`unload failed: ${err.message ?? err}`)
+  } finally {
+    busy.value = false
+  }
 }
 
 // Group add-options by the upstream capability bucket. The
@@ -170,21 +239,22 @@ const addOptionsGrouped = computed(() => {
         </span>
       </div>
       <ul class="bc-serving-list">
-        <li v-for="(item, i) in serving" :key="item.path + ':' + item.modelId">
+        <li v-for="item in serving" :key="item.path + ':' + item.modelId">
           <span class="bc-ch-left">
             <span class="bc-ch-cap">{{ item.path.split('.')[1] }}</span>
             <span class="bc-ch-model mono">{{ item.modelId }}</span>
           </span>
           <span class="bc-ch-right">
             <span class="bc-ch-source" :data-source="item.source">
-              {{ item.source === 'slot' ? item.path.split('.')[0] : 'preview' }}
+              {{ item.source === 'capability' ? item.path.split('.')[0] : 'slot' }}
             </span>
             <button
-              v-if="item.source === 'extra'"
+              v-if="item.source === 'slot'"
               type="button"
               class="bc-ch-x"
+              :disabled="busy"
               :aria-label="`Unload ${item.modelId}`"
-              @click="removeExtra(i - serving.filter(s => s.source === 'slot').length)"
+              @click="removeExtra(item)"
             >×</button>
           </span>
         </li>
@@ -199,12 +269,9 @@ const addOptionsGrouped = computed(() => {
           <button
             class="bc-add-btn"
             type="button"
-            :disabled="addOptions.length === 0"
+            :disabled="addOptions.length === 0 || busy"
             @click="showAdd = true"
           >+ load NPU model</button>
-          <span class="bc-add-hint mono" title="local UI scratch — not yet wired to the backend">
-            preview only
-          </span>
           <span v-if="addOptions.length === 0" class="bc-add-empty mono">no models left</span>
         </template>
         <template v-else>
@@ -222,8 +289,8 @@ const addOptionsGrouped = computed(() => {
               >{{ m.id }}{{ m.size_gb ? ` — ${m.size_gb} GB` : '' }}</option>
             </optgroup>
           </select>
-          <button class="bc-add-confirm" type="button" :disabled="!addPick" @click="addExtra">load</button>
-          <button class="bc-add-cancel" type="button" @click="showAdd = false; addPick = ''">cancel</button>
+          <button class="bc-add-confirm" type="button" :disabled="!addPick || busy" @click="addExtra">load</button>
+          <button class="bc-add-cancel" type="button" :disabled="busy" @click="showAdd = false; addPick = ''">cancel</button>
         </template>
       </div>
     </section>
@@ -362,7 +429,8 @@ const addOptionsGrouped = computed(() => {
   cursor: pointer;
   display: grid; place-items: center;
 }
-.bc-ch-x:hover { color: var(--color-danger); border-color: color-mix(in oklch, var(--color-danger) 40%, var(--color-border)); }
+.bc-ch-x:hover:not(:disabled) { color: var(--color-danger); border-color: color-mix(in oklch, var(--color-danger) 40%, var(--color-border)); }
+.bc-ch-x:disabled { opacity: 0.4; cursor: not-allowed; }
 .bc-empty { color: var(--color-fg-faint); font-style: italic; font-size: 11.5px; padding: 6px 0; }
 
 .bc-add {
@@ -382,13 +450,6 @@ const addOptionsGrouped = computed(() => {
   border-color: var(--hal0-accent);
 }
 .bc-add-btn:disabled { opacity: 0.4; cursor: not-allowed; }
-.bc-add-hint {
-  font-size: 9.5px;
-  color: var(--color-fg-faint);
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  opacity: 0.8;
-}
 .bc-add-empty { font-size: 10.5px; color: var(--color-fg-faint); }
 
 .bc-add-select {
