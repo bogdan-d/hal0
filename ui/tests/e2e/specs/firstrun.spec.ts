@@ -1,14 +1,19 @@
 /**
  * firstrun.spec.ts — γ-1 First-run wizard (PLAN §10.3 path 1).
  *
- * Covers: redirect from / to /firstrun when
- * /api/install/state.first_run is true, walk the three-step picker +
- * license + download flow, watch SSE progress, click "Open chat".
+ * Covers the post-prototype 8-step linear wizard (Variant A):
+ *   1. Password         — skip
+ *   2. Hardware + dirs  — accept defaults
+ *   3. Primary chat     — pick smallest curated card (Phi-3 Mini)
+ *   4. Capabilities     — leave smart defaults (CPU box → embed off etc.)
+ *   5. HF token         — skipped (Phi-3 Mini is not gated by id heuristic)
+ *   6. License          — check accept box, click install
+ *   7. Install          — drive SSE events to completion
+ *   8. Done             — click "Open chat" → window.open + install/complete
  *
- * The spec mocks the curated catalogue to surface a deterministic
- * "smallest card" (Phi-3 Mini, 2.4 GB) which the brief says to pick.
- * SSE events are pumped through the in-page shim so we can assert UI
- * updates in lockstep with each event.
+ * The spec mocks the curated catalogue, capability catalogs, config/models,
+ * auth/status, and the pull-stream SSE so we can assert UI updates in
+ * lockstep with each event.
  */
 import { test, expect, json } from '../fixtures/apiMock'
 import { installSseHarness, emitSse, waitForSse } from '../fixtures/sseHarness'
@@ -16,11 +21,11 @@ import { installSseHarness, emitSse, waitForSse } from '../fixtures/sseHarness'
 test.beforeEach(async ({ page, mockState }) => {
   mockState.installState.first_run = true
   await installSseHarness(page)
+
   // Stub window.open so the "Open chat" assertion captures the URL
   // without actually navigating away.
   await page.addInitScript(() => {
     ;(window).__openCalls = []
-    const orig = window.open
     Object.defineProperty(window, 'open', {
       configurable: true,
       writable: true,
@@ -30,54 +35,92 @@ test.beforeEach(async ({ page, mockState }) => {
       },
     })
   })
+
+  // New wizard touches additional read endpoints not in the default mock
+  // bundle. Provide deterministic empty/closed shapes so the composable
+  // settles into "first-run, CPU box, nothing gated".
+  await page.route('**/api/auth/status', (route) => json(route, { password_set: false }))
+  await page.route('**/api/capabilities', (route) =>
+    json(route, {
+      backends: [],
+      catalogs: { embed: { embed: [], rerank: [] }, voice: { stt: [], tts: [] }, img: { img: [] } },
+      selections: {},
+    }),
+  )
+  await page.route('**/api/config/models', (route) => {
+    if (route.request().method() === 'PUT') {
+      return json(route, { roots: ['/var/lib/hal0/models'] })
+    }
+    return json(route, { roots: ['/var/lib/hal0/models'] })
+  })
+
+  // Per-model pull starter (capability-side path). Primary chat goes
+  // through /api/install/pick-default which is already mocked in
+  // installDefaultMocks.
+  await page.route('**/api/models/*/pull', (route) =>
+    json(route, { id: 'job1', state: 'queued' }),
+  )
 })
 
-test('redirects to /firstrun, walks the wizard, opens chat', async ({ page, mockState, cleanState }) => {
-  // Pull-stream route reply so the network layer doesn't 200-with-{}; the
-  // real events come from the SSE harness.
+test('redirects to /firstrun, walks the 8-step wizard, opens chat', async ({ page, mockState, cleanState }) => {
+  // SSE stream route — actual frames come from the in-page SSE harness.
   await page.route('**/api/models/*/pull/stream', (route) =>
     route.fulfill({ status: 200, contentType: 'text/event-stream', body: '' }),
   )
 
   await page.goto('/')
 
-  // ── Step 1: should land on /firstrun via the guard ──────────────
+  // Guard redirects to /firstrun on a fresh install.
   await expect(page).toHaveURL(/\/firstrun$/)
   await expect(page.getByText('Welcome to hal0')).toBeVisible()
 
-  // Pick the smallest card — Phi-3 Mini, 2.4 GB per the curated mock.
+  // ── Step 1 — Password: skip ───────────────────────────────────────
+  await page.getByRole('button', { name: /Skip — leave open/ }).click()
+
+  // ── Step 2 — Hardware + storage: accept defaults ──────────────────
+  await expect(page.getByText('We probed your hardware')).toBeVisible()
+  await page.getByRole('button', { name: /Next →/ }).click()
+
+  // ── Step 3 — Pick smallest curated card (Phi-3 Mini, 2.4 GB) ──────
   const phiCard = page.locator('.model-option', { hasText: 'Phi-3 Mini' })
   await expect(phiCard).toBeVisible()
   await phiCard.click()
   await expect(phiCard).toHaveClass(/selected/)
+  await page.getByRole('button', { name: /Next: capabilities/ }).click()
 
-  await page.getByRole('button', { name: /Next: Review license/ }).click()
+  // ── Step 4 — Capabilities: leave defaults, advance ────────────────
+  await expect(page.getByText('Pick which capabilities run at startup')).toBeVisible()
+  await page.getByRole('button', { name: /Next →/ }).click()
 
-  // ── Step 2: license + checkbox enables Download ────────────────
+  // ── Step 5 (skipped) → Step 6 — License acceptance ────────────────
+  // Phi-3 Mini is not in the gated heuristic (id doesn't start with
+  // llama-/meta-llama/whisper-v3-npu), so the HF-token step is skipped.
+  await expect(page.locator('.license-row', { hasText: 'Phi-3 Mini' })).toBeVisible()
+
   const acceptCheckbox = page.locator('.accept-label input[type="checkbox"]')
-  const downloadBtn = page.getByRole('button', { name: /Accept .* download/i })
-  await expect(downloadBtn).toBeDisabled()
+  const installBtn = page.getByRole('button', { name: /Accept .* install/i })
+  await expect(installBtn).toBeDisabled()
   await acceptCheckbox.check()
-  await expect(downloadBtn).toBeEnabled()
-  await downloadBtn.click()
+  await expect(installBtn).toBeEnabled()
+  await installBtn.click()
 
-  // ── Step 3: SSE progress events ────────────────────────────────
+  // ── Step 7 — Install: SSE progress events ─────────────────────────
   await waitForSse(page, '/api/models/phi3-mini/pull/stream')
 
   const streamUrl = '/api/models/phi3-mini/pull/stream'
   const total = 2_400_000_000
   for (let i = 1; i <= 4; i++) {
     await emitSse(page, streamUrl, {
-      state: 'pulling',
+      state: 'running',
       bytes_downloaded: Math.round((total * i) / 5),
       bytes_total: total,
     })
     await page.waitForTimeout(20)
   }
-  // Progress bar partway filled (4/5 = 80%).
-  await expect(page.locator('.progress-pct')).toHaveText('80%')
+  // 4/5 = 80% — the pull-state pill should reflect it.
+  await expect(page.locator('.pull-state').first()).toHaveText(/80%/)
 
-  // Final event flips state to completed → step 4.
+  // Final event flips state to completed → step 8.
   await emitSse(page, streamUrl, {
     state: 'completed',
     bytes_downloaded: total,
@@ -86,7 +129,7 @@ test('redirects to /firstrun, walks the wizard, opens chat', async ({ page, mock
 
   await expect(page.getByText("You're all set!")).toBeVisible({ timeout: 5_000 })
 
-  // ── Step 4: Open chat → window.open + POST /api/install/complete ──
+  // ── Step 8 — Open chat: window.open + POST /api/install/complete ──
   const completeReq = page.waitForRequest(
     (req) => req.url().endsWith('/api/install/complete') && req.method() === 'POST',
   )
