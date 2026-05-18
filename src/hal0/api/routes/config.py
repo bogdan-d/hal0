@@ -16,10 +16,36 @@ from __future__ import annotations
 
 import asyncio
 import os
+from typing import Any
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request
+from pydantic import ValidationError
+
+from hal0.api.middleware.auth import require_writer
+from hal0.api.middleware.error_codes import Hal0Error
+from hal0.config.loader import load_hal0_config, save_hal0_config
+from hal0.config.schema import ModelsConfig
+from hal0.registry.discover import scan_and_register
 
 router = APIRouter()
+
+_writer = [Depends(require_writer)]
+
+
+class ConfigInvalidError(Hal0Error):
+    """Schema validation failure for the [models] section."""
+
+    code = "config.invalid"
+    status = 400
+
+
+def _validation_error_details(exc: ValidationError) -> dict[str, str]:
+    """Render a pydantic ValidationError into ``{field_path: message}``."""
+    out: dict[str, str] = {}
+    for err in exc.errors():
+        loc = ".".join(str(p) for p in err.get("loc", ()))
+        out[loc or "<root>"] = err.get("msg", "invalid")
+    return out
 
 # Default ports — these match what `hal0-api.service` and
 # `hal0-openwebui.service` bind to.  The API port can be overridden via
@@ -141,3 +167,62 @@ async def get_urls(request: Request) -> dict[str, object]:
         "openwebui": f"http://{host}:{_OPENWEBUI_PORT}",
         "openwebui_enabled": await _openwebui_is_active(),
     }
+
+
+# ── [models] config ───────────────────────────────────────────────────────
+
+
+@router.get("/models")
+async def get_models_config() -> dict[str, Any]:
+    """Return the current [models] section (roots / auto-scan / extensions)."""
+    cfg = load_hal0_config()
+    return cfg.models.model_dump(mode="json")
+
+
+@router.put("/models", dependencies=_writer)
+async def update_models_config(request: Request) -> dict[str, Any]:
+    """Replace the [models] section, persist hal0.toml, then re-scan.
+
+    Body shape: any subset of ``ModelsConfig`` fields. Validation goes
+    through the pydantic schema so an invalid relative-path root surfaces
+    as ``config.invalid``. After a successful save the discovery scan
+    runs immediately so newly-added roots show up in the registry without
+    a manual extra POST.
+    """
+    try:
+        body = await request.json()
+    except Exception as exc:
+        raise Hal0Error("request body must be valid JSON", details={"error": str(exc)}) from exc
+    if not isinstance(body, dict):
+        raise Hal0Error("request body must be a JSON object")
+
+    cfg = load_hal0_config()
+    merged_raw = {**cfg.models.model_dump(mode="python"), **body}
+    try:
+        new_models = ModelsConfig.model_validate(merged_raw)
+    except ValidationError as exc:
+        raise ConfigInvalidError(
+            "models config failed schema validation",
+            details=_validation_error_details(exc),
+        ) from exc
+
+    cfg.models = new_models
+    try:
+        save_hal0_config(cfg)
+    except OSError as exc:
+        raise Hal0Error(
+            f"could not persist hal0 config: {exc}",
+            details={"error": str(exc), "errno": getattr(exc, "errno", None)},
+        ) from exc
+
+    # Run a discovery scan so newly-added roots produce results immediately.
+    scan_result: dict[str, Any] = {"added": [], "skipped": [], "scanned_roots": []}
+    try:
+        registry = request.app.state.model_registry
+        scan_result = scan_and_register(registry, new_models)
+    except Exception as exc:  # pragma: no cover — defensive
+        scan_result = {"added": [], "skipped": [], "scanned_roots": [], "error": str(exc)}
+
+    out = new_models.model_dump(mode="json")
+    out["scan"] = scan_result
+    return out

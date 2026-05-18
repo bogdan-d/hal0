@@ -393,9 +393,78 @@ function formatTimestamp(iso) {
   }
 }
 
+// ── Model locations panel ───────────────────────────────────────────
+//
+// GET /api/config/models returns { roots, auto_scan_on_start, file_extensions }.
+// PUT /api/config/models persists the same shape and immediately re-scans;
+// the response carries a `scan` sub-object the toast can summarise.
+const modelsCfg = reactive({
+  roots: [],
+  auto_scan_on_start: true,
+  file_extensions: ['.gguf', '.safetensors'],
+})
+const modelsCfgLoading = ref(true)
+const modelsCfgSaving  = ref(false)
+const modelsCfgError   = ref(null)
+
+async function loadModelsCfg() {
+  modelsCfgLoading.value = true
+  modelsCfgError.value = null
+  try {
+    const data = await api('/api/config/models')
+    modelsCfg.roots = Array.isArray(data.roots) ? [...data.roots] : []
+    modelsCfg.auto_scan_on_start = !!data.auto_scan_on_start
+    modelsCfg.file_extensions = Array.isArray(data.file_extensions)
+      ? [...data.file_extensions]
+      : ['.gguf', '.safetensors']
+  } catch (e) {
+    modelsCfgError.value = e.message
+  } finally {
+    modelsCfgLoading.value = false
+  }
+}
+
+function addModelRoot() {
+  modelsCfg.roots.push('')
+}
+
+function removeModelRoot(i) {
+  modelsCfg.roots.splice(i, 1)
+}
+
+async function saveAndScanModelRoots() {
+  modelsCfgSaving.value = true
+  try {
+    const body = JSON.stringify({
+      roots: modelsCfg.roots.map((r) => r.trim()).filter((r) => r.length > 0),
+      auto_scan_on_start: modelsCfg.auto_scan_on_start,
+      file_extensions: modelsCfg.file_extensions,
+    })
+    const updated = await api('/api/config/models', { method: 'PUT', body })
+    modelsCfg.roots = [...(updated.roots || [])]
+    modelsCfg.auto_scan_on_start = !!updated.auto_scan_on_start
+    modelsCfg.file_extensions = [...(updated.file_extensions || [])]
+    const scan = updated.scan || { added: [], skipped: [] }
+    const added = (scan.added || []).length
+    const skipped = (scan.skipped || []).length
+    toasts.success(`Scanned — ${added} added, ${skipped} skipped`)
+  } catch (e) {
+    if (e.code === 'config.invalid' && e.details && typeof e.details === 'object') {
+      const first = Object.entries(e.details)[0]
+      const msg = first ? `${first[0]}: ${first[1]}` : e.message
+      toasts.error(`Invalid: ${msg}`)
+    } else {
+      toasts.error(e.message)
+    }
+  } finally {
+    modelsCfgSaving.value = false
+  }
+}
+
 onMounted(async () => {
   await load()
   await loadAuthState()
+  await loadModelsCfg()
 })
 </script>
 
@@ -511,6 +580,69 @@ onMounted(async () => {
               </tr>
             </tbody>
           </table>
+        </div>
+      </Card>
+
+      <!-- ── Model locations panel ───────────────────────────────── -->
+      <Card>
+        <h3 class="section-title">Model locations</h3>
+        <p class="field-hint">
+          Filesystem roots scanned for downloaded model files (.gguf, .safetensors).
+          Add <code class="mono">/mnt/ai-models</code> or a custom mount and hit
+          <strong>Save &amp; re-scan</strong> — every matching file under the root
+          is registered and routable.
+        </p>
+        <div v-if="modelsCfgError" class="error-banner" role="alert">{{ modelsCfgError }}</div>
+        <div v-else-if="modelsCfgLoading" class="loading-row">Loading…</div>
+        <div v-else class="roots-list">
+          <div v-for="(_, i) in modelsCfg.roots" :key="i" class="root-row">
+            <input
+              v-model="modelsCfg.roots[i]"
+              type="text"
+              class="field-input"
+              placeholder="/mnt/ai-models"
+              :disabled="modelsCfgSaving"
+            />
+            <button
+              type="button"
+              class="btn-ghost btn-small"
+              @click="removeModelRoot(i)"
+              :disabled="modelsCfgSaving"
+              title="Remove root"
+            >
+              Remove
+            </button>
+          </div>
+          <div v-if="modelsCfg.roots.length === 0" class="empty-row">
+            No roots configured — scanning is a no-op until you add one.
+          </div>
+          <div class="roots-actions">
+            <button
+              type="button"
+              class="btn-ghost"
+              @click="addModelRoot"
+              :disabled="modelsCfgSaving"
+            >
+              + Add root
+            </button>
+            <label class="auto-scan-label">
+              <input
+                type="checkbox"
+                v-model="modelsCfg.auto_scan_on_start"
+                :disabled="modelsCfgSaving"
+              />
+              <span>Auto-scan on startup</span>
+            </label>
+            <button
+              type="button"
+              class="btn-primary btn-small"
+              @click="saveAndScanModelRoots"
+              :disabled="modelsCfgSaving"
+            >
+              <span v-if="modelsCfgSaving" class="spinner" aria-hidden="true" />
+              {{ modelsCfgSaving ? 'Scanning…' : 'Save & re-scan' }}
+            </button>
+          </div>
         </div>
       </Card>
 
@@ -941,4 +1073,12 @@ onMounted(async () => {
 
 .fade-enter-active, .fade-leave-active { transition: opacity 0.12s ease; }
 .fade-enter-from, .fade-leave-to { opacity: 0; }
+
+/* ── Model locations ─────────────────────────────────────────────────── */
+.roots-list { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
+.root-row { display: flex; align-items: center; gap: 8px; }
+.root-row .field-input { flex: 1; font-family: var(--font-mono); }
+.roots-actions { display: flex; align-items: center; gap: 12px; margin-top: 6px; flex-wrap: wrap; }
+.auto-scan-label { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--color-fg-muted); cursor: pointer; }
+.auto-scan-label input[type="checkbox"] { accent-color: var(--hal0-accent); }
 </style>

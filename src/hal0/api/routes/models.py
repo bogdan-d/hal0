@@ -19,7 +19,9 @@ from fastapi.responses import StreamingResponse
 
 from hal0.api.middleware.auth import require_writer
 from hal0.api.middleware.error_codes import Hal0Error
+from hal0.config.loader import load_hal0_config
 from hal0.registry.curated import CURATED, CuratedModel, HaloaiModel, get_curated
+from hal0.registry.discover import scan_and_register
 from hal0.registry.pull import (
     PullInvalidSource,
     PullJob,
@@ -137,6 +139,20 @@ async def list_catalogue() -> dict[str, Any]:
             "total": len(pullable) + len(upstream),
         },
     }
+
+
+@router.post("/scan", dependencies=_writer)
+async def scan_models(request: Request) -> dict[str, Any]:
+    """Walk the configured model roots and register any new files.
+
+    Reads the latest ``[models]`` section from disk so a freshly-saved
+    root list takes effect without an API restart. Returns ``added`` /
+    ``skipped`` / ``scanned_roots`` so the UI can render a toast.
+    """
+    cfg = load_hal0_config()
+    registry = request.app.state.model_registry
+    result = scan_and_register(registry, cfg.models)
+    return result
 
 
 @router.post("", status_code=201, dependencies=_writer)

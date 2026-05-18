@@ -34,9 +34,10 @@ from hal0.api.routes import (
     updater,
     v1,
 )
-from hal0.config.loader import ConfigParseError, load_upstreams_config
+from hal0.config.loader import ConfigParseError, load_hal0_config, load_upstreams_config
 from hal0.dispatcher.router import Dispatcher
 from hal0.hardware.probe import HardwareProbe
+from hal0.registry.discover import scan_and_register
 from hal0.registry.store import ModelRegistry
 from hal0.slots.manager import SlotManager
 from hal0.upstreams.registry import Upstream, UpstreamRegistry
@@ -180,6 +181,32 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     model_registry = ModelRegistry()
     hardware_probe = HardwareProbe()
 
+    # Cache the parsed top-level config so request handlers don't repeatedly
+    # re-read hal0.toml. The /api/settings PUT path keeps this in sync.
+    try:
+        hal0_cfg = load_hal0_config()
+    except ConfigParseError as exc:
+        log.warning("hal0.config.parse_failed", error=str(exc))
+        from hal0.config.schema import Hal0Config
+
+        hal0_cfg = Hal0Config()
+
+    # Auto-scan configured model roots so a fresh /mnt/ai-models drop-in
+    # shows up in the registry without operator intervention.  Failures
+    # here must NOT block startup — the API still has to come up so the
+    # user can fix the offending root.
+    if hal0_cfg.models.auto_scan_on_start:
+        try:
+            scan_result = scan_and_register(model_registry, hal0_cfg.models)
+            log.info(
+                "models.auto_scan_complete",
+                added=len(scan_result.get("added", [])),
+                skipped=len(scan_result.get("skipped", [])),
+                roots=len(scan_result.get("scanned_roots", [])),
+            )
+        except Exception as exc:
+            log.warning("models.auto_scan_failed", error=str(exc))
+
     # Shared in-process /v1/models cache.  The dispatcher's cold-cache
     # prefetch path needs cached_models() and fetch_models() to share
     # state — without this, prefetch fans out then re-checks the cache
@@ -233,6 +260,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     app.state.upstreams = upstreams
     app.state.model_registry = model_registry
+    app.state.hal0_config = hal0_cfg
     app.state.hardware_probe = hardware_probe
     app.state.hardware_stats = HardwareStats()
     # Model-pull job registry — keyed by model_id, value is the

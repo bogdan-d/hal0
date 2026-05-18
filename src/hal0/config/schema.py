@@ -22,6 +22,7 @@ See PLAN.md §3, §5 Tier 1 ("pydantic-validated TOML schema at load time").
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -477,6 +478,46 @@ class TelemetryConfig(BaseModel):
         return v
 
 
+class ModelsConfig(BaseModel):
+    """[models] section of hal0.toml — discovery + auto-detect."""
+
+    model_config = {"populate_by_name": True, "extra": "allow"}
+
+    roots: list[str] = Field(
+        default_factory=lambda: ["/var/lib/hal0/models"],
+        description=(
+            "Filesystem roots scanned for downloaded model files. "
+            "Each must be an absolute path; non-existent paths are skipped at scan time."
+        ),
+    )
+    auto_scan_on_start: bool = Field(
+        default=True,
+        description="Run the discovery scan during app startup.",
+    )
+    file_extensions: list[str] = Field(
+        default_factory=lambda: [".gguf", ".safetensors"],
+        description=(
+            "Filename suffixes treated as candidate model files (lowercase, includes the dot)."
+        ),
+    )
+
+    @field_validator("roots")
+    @classmethod
+    def roots_are_absolute(cls, v: list[str]) -> list[str]:
+        """Reject relative paths — discovery walks must start from an absolute root."""
+        out: list[str] = []
+        for entry in v:
+            s = str(entry).strip()
+            if not s:
+                raise ValueError("models.roots entries must not be empty")
+            if not Path(s).is_absolute():
+                raise ValueError(
+                    f"models.roots entry {s!r} must be an absolute path"
+                )
+            out.append(s)
+        return out
+
+
 class Hal0Config(BaseModel):
     """Top-level hal0.toml pydantic model.
 
@@ -494,6 +535,7 @@ class Hal0Config(BaseModel):
     slots: SlotsConfig = Field(default_factory=SlotsConfig)
     dispatcher: DispatcherConfig = Field(default_factory=DispatcherConfig)
     telemetry: TelemetryConfig = Field(default_factory=TelemetryConfig)
+    models: ModelsConfig = Field(default_factory=ModelsConfig)
 
 
 __all__ = [
@@ -504,6 +546,7 @@ __all__ = [
     "HardwareInfo",
     "MetaConfig",
     "ModelConfig",
+    "ModelsConfig",
     "NPUInfo",
     "ProviderEntry",
     "ProvidersConfig",
