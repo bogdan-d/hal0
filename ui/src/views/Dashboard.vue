@@ -101,7 +101,11 @@ const unifiedSegments = computed(() => {
   return out
 })
 
-const npuOk = computed(() => !!hw.value.npu_status?.ok)
+// Prefer upstream-reported NPU readiness (haloai proxies it through
+// /api/stats/hardware as npu_status.ok). Falls back to the local probe's
+// npu_present so the single-LXC deployment — which has no upstreams to
+// proxy from — still lights up when amdxdna + /dev/accel are present.
+const npuOk = computed(() => hw.value.npu_status?.ok ?? !!hw.value.npu_present)
 
 // ── Throughput ────────────────────────────────────────────────────────
 const totalTps = computed(() =>
@@ -379,7 +383,7 @@ loadChatModels()
       <!-- ── Active slots ─────────────────────────────────────────── -->
       <section aria-labelledby="slots-heading">
         <p class="section-eyebrow"><span class="section-eyebrow-dot" aria-hidden="true"></span> Slots</p>
-        <h2 id="slots-heading" class="section-title">Active slots</h2>
+        <h2 id="slots-heading" class="section-title">Slots</h2>
         <template v-if="system.loading && system.slots.length === 0">
           <div class="slot-list">
             <Card v-for="i in 3" :key="i"><LoadingSkeleton :lines="3" /></Card>
@@ -402,7 +406,11 @@ loadChatModels()
                 <span class="state-dot" :class="stateClass(slot.status)" aria-hidden="true" />
                 <span class="state-label" :class="stateClass(slot.status)">{{ slot.status ?? 'offline' }}</span>
                 <span class="slot-name">{{ slot.name }}</span>
-                <span class="slot-model mono" :title="slot.model_name || slot.model || slot.model_id || ''">{{ modelLabel(slot) }}</span>
+                <span
+                  class="slot-model mono"
+                  :class="{ 'needs-model': !(slot.model_name || slot.model || slot.model_id) }"
+                  :title="(slot.model_name || slot.model || slot.model_id) || 'No default model — set one in /etc/hal0/slots/' + slot.name + '.toml or via the Slots page'"
+                >{{ modelLabel(slot) }}</span>
                 <span class="hw-chip" :class="`hw-${hardwareTarget(slot).id}`">{{ hardwareTarget(slot).label }}</span>
                 <span v-if="slot.port" class="mono-chip">:{{ slot.port }}</span>
                 <button class="slot-action-btn" type="button" @click="router.push('/slots')">Manage →</button>
@@ -562,6 +570,7 @@ loadChatModels()
 .state-offline { background: var(--color-fg-faint); }
 .slot-name { font-family: var(--font-mono); font-size: 13px; font-weight: 600; color: var(--color-fg); flex-shrink: 0; }
 .slot-model { font-size: 11.5px; color: var(--color-fg-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 1; }
+.slot-model.needs-model { color: var(--color-warning); font-style: italic; }
 .mono-chip { font-family: var(--font-mono); font-size: 11px; padding: 2px 7px; border-radius: 4px; background: var(--color-surface-2); border: 1px solid var(--color-border); color: var(--color-fg-faint); font-feature-settings: 'zero' 1, 'ss02' 1, 'tnum' 1; flex-shrink: 0; }
 .state-label { font-family: var(--font-mono); font-size: 10.5px; padding: 2px 8px; border-radius: 4px; text-transform: uppercase; letter-spacing: 0.06em; flex-shrink: 0; }
 .state-label.state-running { background: color-mix(in srgb, var(--hal0-accent) 14%, transparent); color: var(--hal0-accent); }
