@@ -190,7 +190,13 @@ class SlotManager:
         model_cache_check: ModelCacheCheck | None = None,
         idle_after_s: float = _IDLE_AFTER_S,
         idle_monitor_interval_s: float = _IDLE_MONITOR_INTERVAL_S,
+        event_bus: Any | None = None,
     ) -> None:
+        # Optional EventBus for footer/dashboard observability. Not part
+        # of the slot state machine — purely a side-channel so the
+        # dashboard footer can render transitions without polling. None
+        # in CLI / unit-test contexts; wired by the FastAPI lifespan.
+        self._event_bus = event_bus
         # Per-slot locks to prevent concurrent load/unload/restart races.
         self._locks: dict[str, asyncio.Lock] = {}
         # In-memory copy of the latest state per slot (mirrors state.json).
@@ -328,6 +334,28 @@ class SlotManager:
             "slot.transition", extra={"slot": name, "from": current.value, "to": to_state.value}
         )
         await self._broadcast(record)
+        # Footer event bus — best-effort emit. Skip when current == to_state
+        # (idempotent refresh, no real transition) so the footer doesn't
+        # show redundant rows.
+        if self._event_bus is not None and current != to_state:
+            severity = "error" if to_state == SlotState.ERROR else "info"
+            payload: dict[str, Any] = {
+                "slot": name,
+                "from": current.value,
+                "to": to_state.value,
+            }
+            if record.model_id:
+                payload["model_id"] = record.model_id
+            if message:
+                payload["error" if severity == "error" else "message"] = message
+            with contextlib.suppress(Exception):
+                await self._event_bus.emit(
+                    "slot.state",
+                    severity,
+                    f"slot:{name}",
+                    f"{name}: {current.value} → {to_state.value}",
+                    data=payload,
+                )
         # TIER1: spawn/cancel the push-driven fail-watcher to match the new
         # state.  Done after broadcast so the SSE frame for the transition
         # itself lands before any watcher-induced follow-up frame.

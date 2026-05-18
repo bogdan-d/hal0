@@ -89,9 +89,29 @@ async def test_upstream(name: str, request: Request) -> dict[str, Any]:
     """
     upstreams = request.app.state.upstreams
     try:
-        return await upstreams.test(name)
+        result = await upstreams.test(name)
     except UpstreamNotFound as exc:
         raise UpstreamNotFoundHTTP(str(exc), {"name": name}) from exc
+    # Footer event when the operator-driven test discovers an unreachable
+    # upstream. The slot state machine emits its own slot.state events on
+    # warmup failures; this covers the remote-provider half of the world
+    # where there is no slot but the dashboard still wants to surface
+    # outages.
+    event_bus = getattr(request.app.state, "events", None)
+    if event_bus is not None and not result.get("ok"):
+        await event_bus.emit(
+            "system.upstream_unhealthy",
+            "warn",
+            f"upstream:{name}",
+            f"upstream {name!r} unreachable",
+            data={
+                "name": name,
+                "status": result.get("status"),
+                "error": result.get("error"),
+                "latency_ms": result.get("latency_ms"),
+            },
+        )
+    return result
 
 
 @router.get("/providers/catalog")
