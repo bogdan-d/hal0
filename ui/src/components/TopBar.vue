@@ -1,6 +1,7 @@
 <script setup>
 import { computed, ref, onMounted, onBeforeUnmount } from 'vue'
 import { useSystemStore } from '../stores/system.js'
+import { useSlotStats } from '../composables/useSlotStats.js'
 import Wordmark from './Wordmark.vue'
 
 const props = defineProps({
@@ -26,8 +27,7 @@ const statusColor = computed(() => ({
 
 const version = computed(() => system.status?.version ?? null)
 
-const runningSlots = computed(() => system.slots.filter((s) => s.status === 'running').length)
-const totalSlots   = computed(() => system.slots.length)
+const { running: runningSlots, total: totalSlots } = useSlotStats()
 </script>
 
 <template>

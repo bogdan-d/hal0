@@ -17,6 +17,7 @@ import { computed, ref, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import { useSystemStore } from '../stores/system.js'
 import { useStats, useSlotMetrics } from '../composables/useStats.js'
+import { useSlotStats } from '../composables/useSlotStats.js'
 import { api } from '../composables/useApi.js'
 import PageHeader from '../components/PageHeader.vue'
 import Card from '../components/Card.vue'
@@ -31,12 +32,8 @@ const { metrics, aggHistory } = useSlotMetrics(2500)
 const hw = computed(() => stats.value || {})
 
 // ── Slot summary ─────────────────────────────────────────────────────
-const ACTIVE_STATES = new Set(['running', 'ready', 'serving'])
-const slotSummary = computed(() => {
-  const running = system.slots.filter((s) => ACTIVE_STATES.has(s.status)).length
-  const total = system.slots.length
-  return { running, total }
-})
+const { running: slotsRunning, total: slotsTotal } = useSlotStats()
+const slotSummary = computed(() => ({ running: slotsRunning.value, total: slotsTotal.value }))
 
 // ── Memory tiles — prefer GTT (unified) when present, else VRAM ──────
 const memUsedGb = computed(() => {

@@ -1,7 +1,7 @@
 <script setup>
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
-import { useSystemStore } from '../stores/system.js'
+import { useSlotStats } from '../composables/useSlotStats.js'
 import { api } from '../composables/useApi.js'
 
 const props = defineProps({
@@ -11,10 +11,8 @@ const props = defineProps({
 const emit = defineEmits(['toggle', 'navigate'])
 
 const route  = useRoute()
-const system = useSystemStore()
 
-const running = computed(() => system.slots.filter((s) => s.status === 'running').length)
-const total   = computed(() => system.slots.length)
+const { running, total } = useSlotStats()
 
 // ── OpenWebUI chat link ────────────────────────────────────────────
 // /api/config/urls returns the live hostnames + a runtime flag for
