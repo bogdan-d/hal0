@@ -367,6 +367,9 @@ async function previewScan() {
         capabilities: [...(r.suggested_capabilities ?? [])],
         context_length: r.context_length,
         confidence: r.confidence,
+        // pre-select rows the detector is confident about; the user
+        // ticks/unticks per-row before committing.
+        selected: r.confidence === 'high',
       }
     })
     scanRows.value = rows
@@ -379,11 +382,15 @@ async function previewScan() {
 }
 
 async function commitScan() {
-  if (scanRows.value.length === 0) return
+  const picked = scanRows.value.filter((r) => r.selected)
+  if (picked.length === 0) {
+    toasts.error('Select at least one row to register')
+    return
+  }
   localBusy.value = true
   try {
     const body = {
-      rows: scanRows.value.map((r) => ({
+      rows: picked.map((r) => ({
         path: r.path,
         id: r.id,
         name: r.name,
@@ -402,6 +409,15 @@ async function commitScan() {
   } finally {
     localBusy.value = false
   }
+}
+
+const scanSelectedCount = computed(() => scanRows.value.filter((r) => r.selected).length)
+const scanAllSelected = computed(() => scanRows.value.length > 0 && scanRows.value.every((r) => r.selected))
+const scanNoneSelected = computed(() => scanRows.value.length > 0 && scanRows.value.every((r) => !r.selected))
+
+function toggleScanAll() {
+  const target = !scanAllSelected.value
+  scanRows.value.forEach((r) => { r.selected = target })
 }
 
 // ── Edit metadata ──────────────────────────────────────────────────────
@@ -987,6 +1003,15 @@ const QUANTS = ['Q4_K_M', 'Q5_K_M', 'Q8_0', 'F16', 'BF16']
                       <table class="scan-table">
                         <thead>
                           <tr>
+                            <th class="col-pick">
+                              <input
+                                type="checkbox"
+                                :checked="scanAllSelected"
+                                :indeterminate.prop="!scanAllSelected && !scanNoneSelected"
+                                @change="toggleScanAll"
+                                :aria-label="scanAllSelected ? 'Deselect all' : 'Select all'"
+                              />
+                            </th>
                             <th class="col-name">Name / ID</th>
                             <th class="col-path">Path</th>
                             <th class="col-backends">Backends</th>
@@ -996,7 +1021,14 @@ const QUANTS = ['Q4_K_M', 'Q5_K_M', 'Q8_0', 'F16', 'BF16']
                           </tr>
                         </thead>
                         <tbody>
-                          <tr v-for="(row, idx) in scanRows" :key="row.path">
+                          <tr v-for="(row, idx) in scanRows" :key="row.path" :class="{ 'row-unpicked': !row.selected }">
+                            <td class="col-pick">
+                              <input
+                                type="checkbox"
+                                v-model="scanRows[idx].selected"
+                                :aria-label="`Include ${row.name || row.id}`"
+                              />
+                            </td>
                             <td class="col-name">
                               <input v-model="scanRows[idx].name" class="scan-input scan-name" placeholder="Name" />
                               <input v-model="scanRows[idx].id" class="scan-input mono" />
@@ -1086,10 +1118,10 @@ const QUANTS = ['Q4_K_M', 'Q5_K_M', 'Q8_0', 'F16', 'BF16']
                   class="btn-primary"
                   type="button"
                   @click="commitScan"
-                  :disabled="localBusy"
+                  :disabled="localBusy || scanSelectedCount === 0"
                 >
                   <span v-if="localBusy" class="spinner" aria-hidden="true" />
-                  Commit {{ scanRows.length }} row(s)
+                  Register {{ scanSelectedCount }} of {{ scanRows.length }}
                 </button>
               </template>
             </div>
@@ -1637,12 +1669,15 @@ const QUANTS = ['Q4_K_M', 'Q5_K_M', 'Q8_0', 'F16', 'BF16']
 .scan-preview { display: flex; flex-direction: column; gap: 6px; }
 .scan-table-wrap { overflow-x: auto; border: 1px solid var(--color-border); border-radius: var(--radius); }
 .scan-table { width: 100%; border-collapse: collapse; font-size: 11.5px; table-layout: fixed; }
+.scan-table .col-pick     { width: 32px; text-align: center; }
 .scan-table .col-name     { width: 240px; min-width: 240px; }
 .scan-table .col-path     { width: auto; }
 .scan-table .col-backends { width: 180px; }
 .scan-table .col-caps     { width: 150px; }
 .scan-table .col-ctx      { width: 64px; }
 .scan-table .col-conf     { width: 64px; }
+.scan-table tr.row-unpicked td { opacity: 0.55; }
+.scan-table tr.row-unpicked td.col-pick { opacity: 1; }
 .scan-table th {
   text-align: left; padding: 6px 8px;
   background: var(--hal0-bg-sunken);
