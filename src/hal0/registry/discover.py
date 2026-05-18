@@ -31,8 +31,56 @@ _SCAN_BUDGET_SECONDS = 30.0
 
 # Directory names whose contents are always skipped (vision projectors,
 # tokenizer assets, training checkpoints — none of those are standalone
-# models the dispatcher can route to).
-_SKIP_DIR_NAMES = frozenset({"mmproj", ".git", "__pycache__"})
+# models the dispatcher can route to). Also skip:
+#   - HuggingFace cache internals (`blobs` holds hash-named binary blobs;
+#     `snapshots/<rev>/<file>` symlinks into them are followed instead).
+#   - ComfyUI accessory model directories — the .safetensors there are
+#     auxiliary components (VAEs, text encoders, control nets) used by
+#     a full image-gen workflow, not standalone models the dispatcher
+#     can route to. Once we add a proper image-gen surface these will
+#     come back through that channel.
+_SKIP_DIR_NAMES = frozenset(
+    {
+        "mmproj",
+        ".git",
+        "__pycache__",
+        "blobs",
+        # HF cache "this file doesn't exist on remote" sentinel — 0-byte
+        # markers that satisfy the existence check but aren't real files.
+        ".no_exist",
+        # ComfyUI accessory components — pulled in via an image-gen
+        # workflow, not standalone loadable models. Bring back through a
+        # dedicated image-gen surface once one exists.
+        "vae",
+        "vae_approx",
+        "clip",
+        "clip_vision",
+        "controlnet",
+        "embeddings",
+        "loras",
+        "text_encoders",
+        "upscale_models",
+        "diffusion_models",
+        "comfyui-nodes",
+        "comfyui-user",
+        # vibevoice / moonshine model assets live under voices/; those
+        # are managed by their respective slot providers, not by the
+        # generic dispatcher.
+        "voices",
+    }
+)
+
+# A filename whose stem is a long pure-hex string is almost always an
+# HF cache blob (and the symlink that references it lives under
+# snapshots/ with a real name). We deduplicate via symlink resolution
+# upstream of this filter; this is a belt-and-suspenders fallback.
+_HEX_BLOB_RE = re.compile(r"^[0-9a-f]{32,}$")
+
+# HF Transformers multi-file shard pattern (e.g. model-00001-of-00003.safetensors).
+# These need the transformers library to stitch back together; hal0's
+# llama-server / FLM providers expect a single-file GGUF or single
+# .safetensors checkpoint, so a lone shard isn't loadable on its own.
+_SHARD_RE = re.compile(r"^.+-\d{5}-of-\d{5}$")
 
 
 # ── Candidate dataclass ───────────────────────────────────────────────────
@@ -84,14 +132,17 @@ def _match_curated(filename: str) -> CuratedModel | None:
 
 
 def _is_skippable(p: Path) -> bool:
-    """Skip dotfiles, .tmp partials, and known-bad directory contents."""
+    """Skip dotfiles, .tmp partials, hash-only blob names, shards, accessory dirs."""
     name = p.name
     if name.startswith("."):
         return True
     if name.endswith(".tmp"):
         return True
-    # mmproj files (vision projectors) shouldn't auto-register as chat models.
     if "mmproj" in name.lower():
+        return True
+    if _HEX_BLOB_RE.match(p.stem):
+        return True
+    if _SHARD_RE.match(p.stem):
         return True
     return any(part in _SKIP_DIR_NAMES for part in p.parts)
 
@@ -141,6 +192,12 @@ def find_candidates(
             if candidate.suffix.lower() not in exts:
                 continue
             abs_path = candidate.resolve()
+            # Re-check on the resolved path so HF snapshot symlinks that
+            # point into a `/blobs/<sha>` cache get skipped — their suffix
+            # check passes (the symlink name has the right extension) but
+            # the resolved target has no extension and a hex-blob stem.
+            if _is_skippable(abs_path):
+                continue
             if str(abs_path) in known_paths:
                 continue
             if abs_path in seen:
@@ -150,13 +207,17 @@ def find_candidates(
                 size = abs_path.stat().st_size
             except OSError:
                 size = 0
+            # Prefer the symlink filename for id derivation + curated
+            # match: the resolved blob is hash-named, but the snapshot
+            # symlink carries the human-meaningful name.
+            naming_source = candidate
             out.append(
                 CandidateModel(
                     path=abs_path,
                     size_bytes=size,
-                    suggested_id=_normalise_id(abs_path.stem),
-                    curated_match=_match_curated(abs_path.name),
-                    capability_guess=_guess_capability(abs_path.name),
+                    suggested_id=_normalise_id(naming_source.stem),
+                    curated_match=_match_curated(naming_source.name),
+                    capability_guess=_guess_capability(naming_source.name),
                 )
             )
     return out
