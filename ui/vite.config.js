@@ -3,23 +3,15 @@ import vue from '@vitejs/plugin-vue'
 import tailwindcss from '@tailwindcss/vite'
 import { fileURLToPath, URL } from 'node:url'
 
-// ai.thinmint.dev and ai-dev.thinmint.dev both point at this Vite dev
-// server (via Traefik on 10.0.1.200).  /api + /v1 go straight to
-// hal0-api on hal0-test (10.0.1.230:8080) — bypasses Caddy entirely.
-// hal0-test runs with HAL0_AUTH_ENABLED=1; we satisfy it by injecting
-// X-Forwarded-Email=admin here, matching the no-auth Caddy vhost.  This
-// is dev-only — production traffic should go through Caddy where
-// inbound forwarded headers are stripped before re-injection.
+// ai-dev.thinmint.dev now terminates at Caddy on hal0-dev VM (10.0.1.141:80),
+// which fans out /api+/v1 → 8080, /chat/* → 3001 (OpenWebUI), /* → 5173
+// (this Vite server). When developing without Caddy in front (e.g. hitting
+// http://localhost:5173 directly) Vite still needs to proxy /api+/v1 to
+// the local hal0-api. HAL0_AUTH_ENABLED=0 on dev, so no header injection.
 function apiProxy() {
   return {
-    target: 'http://10.0.1.230:8080',
+    target: 'http://127.0.0.1:8080',
     changeOrigin: true,
-    configure: (proxy) => {
-      proxy.on('proxyReq', (proxyReq) => {
-        proxyReq.setHeader('X-Forwarded-Email', 'admin')
-        proxyReq.setHeader('X-Forwarded-User', 'admin')
-      })
-    },
   }
 }
 
@@ -37,9 +29,9 @@ export default defineConfig({
   server: {
     host: '0.0.0.0',
     port: 5173,
-    allowedHosts: ['ai.thinmint.dev', 'ai-dev.thinmint.dev', 'localhost', '127.0.0.1'],
+    allowedHosts: ['ai-dev.thinmint.dev', 'localhost', '127.0.0.1', '10.0.1.141'],
     hmr: {
-      host: 'ai.thinmint.dev',
+      host: 'ai-dev.thinmint.dev',
       protocol: 'wss',
       clientPort: 443,
     },

@@ -94,6 +94,19 @@ async def _openwebui_is_active() -> bool:
     return rc == 0
 
 
+def _behind_proxy(request: Request) -> bool:
+    """True when the request arrived through a reverse proxy.
+
+    Detected via the proxy-set ``X-Forwarded-*`` headers (Caddy, Traefik,
+    nginx all set at least one of these). A direct hit on hal0-api's
+    bound port has none of them — that path keeps the legacy host:port
+    URL shape so ``http://hal0.local:8080`` still produces a usable
+    Chat link.
+    """
+    fwd = request.headers
+    return any(fwd.get(h) for h in ("x-forwarded-host", "x-forwarded-proto", "x-forwarded-for"))
+
+
 @router.get("/urls")
 async def get_urls(request: Request) -> dict[str, object]:
     """Return the canonical URLs the dashboard should advertise.
@@ -102,12 +115,27 @@ async def get_urls(request: Request) -> dict[str, object]:
     being present)::
 
         {
-          "api":               "http://<host>:8080",
-          "openwebui":         "http://<host>:3001",
+          "api":               "http://<host>:8080" | "https://<host>",
+          "openwebui":         "http://<host>:3001" | "https://<host>/chat/",
           "openwebui_enabled": true | false,
         }
+
+    When the request reached us via a reverse proxy (X-Forwarded-* set
+    by Caddy/Traefik/nginx), the URLs are path-based so the auth proxy
+    in front of us still gets to inject ``X-Forwarded-Email`` before
+    the request lands on OpenWebUI. Without that, OpenWebUI's trusted-
+    header mode rejects the request as "provider has not provided a
+    trusted header".
     """
     host = _resolve_host(request)
+    if _behind_proxy(request):
+        scheme = request.headers.get("x-forwarded-proto") or request.url.scheme
+        forwarded_host = request.headers.get("x-forwarded-host") or host
+        return {
+            "api": f"{scheme}://{forwarded_host}",
+            "openwebui": f"{scheme}://{forwarded_host}/chat/",
+            "openwebui_enabled": await _openwebui_is_active(),
+        }
     return {
         "api": f"http://{host}:{_api_port()}",
         "openwebui": f"http://{host}:{_OPENWEBUI_PORT}",

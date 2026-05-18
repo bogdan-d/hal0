@@ -54,3 +54,20 @@ def test_urls_openwebui_enabled_false_when_systemctl_missing(
     resp = client.get("/api/config/urls")
     assert resp.status_code == 200
     assert resp.json()["openwebui_enabled"] is False
+
+
+def test_urls_path_based_when_behind_proxy(client: TestClient) -> None:
+    """When X-Forwarded-* is present, openwebui is a /chat/ path on the
+    forwarded host — not a direct host:3001 URL that bypasses the proxy
+    and skips X-Forwarded-Email injection."""
+    resp = client.get(
+        "/api/config/urls",
+        headers={
+            "x-forwarded-host": "ai-dev.thinmint.dev",
+            "x-forwarded-proto": "https",
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["openwebui"] == "https://ai-dev.thinmint.dev/chat/", body
+    assert body["api"] == "https://ai-dev.thinmint.dev", body
