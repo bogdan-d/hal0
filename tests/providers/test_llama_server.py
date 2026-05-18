@@ -117,6 +117,66 @@ def test_build_env_emits_embedding_flag_when_model_is_embedding(
     assert "--embedding" in env["HAL0_EXTRA_ARGS"]
 
 
+# ─── A3 flag-merge wiring (model.defaults.extra_args ⊕ slot.server.extra_args)
+#
+# These exercise the launcher's arg-build site that consumes the new
+# `merge_flags` util from hal0.slots.flag_merge.  The merged string ends
+# up appended (shlex-split) to HAL0_EXTRA_ARGS, so we assert on that
+# env var rather than on start_cmd output.
+
+
+def test_build_env_no_extra_args_when_both_empty(
+    provider: LlamaServerProvider, slot_cfg: dict[str, Any], model_info: dict[str, Any]
+) -> None:
+    """No model defaults + no slot override → no merged flags injected."""
+    env = provider.build_env(slot_cfg, model_info)
+    # Must not contain a merged-flag we'd expect from either source.
+    assert "--lora" not in env["HAL0_EXTRA_ARGS"]
+    assert "--rope-freq-base" not in env["HAL0_EXTRA_ARGS"]
+
+
+def test_build_env_picks_up_model_defaults_extra_args(
+    provider: LlamaServerProvider, slot_cfg: dict[str, Any], model_info: dict[str, Any]
+) -> None:
+    """model_info['defaults']['extra_args'] only → merged into HAL0_EXTRA_ARGS."""
+    model_info["defaults"] = {"extra_args": "--rope-freq-base 10000"}
+    env = provider.build_env(slot_cfg, model_info)
+    assert "--rope-freq-base" in env["HAL0_EXTRA_ARGS"]
+    assert "10000" in env["HAL0_EXTRA_ARGS"]
+
+
+def test_build_env_picks_up_slot_server_extra_args(
+    provider: LlamaServerProvider, slot_cfg: dict[str, Any], model_info: dict[str, Any]
+) -> None:
+    """slot_cfg['server']['extra_args'] only → merged into HAL0_EXTRA_ARGS."""
+    slot_cfg["server"] = {"extra_args": "--lora /tmp/lora.gguf"}
+    env = provider.build_env(slot_cfg, model_info)
+    assert "--lora" in env["HAL0_EXTRA_ARGS"]
+    assert "/tmp/lora.gguf" in env["HAL0_EXTRA_ARGS"]
+
+
+def test_build_env_slot_wins_over_model_defaults_on_collision(
+    provider: LlamaServerProvider, slot_cfg: dict[str, Any], model_info: dict[str, Any]
+) -> None:
+    """When both sides set the same flag, the slot's value wins."""
+    model_info["defaults"] = {"extra_args": "--rope-freq-base 10000"}
+    slot_cfg["server"] = {"extra_args": "--rope-freq-base 500000"}
+    env = provider.build_env(slot_cfg, model_info)
+    assert "500000" in env["HAL0_EXTRA_ARGS"]
+    assert "10000" not in env["HAL0_EXTRA_ARGS"]
+
+
+def test_build_env_merges_both_when_no_collision(
+    provider: LlamaServerProvider, slot_cfg: dict[str, Any], model_info: dict[str, Any]
+) -> None:
+    """Non-overlapping flags from model + slot both end up in HAL0_EXTRA_ARGS."""
+    model_info["defaults"] = {"extra_args": "--rope-freq-base 10000"}
+    slot_cfg["server"] = {"extra_args": "--lora /tmp/lora.gguf"}
+    env = provider.build_env(slot_cfg, model_info)
+    assert "--rope-freq-base" in env["HAL0_EXTRA_ARGS"]
+    assert "--lora" in env["HAL0_EXTRA_ARGS"]
+
+
 # ─── start_cmd ────────────────────────────────────────────────────────────────
 
 

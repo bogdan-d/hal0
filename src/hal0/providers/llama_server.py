@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import logging
 import os
+import shlex
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +34,7 @@ import httpx
 from hal0.errors import Hal0Error
 from hal0.providers._gpu import resolve_gpu_group_ids as _resolve_gpu_group_ids
 from hal0.providers.base import ContainerSpec, Provider
+from hal0.slots.flag_merge import merge_flags
 
 log = logging.getLogger(__name__)
 
@@ -253,6 +255,21 @@ class LlamaServerProvider(Provider):
             extra.extend(["--mmproj", str(mmproj)])
         if model_info.get("extra_args"):
             extra.append(model_info["extra_args"])
+
+        # ── Phase 1 A3: model.defaults.extra_args ⊕ slot.server.extra_args ──
+        # Merge the model registry's freeform CLI defaults with the slot's
+        # [server].extra_args override.  Slot flags win on collisions (except
+        # for the append-list flags --lora/--draft-model/--override-kv which
+        # llama-server accepts repeated occurrences of).  The merged string
+        # is shlex-split so quoted values survive the trip through
+        # HAL0_EXTRA_ARGS into argv.
+        defaults = model_info.get("defaults") or {}
+        model_extra_args = defaults.get("extra_args") if isinstance(defaults, dict) else None
+        slot_server = slot_cfg.get("server") if isinstance(slot_cfg.get("server"), dict) else {}
+        slot_extra_args = slot_server.get("extra_args") if slot_server else None
+        merged = merge_flags(model_extra_args, slot_extra_args)
+        if merged:
+            extra.extend(shlex.split(merged))
 
         return {
             "HAL0_MODEL": str(model_path),

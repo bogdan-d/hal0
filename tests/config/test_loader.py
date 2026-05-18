@@ -242,6 +242,57 @@ class TestSlotConfigRoundTrip:
             data = tomllib.load(f)
         assert data["defaults"]["threads"] == 12
 
+    # ── Phase 1 A3: [server].extra_args ──────────────────────────────────
+
+    def test_server_extra_args_missing_defaults_to_none(
+        self, tmp_hal0_home: str
+    ) -> None:
+        """A slot TOML without a [server] table loads with server.extra_args = None."""
+        paths.slots_config_dir().mkdir(parents=True, exist_ok=True)
+        (paths.slots_config_dir() / "primary.toml").write_text(
+            '[slot]\nname = "primary"\nport = 8081\n'
+        )
+        cfg = load_slot_config("primary")
+        assert cfg.server.extra_args is None
+
+    def test_server_extra_args_loads_from_toml(self, tmp_hal0_home: str) -> None:
+        """`[server].extra_args = "..."` populates the typed ServerConfig field."""
+        paths.slots_config_dir().mkdir(parents=True, exist_ok=True)
+        (paths.slots_config_dir() / "primary.toml").write_text(
+            "[slot]\n"
+            'name = "primary"\n'
+            "port = 8081\n"
+            "[server]\n"
+            'extra_args = "--lora /tmp/lora.gguf"\n'
+        )
+        cfg = load_slot_config("primary")
+        assert cfg.server.extra_args == "--lora /tmp/lora.gguf"
+
+    def test_server_extra_args_round_trips(self, tmp_hal0_home: str) -> None:
+        """save → load → save preserves [server].extra_args on disk."""
+        cfg = SlotConfig(name="primary", port=8081)
+        cfg.server.extra_args = "--rope-freq-base 500000"
+        save_slot_config(cfg)
+
+        loaded = load_slot_config("primary")
+        assert loaded.server.extra_args == "--rope-freq-base 500000"
+
+        # Disk shape is a proper [server] table.
+        with open(paths.slots_config_dir() / "primary.toml", "rb") as f:
+            data = tomllib.load(f)
+        assert data["server"]["extra_args"] == "--rope-freq-base 500000"
+
+    def test_unset_server_extra_args_does_not_write_empty_table(
+        self, tmp_hal0_home: str
+    ) -> None:
+        """A default ServerConfig (all None) elides the [server] table on disk."""
+        cfg = SlotConfig(name="primary", port=8081)
+        save_slot_config(cfg)
+        with open(paths.slots_config_dir() / "primary.toml", "rb") as f:
+            data = tomllib.load(f)
+        # No stray empty [server] table.
+        assert "server" not in data
+
 
 # ── providers.toml round-trip ────────────────────────────────────────────────
 

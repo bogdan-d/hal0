@@ -25,7 +25,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, field_validator, model_serializer, model_validator
 
 # ── Shared constants ───────────────────────────────────────────────────────────
 
@@ -82,6 +82,30 @@ class ModelConfig(BaseModel):
     )
 
 
+class ServerConfig(BaseModel):
+    """[server] section in a slot TOML.
+
+    Currently carries only ``extra_args`` — a freeform CLI-flag string
+    appended after model defaults at launcher arg-build time.  Future
+    server-side knobs (idle-eviction policy, request quotas, …) land
+    here too rather than at top-level so the surface stays grouped.
+
+    See docs/models-slots-impl-plan.md §A3 and the ``flag_merge`` util.
+    """
+
+    model_config = {"populate_by_name": True, "extra": "allow"}
+
+    extra_args: str | None = Field(
+        default=None,
+        description=(
+            "Freeform llama-server CLI passthrough.  Tokenised via shlex; "
+            "merged with the model's defaults.extra_args by "
+            "hal0.slots.flag_merge.merge_flags so slot flags win on collisions "
+            "(except for append-list flags like --lora / --draft-model / --override-kv)."
+        ),
+    )
+
+
 class SlotConfig(BaseModel):
     """Pydantic model for a single slot's TOML config (slots/<name>.toml).
 
@@ -118,6 +142,11 @@ class SlotConfig(BaseModel):
     model: ModelConfig = Field(default_factory=ModelConfig)
 
     # [server] section
+    # NOTE: ``workers`` and ``idle_timeout_s`` are flat top-level fields
+    # for haloai-era round-trip compatibility (the loader hoists [slot]
+    # keys, not [server] keys, into the validated SlotConfig).  The new
+    # nested ``server`` model below holds fields that are authored under
+    # [server] in TOML — keep additions there.
     workers: int = Field(
         default=1,
         ge=1,
@@ -129,10 +158,74 @@ class SlotConfig(BaseModel):
         description="Seconds idle before transitioning to 'idle' state.  0 disables.",
     )
 
+    # Typed [server] subsection.  See ServerConfig + the round-trip
+    # validator/serializer below: on load we hoist the [server] table out
+    # of the catch-all ``extra`` dict; on dump we re-tuck it under extra
+    # so loader._unflatten_slot_toml writes a proper [server] table.
+    server: ServerConfig = Field(default_factory=ServerConfig)
+
     extra: dict[str, Any] = Field(
         default_factory=dict,
         description="Provider-specific slot params passed verbatim.",
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _hoist_server_from_extra(cls, data: Any) -> Any:
+        """Pull a `[server]` TOML table out of the loader's `extra` catch-all.
+
+        ``hal0.config.loader._flatten_slot_toml`` shoves every unrecognised
+        top-level TOML table (anything that isn't `[slot]` or `[model]`)
+        into ``extra``.  Without this hoist, `[server].extra_args` written
+        on disk would never reach the typed ``ServerConfig`` field; it would
+        just round-trip opaquely through ``extra["server"]``.
+        """
+        if not isinstance(data, dict):
+            return data
+        # Already top-level — nothing to do.
+        if "server" in data and data.get("server") is not None:
+            return data
+        extra = data.get("extra")
+        if not isinstance(extra, dict):
+            return data
+        server = extra.get("server")
+        if isinstance(server, dict):
+            # Copy to avoid mutating the loader's dict in place.
+            new_data = dict(data)
+            new_extra = dict(extra)
+            new_extra.pop("server", None)
+            new_data["server"] = server
+            new_data["extra"] = new_extra
+            return new_data
+        return data
+
+    @model_serializer(mode="wrap")
+    def _tuck_server_into_extra(self, handler: Any) -> dict[str, Any]:
+        """Inverse of `_hoist_server_from_extra` for round-trip dumps.
+
+        ``hal0.config.loader._unflatten_slot_toml`` rebuilds the on-disk
+        shape by enumerating known top-level keys and then sweeping
+        ``extra.items()`` back to top-level tables.  It does not know about
+        the new ``server`` field, so we re-park its dump under
+        ``extra["server"]`` and drop the duplicate top-level entry.  Empty
+        ServerConfigs (all-None) are elided so we don't write an empty
+        `[server]` table to disk.
+        """
+        data: dict[str, Any] = handler(self)
+        server = data.pop("server", None)
+        if isinstance(server, dict):
+            # Drop None-valued fields so an untouched ServerConfig (all
+            # defaults) doesn't produce a stray `[server]` table on disk.
+            cleaned = {k: v for k, v in server.items() if v is not None}
+            if cleaned:
+                extra = data.get("extra")
+                if not isinstance(extra, dict):
+                    extra = {}
+                else:
+                    extra = dict(extra)
+                extra["server"] = cleaned
+                data["extra"] = extra
+        return data
 
     @field_validator("name")
     @classmethod
@@ -550,6 +643,7 @@ __all__ = [
     "NPUInfo",
     "ProviderEntry",
     "ProvidersConfig",
+    "ServerConfig",
     "SlotConfig",
     "SlotsConfig",
     "TelemetryConfig",
