@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { ref } from 'vue'
+import { ref, computed } from 'vue'
 import { useToastsStore } from './toasts.js'
 
 export const useSystemStore = defineStore('system', () => {
@@ -8,6 +8,11 @@ export const useSystemStore = defineStore('system', () => {
   const slots = ref([])       // slots array
   const loading = ref(false)
   const error = ref(null)
+
+  // Convenience getter — Footer bar uses this to render the
+  // `**hal0** · <hostname>` brand line. Falls back to '' so the
+  // separator dot can be conditionally hidden.
+  const hostname = computed(() => status.value?.hostname || '')
 
   async function fetchStatus() {
     loading.value = true
@@ -48,5 +53,5 @@ export const useSystemStore = defineStore('system', () => {
     }
   }
 
-  return { status, hardware, slots, loading, error, fetchStatus }
+  return { status, hardware, slots, loading, error, hostname, fetchStatus }
 })

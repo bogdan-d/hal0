@@ -1,14 +1,17 @@
 <script setup>
-import { ref, watch, onMounted, onUnmounted } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useSystemStore } from './stores/system.js'
+import { useFooterStore } from './stores/footer.js'
 import Sidebar from './components/Sidebar.vue'
 import TopBar from './components/TopBar.vue'
 import ToastContainer from './components/ToastContainer.vue'
 import CommandPalette from './components/CommandPalette.vue'
 import RestartBanner from './components/RestartBanner.vue'
+import Footer from './components/footer/Footer.vue'
 
 const system = useSystemStore()
+const footer = useFooterStore()
 const route  = useRoute()
 const router = useRouter()
 
@@ -29,13 +32,38 @@ function syncViewport(initial = false) {
   sidebarOpen.value = !mobile  // default: open on desktop, closed on mobile
 }
 
+function isTextInput(el) {
+  if (!el) return false
+  const tag = (el.tagName || '').toLowerCase()
+  if (tag === 'input' || tag === 'textarea' || tag === 'select') return true
+  if (el.isContentEditable) return true
+  return false
+}
+
 function handleKey(e) {
   if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
     e.preventDefault()
     cmdkOpen.value = true
-  } else if (e.key === 'Escape') {
-    if (cmdkOpen.value) cmdkOpen.value = false
-    else if (isMobile.value && sidebarOpen.value) sidebarOpen.value = false
+    return
+  }
+  // Alt+~ toggle footer — suppress inside text inputs.
+  if (e.altKey && (e.key === '`' || e.key === '~' || e.code === 'Backquote')) {
+    if (isTextInput(e.target)) return
+    e.preventDefault()
+    footer.toggleExpanded()
+    return
+  }
+  // Alt+ArrowLeft/Right cycle main footer tabs (only when expanded).
+  if (e.altKey && footer.expanded && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
+    if (isTextInput(e.target)) return
+    e.preventDefault()
+    footer.cycleTab(e.key === 'ArrowRight' ? 1 : -1)
+    return
+  }
+  if (e.key === 'Escape') {
+    if (cmdkOpen.value) { cmdkOpen.value = false; return }
+    if (footer.expanded) { footer.collapse(); return }
+    if (isMobile.value && sidebarOpen.value) sidebarOpen.value = false
   }
 }
 
@@ -75,7 +103,9 @@ onUnmounted(() => {
       'sidebar-collapsed': !sidebarOpen && !isMobile,
       'is-mobile': isMobile,
       'mobile-nav-open': isMobile && sidebarOpen,
+      'footer-expanded': footer.expanded && !isMobile,
     }"
+    :style="!isMobile ? { '--footer-row': footer.expanded ? `${28 + footer.height}px` : '28px' } : null"
   >
     <TopBar
       :is-mobile="isMobile"
@@ -114,6 +144,8 @@ onUnmounted(() => {
       @select="onCmdkSelect"
     />
 
+    <Footer />
+
     <ToastContainer />
   </div>
 </template>
@@ -122,7 +154,7 @@ onUnmounted(() => {
 .app-shell {
   display: grid;
   grid-template-columns: 220px 1fr;
-  grid-template-rows: 44px 1fr;
+  grid-template-rows: 44px 1fr var(--footer-row, 28px);
   height: 100vh;
   overflow: hidden;
   background: var(--color-bg);
@@ -143,6 +175,9 @@ onUnmounted(() => {
 /* ── Mobile (< 768px) ─────────────────────────────────────────── */
 .app-shell.is-mobile {
   grid-template-columns: 1fr;
+  /* Mobile: footer is bar-only (28px) when collapsed; expanded uses an
+     overlay sheet via fixed positioning, not the grid row. */
+  grid-template-rows: 44px 1fr 28px;
 }
 
 .app-shell.is-mobile .app-main {
