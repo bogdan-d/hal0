@@ -48,6 +48,24 @@ _ASR_TOKENS = ("whisper", "moonshine", "-asr", "_asr")
 _TTS_TOKENS = ("kokoro", "vibevoice", "-tts", "_tts")
 
 
+def _hf_repo_name_from_path(path: Path) -> str | None:
+    """Walk up the path looking for ``models--ORG--REPO`` (HF cache layout).
+
+    Returns ``ORG/REPO`` when found, else ``None``. Useful when scanning the
+    HF blob cache directly: blob files are content-hash named so the parent
+    ``models--ORG--REPO`` dir is the only meaningful label.
+    """
+    for parent in path.parents:
+        seg = parent.name
+        if seg.startswith("models--") and "--" in seg[len("models--") :]:
+            rest = seg[len("models--") :]
+            parts = rest.split("--", 1)
+            if len(parts) == 2:
+                return f"{parts[0]}/{parts[1]}"
+            return rest
+    return None
+
+
 @dataclass
 class DetectionResult:
     """Outcome of a single-file detection pass.
@@ -108,6 +126,7 @@ def _heuristic_only(path: Path) -> DetectionResult:
         suggested_capabilities=caps,
         context_length=None,
         confidence="low",
+        suggested_name=_hf_repo_name_from_path(path),
         raw_hints={"source": "filename", "stem": path.stem, "suffix": path.suffix.lower()},
     )
 
@@ -124,13 +143,13 @@ def detect(path: str | Path) -> DetectionResult:
     p = Path(path)
     suffix = p.suffix.lower()
 
-    if suffix == ".gguf":
-        header = read_gguf_header(p)
+    # Try GGUF magic bytes regardless of extension — HF blob cache stores
+    # GGUF data under content-hash filenames with no suffix.
+    header = read_gguf_header(p)
+    if header is not None or suffix == ".gguf":
         if header is None:
-            # Bad magic or unreadable — degrade to heuristic. We still
-            # seed the GGUF backends since the file *claims* to be GGUF
-            # by extension and the launcher will surface a clear error if
-            # not. confidence='low' so the UI flags it.
+            # Suffix claimed .gguf but magic failed: degrade to heuristic
+            # with the GGUF backend seed.
             r = _heuristic_only(p)
             r.raw_hints["gguf_header_read"] = "failed"
             return r
@@ -154,6 +173,8 @@ def detect(path: str | Path) -> DetectionResult:
 
         name_candidate = header.get("general.name") or header.get("general.basename")
         suggested_name = str(name_candidate).strip() if isinstance(name_candidate, str) and name_candidate.strip() else None
+        if not suggested_name:
+            suggested_name = _hf_repo_name_from_path(p)
 
         return DetectionResult(
             suggested_backends=list(_GGUF_BACKENDS),

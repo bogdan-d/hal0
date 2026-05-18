@@ -193,6 +193,10 @@ async def scan_preview(request: Request) -> dict[str, Any]:
             it = root.rglob("*") if recursive else root.iterdir()
             try:
                 for p in it:
+                    # Skip HF cache placeholder files (`.no_exist/<rev>/<file>`)
+                    # — these are empty markers, not real models.
+                    if ".no_exist" in p.parts:
+                        continue
                     try:
                         if not p.is_file():
                             continue
@@ -211,10 +215,15 @@ async def scan_preview(request: Request) -> dict[str, Any]:
             if resolved in seen:
                 continue
             seen.add(resolved)
-            result: DetectionResult = detect(resolved)
+            # Detect against the symlink path so HF-cache scans surface
+            # the meaningful filename / HF repo via _hf_repo_name_from_path.
+            # GGUF magic-byte sniffing handles the blob-with-no-suffix case
+            # transparently (mmap follows symlinks).
+            result: DetectionResult = detect(p)
             preview.append(
                 {
-                    "path": str(resolved),
+                    "path": str(p),
+                    "resolved_path": str(resolved),
                     "suggested_backends": list(result.suggested_backends),
                     "suggested_capabilities": list(result.suggested_capabilities),
                     "context_length": result.context_length,

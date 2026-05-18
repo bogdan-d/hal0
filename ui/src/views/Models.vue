@@ -932,7 +932,7 @@ const QUANTS = ['Q4_K_M', 'Q5_K_M', 'Q8_0', 'F16', 'BF16']
                   <div v-if="singleDetected" class="detect-block">
                     <div class="detect-head">
                       <span class="detect-label">Detected</span>
-                      <span class="mono-chip">conf {{ Number(singleDetected.confidence).toFixed(2) }}</span>
+                      <span class="mono-chip">conf {{ singleDetected.confidence ?? '—' }}</span>
                       <span v-if="singleDetected.context_length" class="mono-chip">ctx {{ singleDetected.context_length }}</span>
                     </div>
                     <div class="field">
@@ -1027,7 +1027,7 @@ const QUANTS = ['Q4_K_M', 'Q5_K_M', 'Q8_0', 'F16', 'BF16']
                               </div>
                             </td>
                             <td class="mono-cell">{{ row.context_length ?? '—' }}</td>
-                            <td class="mono-cell">{{ Number(row.confidence ?? 0).toFixed(2) }}</td>
+                            <td class="mono-cell">{{ row.confidence ?? '—' }}</td>
                           </tr>
                         </tbody>
                       </table>
