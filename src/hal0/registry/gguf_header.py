@@ -86,6 +86,9 @@ _INTERESTING_KEYS_STATIC: frozenset[str] = frozenset(
     {
         "general.architecture",
         "general.embedding_length",
+        "general.name",
+        "general.basename",
+        "general.size_label",
     }
 )
 

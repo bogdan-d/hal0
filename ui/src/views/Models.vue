@@ -299,7 +299,7 @@ async function detectSingleFile() {
       backends: [...(row.suggested_backends ?? [])],
       capabilities: [...(row.suggested_capabilities ?? [])],
     }
-    if (!localName.value) localName.value = slugFromPath(row.path)
+    if (!localName.value) localName.value = (row.suggested_name?.trim() || slugFromPath(row.path))
   } catch (e) {
     toasts.error(e.message)
   } finally {
@@ -315,10 +315,12 @@ async function submitSingleFile() {
   localBusy.value = true
   try {
     const det = singleDetected.value
-    const id = slugFromPath(det.path)
+    const detectedName = (det.suggested_name || '').trim()
+    const idSource = detectedName || slugFromPath(det.path)
+    const id = idSource.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || slugFromPath(det.path)
     const body = {
       id,
-      name: localName.value || id,
+      name: localName.value || detectedName || id,
       path: det.path,
       license: localLicense.value || 'unknown',
       backends: singleEditable.value.backends,
@@ -351,15 +353,22 @@ async function previewScan() {
       method: 'POST',
       body: JSON.stringify({ paths: [localPath.value.trim()], recursive: localRecursive.value }),
     })
-    const rows = (data?.preview ?? []).map((r) => ({
-      path: r.path,
-      id: slugFromPath(r.path),
-      name: slugFromPath(r.path),
-      backends: [...(r.suggested_backends ?? [])],
-      capabilities: [...(r.suggested_capabilities ?? [])],
-      context_length: r.context_length,
-      confidence: r.confidence,
-    }))
+    const rows = (data?.preview ?? []).map((r) => {
+      const detected = (r.suggested_name || '').trim()
+      const slug = slugFromPath(r.path)
+      const idSlug = detected
+        ? detected.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')
+        : slug
+      return {
+        path: r.path,
+        id: idSlug || slug,
+        name: detected || slug,
+        backends: [...(r.suggested_backends ?? [])],
+        capabilities: [...(r.suggested_capabilities ?? [])],
+        context_length: r.context_length,
+        confidence: r.confidence,
+      }
+    })
     scanRows.value = rows
     if (rows.length === 0) toasts.error('No models found in that path')
   } catch (e) {

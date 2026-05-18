@@ -219,6 +219,7 @@ async def scan_preview(request: Request) -> dict[str, Any]:
                     "suggested_capabilities": list(result.suggested_capabilities),
                     "context_length": result.context_length,
                     "confidence": result.confidence,
+                    "suggested_name": result.suggested_name,
                     "raw_hints": dict(result.raw_hints),
                 }
             )

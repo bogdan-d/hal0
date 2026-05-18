@@ -60,6 +60,7 @@ class DetectionResult:
     suggested_capabilities: list[str]
     context_length: int | None = None
     confidence: Confidence = "low"
+    suggested_name: str | None = None
     raw_hints: dict[str, Any] = field(default_factory=dict)
 
 
@@ -151,16 +152,23 @@ def detect(path: str | Path) -> DetectionResult:
 
         caps = ["embed"] if is_embed else ["chat"]
 
+        name_candidate = header.get("general.name") or header.get("general.basename")
+        suggested_name = str(name_candidate).strip() if isinstance(name_candidate, str) and name_candidate.strip() else None
+
         return DetectionResult(
             suggested_backends=list(_GGUF_BACKENDS),
             suggested_capabilities=caps,
             context_length=ctx_len_int,
             confidence="high",
+            suggested_name=suggested_name,
             raw_hints={
                 "source": "gguf_header",
                 "architecture": arch,
                 "pooling_type": pooling,
                 "version": header.get("version"),
+                "name": header.get("general.name"),
+                "basename": header.get("general.basename"),
+                "size_label": header.get("general.size_label"),
             },
         )
 

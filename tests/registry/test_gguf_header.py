@@ -117,14 +117,18 @@ class TestSkipping:
     def test_skips_unwanted_string_kv(self, tmp_path: Path) -> None:
         kvs = [
             ("general.name", _GGUF_TYPE_STRING, _enc_str("Qwen3 4B Instruct")),
+            ("general.license", _GGUF_TYPE_STRING, _enc_str("apache-2.0")),
             ("general.architecture", _GGUF_TYPE_STRING, _enc_str("qwen3")),
             ("qwen3.context_length", _GGUF_TYPE_UINT32, struct.pack("<I", 4096)),
         ]
-        p = _write_fixture(tmp_path, "noisy.gguf", _build_gguf(3, kvs))
+        p = _write_fixture(tmp_path, "noisy.gguf", _build_gguf(4, kvs))
         out = read_gguf_header(p)
         assert out is not None
-        # We didn't collect general.name (not in interest list).
-        assert "general.name" not in out
+        # general.name is now collected (interest list expanded so the UI
+        # can surface a human-readable model name).
+        assert out["general.name"] == "Qwen3 4B Instruct"
+        # general.license is NOT in the interest list — still skipped.
+        assert "general.license" not in out
         assert out["context_length"] == 4096
 
     def test_skips_scalar_kv(self, tmp_path: Path) -> None:
