@@ -382,9 +382,23 @@ class LlamaServerProvider(Provider):
             command.extend(extra.split())
 
         # Bind-mount the model directory so in-container path matches host.
-        paths = slot_cfg.get("_paths", {}) or {}
-        models_base = paths.get("models_base", "/var/lib/hal0/models")
+        # _paths overrides win when the SlotManager injects them; otherwise
+        # fall back to the HAL0_HOME-aware paths.models_dir() rather than
+        # a hardcoded /var/lib/hal0/models so dev installs (HAL0_HOME set)
+        # mount the right directory.
+        slot_paths = slot_cfg.get("_paths", {}) or {}
+        from hal0.config import paths as _cfg_paths
+
+        models_base = slot_paths.get("models_base") or str(_cfg_paths.models_dir())
         mounts: list[tuple[str, str]] = [(models_base, models_base)]
+        # Also bind-mount the model file's actual parent if it lives
+        # outside models_base — e.g. a model registered against a shared
+        # /mnt/ai-models path. Without this the in-container llama-server
+        # gets an ENOENT on the model path even though the registry has
+        # the right absolute path.
+        model_dir = str(Path(model_path).parent)
+        if not model_dir.startswith(models_base):
+            mounts.append((model_dir, model_dir))
         # Bind-mount /etc/hal0 so flags referencing absolute config paths
         # (--chat-template-file etc.) resolve at the same path inside.
         config_root = "/etc/hal0"
