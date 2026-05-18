@@ -35,12 +35,51 @@ const error    = ref(null)
 const search   = ref('')
 const searchEl = ref(null)
 
-// Pull model modal
+// Add model modal (was: Pull model — renamed per B3 spec)
 const showPull   = ref(false)
-const pullTab    = ref('curated')   // 'curated' | 'hf' | 'manual'
+const pullTab    = ref('curated')   // 'curated' | 'hf' | 'local'
 const pullForm   = ref({ hf_url: '', name: '', quant: 'Q4_K_M' })
 const pullErrors = ref({})
 const pulling    = ref(false)
+
+// ── Valid backend / capability vocab (mirrors src/hal0/registry/model.py) ──
+const ALL_CAPS     = ['chat', 'embed', 'rerank', 'vision', 'asr', 'tts']
+const ALL_BACKENDS = ['vulkan', 'rocm', 'cuda', 'cpu', 'moonshine', 'kokoro', 'flm']
+
+// ── Local-file tab state ──────────────────────────────────────────────
+// Two sub-modes inside the Local-file tab:
+//   - 'single': register one file via /scan/preview then POST /api/models
+//   - 'scan'  : preview a directory then commit edited rows via /scan
+const localMode    = ref('single')   // 'single' | 'scan'
+const localPath    = ref('')         // shared path input
+const localName    = ref('')         // single-file display-name override
+const localLicense = ref('')         // single-file license override
+const localRecursive = ref(true)     // scan-directory recursive toggle
+
+// Single-file detection preview (after Detect press, before commit).
+const singleDetected = ref(null)     // DetectionResult-shaped object or null
+// Editable single-file row mirrors a scan preview row: backends + caps live
+// here so the user can override before committing.
+const singleEditable = ref({ backends: [], capabilities: [] })
+const localBusy = ref(false)
+
+// Scan-directory preview rows: each is an editable row mirroring backend
+// shape — { path, id, name, backends, capabilities, context_length, confidence, raw_hints }
+const scanRows = ref([])
+
+// ── Edit model modal ──────────────────────────────────────────────────
+const editingModel    = ref(null)
+const editForm        = ref({
+  name: '',
+  capabilities: [],
+  backends: [],
+  defaults: { context_size: null, n_gpu_layers: null, rope_freq_base: null, extra_args: '' },
+})
+const editOriginal    = ref(null)    // pristine copy for "Reset to detected" of each default field
+const editSubmitting  = ref(false)
+const editAdvOpen     = ref(false)
+const editDetected    = ref(null)    // re-detect DetectionResult cached for diff render
+const editReDetecting = ref(false)
 
 // Per-model active pull jobs. Each row that goes into a "downloading"
 // substate gets its own usePullJob instance so multiple pulls can run
@@ -80,11 +119,6 @@ function backendTarget(backend) {
   if (b === 'cpu') return { id: 'cpu', label: 'CPU' }
   return { id: 'unknown', label: b || 'unknown' }
 }
-
-// Edit metadata
-const editingModel   = ref(null)
-const editForm       = ref({ name: '' })
-const editSubmitting = ref(false)
 
 // Delete confirm
 const deletingModel = ref(null)
@@ -216,19 +250,234 @@ async function reattachInFlightPulls() {
   }
 }
 
+// ── Local-file tab ─────────────────────────────────────────────────────
+// Slugify a filename into a registry id. Backend will overwrite if it has
+// stronger heuristics, but a sane default avoids "id required" errors.
+function slugFromPath(p) {
+  if (!p) return ''
+  const base = String(p).split('/').pop() || ''
+  const stem = base.replace(/\.[^.]+$/, '')
+  return stem.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')
+}
+
+function toggleArrayMember(arr, v) {
+  const i = arr.indexOf(v)
+  if (i >= 0) arr.splice(i, 1)
+  else arr.push(v)
+}
+
+function resetLocalState() {
+  localPath.value = ''
+  localName.value = ''
+  localLicense.value = ''
+  localRecursive.value = true
+  singleDetected.value = null
+  singleEditable.value = { backends: [], capabilities: [] }
+  scanRows.value = []
+}
+
+// Single-file: run detect via scan/preview to populate suggested fields.
+async function detectSingleFile() {
+  if (!localPath.value.trim()) {
+    toasts.error('Path is required')
+    return
+  }
+  localBusy.value = true
+  try {
+    const data = await api('/api/models/scan/preview', {
+      method: 'POST',
+      body: JSON.stringify({ paths: [localPath.value.trim()], recursive: false }),
+    })
+    const row = (data?.preview ?? [])[0]
+    if (!row) {
+      toasts.error('No file detected at that path')
+      singleDetected.value = null
+      return
+    }
+    singleDetected.value = row
+    singleEditable.value = {
+      backends: [...(row.suggested_backends ?? [])],
+      capabilities: [...(row.suggested_capabilities ?? [])],
+    }
+    if (!localName.value) localName.value = slugFromPath(row.path)
+  } catch (e) {
+    toasts.error(e.message)
+  } finally {
+    localBusy.value = false
+  }
+}
+
+async function submitSingleFile() {
+  if (!singleDetected.value) {
+    await detectSingleFile()
+    return
+  }
+  localBusy.value = true
+  try {
+    const det = singleDetected.value
+    const id = slugFromPath(det.path)
+    const body = {
+      id,
+      name: localName.value || id,
+      path: det.path,
+      license: localLicense.value || 'unknown',
+      backends: singleEditable.value.backends,
+      capabilities: singleEditable.value.capabilities,
+      metadata: det.context_length != null
+        ? { discovered: true, source: 'manual', context_length: det.context_length }
+        : { discovered: true, source: 'manual' },
+    }
+    await api('/api/models', { method: 'POST', body: JSON.stringify(body) })
+    toasts.success(`Registered "${body.name}"`)
+    showPull.value = false
+    resetLocalState()
+    await loadModels()
+  } catch (e) {
+    toasts.error(e.message)
+  } finally {
+    localBusy.value = false
+  }
+}
+
+// Scan-directory: preview a tree, render editable rows.
+async function previewScan() {
+  if (!localPath.value.trim()) {
+    toasts.error('Path is required')
+    return
+  }
+  localBusy.value = true
+  try {
+    const data = await api('/api/models/scan/preview', {
+      method: 'POST',
+      body: JSON.stringify({ paths: [localPath.value.trim()], recursive: localRecursive.value }),
+    })
+    const rows = (data?.preview ?? []).map((r) => ({
+      path: r.path,
+      id: slugFromPath(r.path),
+      name: slugFromPath(r.path),
+      backends: [...(r.suggested_backends ?? [])],
+      capabilities: [...(r.suggested_capabilities ?? [])],
+      context_length: r.context_length,
+      confidence: r.confidence,
+    }))
+    scanRows.value = rows
+    if (rows.length === 0) toasts.error('No models found in that path')
+  } catch (e) {
+    toasts.error(e.message)
+  } finally {
+    localBusy.value = false
+  }
+}
+
+async function commitScan() {
+  if (scanRows.value.length === 0) return
+  localBusy.value = true
+  try {
+    const body = {
+      rows: scanRows.value.map((r) => ({
+        path: r.path,
+        id: r.id,
+        name: r.name,
+        backends: r.backends,
+        capabilities: r.capabilities,
+      })),
+    }
+    const data = await api('/api/models/scan', { method: 'POST', body: JSON.stringify(body) })
+    const n = (data?.added ?? []).length
+    toasts.success(`Registered ${n} model(s)`)
+    showPull.value = false
+    resetLocalState()
+    await loadModels()
+  } catch (e) {
+    toasts.error(e.message)
+  } finally {
+    localBusy.value = false
+  }
+}
+
 // ── Edit metadata ──────────────────────────────────────────────────────
 function openEdit(model) {
   editingModel.value = model
-  editForm.value = { name: model.name ?? model.id ?? '' }
+  const d = model.defaults ?? {}
+  editForm.value = {
+    name: model.name ?? model.id ?? '',
+    capabilities: [...(model.capabilities ?? [])],
+    backends: [...(model.backends ?? [])],
+    defaults: {
+      context_size:    d.context_size ?? null,
+      n_gpu_layers:    d.n_gpu_layers ?? null,
+      rope_freq_base:  d.rope_freq_base ?? null,
+      extra_args:      d.extra_args ?? '',
+    },
+  }
+  // Snapshot the model so "Reset to detected" can restore individual
+  // default fields without a re-detect round-trip.
+  editOriginal.value = JSON.parse(JSON.stringify({
+    capabilities: model.capabilities ?? [],
+    backends: model.backends ?? [],
+    defaults: d,
+  }))
+  editAdvOpen.value = false
+  editDetected.value = null
+}
+
+function resetDefaultField(key) {
+  const orig = editOriginal.value?.defaults ?? {}
+  editForm.value.defaults[key] = orig[key] ?? (key === 'extra_args' ? '' : null)
+}
+
+async function reDetectModel() {
+  if (!editingModel.value?.path) {
+    toasts.error('Model has no path to detect from')
+    return
+  }
+  editReDetecting.value = true
+  try {
+    const data = await api('/api/models/scan/preview', {
+      method: 'POST',
+      body: JSON.stringify({ paths: [editingModel.value.path], recursive: false }),
+    })
+    const row = (data?.preview ?? [])[0]
+    if (!row) {
+      toasts.error('Detection returned no results')
+      return
+    }
+    editDetected.value = row
+  } catch (e) {
+    toasts.error(e.message)
+  } finally {
+    editReDetecting.value = false
+  }
+}
+
+function applyDetected() {
+  const d = editDetected.value
+  if (!d) return
+  editForm.value.capabilities = [...(d.suggested_capabilities ?? [])]
+  editForm.value.backends     = [...(d.suggested_backends ?? [])]
+  editDetected.value = null
+  toasts.success('Detected values applied')
 }
 
 async function submitEdit() {
   if (!editingModel.value) return
   editSubmitting.value = true
   try {
+    // Strip empty extra_args to null so the backend stores absence cleanly.
+    const defaults = { ...editForm.value.defaults }
+    if (defaults.extra_args === '' || defaults.extra_args == null) defaults.extra_args = null
+    // Drop the whole defaults block if every field is null — keeps the
+    // PUT body small and the registry TOML tidy.
+    const allEmpty = Object.values(defaults).every((v) => v == null)
+    const body = {
+      name: editForm.value.name,
+      capabilities: editForm.value.capabilities,
+      backends: editForm.value.backends,
+      defaults: allEmpty ? null : defaults,
+    }
     await api(`/api/models/${encodeURIComponent(editingModel.value.id)}`, {
       method: 'PUT',
-      body: JSON.stringify({ name: editForm.value.name }),
+      body: JSON.stringify(body),
     })
     toasts.success('Model updated')
     editingModel.value = null
@@ -249,9 +498,22 @@ const deletingModelSlots = computed(() => {
 async function confirmDelete() {
   if (!deletingModel.value) return
   deleting.value = true
+  const name = deletingModel.value.name ?? deletingModel.value.id
   try {
-    await api(`/api/models/${encodeURIComponent(deletingModel.value.id)}`, { method: 'DELETE' })
-    toasts.success(`Deleted model "${deletingModel.value.name ?? deletingModel.value.id}"`)
+    // Backend defaults to force_cascade=true — unloads referencing slots
+    // and clears their [model].default. The response carries the list of
+    // affected slot names so we can surface a precise toast.
+    const res = await api(`/api/models/${encodeURIComponent(deletingModel.value.id)}`, {
+      method: 'DELETE',
+    })
+    const cleared = (res?.affected_slots ?? []).length
+    toasts.success(
+      cleared > 0
+        ? `Deleted ${name}; ${cleared} slot(s) cleared`
+        : `Deleted "${name}"`,
+    )
+    // Optimistic prune — full refresh below catches up state.
+    models.value = models.value.filter((m) => m.id !== deletingModel.value.id)
     deletingModel.value = null
     await loadModels()
     await system.fetchStatus()
@@ -283,7 +545,7 @@ function handleKey(e) {
   if (e.key === 'n') { e.preventDefault(); showPull.value = true }
   else if (e.key === '/') { e.preventDefault(); searchEl.value?.focus() }
   else if (e.key === 'Escape') {
-    if (showPull.value) showPull.value = false
+    if (showPull.value) { showPull.value = false; resetLocalState() }
     else if (editingModel.value) editingModel.value = null
   }
 }
@@ -334,7 +596,7 @@ const QUANTS = ['Q4_K_M', 'Q5_K_M', 'Q8_0', 'F16', 'BF16']
           <svg width="13" height="13" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.5" aria-hidden="true">
             <path stroke-linecap="round" stroke-linejoin="round" d="M12 4v16m8-8H4"/>
           </svg>
-          Pull model
+          Add model
         </button>
       </template>
     </PageHeader>
@@ -357,8 +619,8 @@ const QUANTS = ['Q4_K_M', 'Q5_K_M', 'Q8_0', 'F16', 'BF16']
           <EmptyState
             icon="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"
             title="No models in registry"
-            description="Pull a model from Hugging Face or select from curated options to get started."
-            cta-label="Pull a model"
+            description="Pull from Hugging Face, scan a local directory, or pick from the curated catalogue."
+            cta-label="Add a model"
             @cta="showPull = true"
           />
         </Card>
@@ -389,6 +651,12 @@ const QUANTS = ['Q4_K_M', 'Q5_K_M', 'Q8_0', 'F16', 'BF16']
                     <div class="model-name-cell">
                       <span class="model-name">{{ model.name ?? model.id }}</span>
                       <span v-if="model.name && model.id !== model.name" class="model-id">{{ model.id }}</span>
+                      <!-- Capability + backend badges (read-only). Click does
+                           nothing — pure visual classification. -->
+                      <div v-if="(model.capabilities && model.capabilities.length) || (model.backends && model.backends.length)" class="model-badges">
+                        <span v-for="c in (model.capabilities ?? [])" :key="`cap-${c}`" class="badge badge-cap">{{ c }}</span>
+                        <span v-for="b in (model.backends ?? [])" :key="`bk-${b}`" class="badge badge-bk">{{ b }}</span>
+                      </div>
                       <!-- Inline pull progress: rendered when a row has an
                            active or recently-terminated pull job. SSE-driven;
                            updates instantly as bytes land. -->
@@ -540,11 +808,11 @@ const QUANTS = ['Q4_K_M', 'Q5_K_M', 'Q8_0', 'F16', 'BF16']
     <!-- ── Pull model modal ──────────────────────────────────────── -->
     <Teleport to="body">
       <Transition name="fade">
-        <div v-if="showPull" class="modal-overlay" @click.self="showPull = false">
-          <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="pull-title">
+        <div v-if="showPull" class="modal-overlay" @click.self="showPull = false; resetLocalState()">
+          <div class="modal-box modal-wide" role="dialog" aria-modal="true" aria-labelledby="pull-title">
             <div class="modal-header">
-              <h2 id="pull-title" class="modal-title">Pull model</h2>
-              <button class="modal-close" type="button" @click="showPull = false" aria-label="Close">
+              <h2 id="pull-title" class="modal-title">Add model</h2>
+              <button class="modal-close" type="button" @click="showPull = false; resetLocalState()" aria-label="Close">
                 <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>
               </button>
             </div>
@@ -553,6 +821,7 @@ const QUANTS = ['Q4_K_M', 'Q5_K_M', 'Q8_0', 'F16', 'BF16']
             <div class="pull-tabs" role="tablist">
               <button role="tab" :aria-selected="pullTab === 'curated'" class="pull-tab" :class="{ active: pullTab === 'curated' }" @click="pullTab = 'curated'">Curated</button>
               <button role="tab" :aria-selected="pullTab === 'hf'" class="pull-tab" :class="{ active: pullTab === 'hf' }" @click="pullTab = 'hf'">HuggingFace</button>
+              <button role="tab" :aria-selected="pullTab === 'local'" class="pull-tab" :class="{ active: pullTab === 'local' }" @click="pullTab = 'local'">Local file</button>
             </div>
 
             <div class="modal-body">
@@ -608,6 +877,155 @@ const QUANTS = ['Q4_K_M', 'Q5_K_M', 'Q8_0', 'F16', 'BF16']
                   </select>
                 </div>
               </div>
+
+              <!-- Local-file tab — two sub-actions toggled inline. -->
+              <div v-if="pullTab === 'local'" role="tabpanel">
+                <div class="local-mode-toggle" role="tablist" aria-label="Local-file mode">
+                  <button
+                    role="tab"
+                    :aria-selected="localMode === 'single'"
+                    class="local-mode-btn"
+                    :class="{ active: localMode === 'single' }"
+                    @click="localMode = 'single'; singleDetected = null"
+                  >Register single file</button>
+                  <button
+                    role="tab"
+                    :aria-selected="localMode === 'scan'"
+                    class="local-mode-btn"
+                    :class="{ active: localMode === 'scan' }"
+                    @click="localMode = 'scan'; scanRows = []"
+                  >Scan directory</button>
+                </div>
+
+                <!-- ── Single-file ──────────────────────────────────── -->
+                <div v-if="localMode === 'single'" class="local-pane">
+                  <div class="field">
+                    <label class="field-label" for="local-path-single">Absolute path <span class="req">*</span></label>
+                    <input
+                      id="local-path-single"
+                      v-model="localPath"
+                      class="field-input"
+                      placeholder="/mnt/ai-models/llama-3.1-8b.Q4_K_M.gguf"
+                      autocomplete="off"
+                    />
+                    <p class="field-hint">Must be readable by the hal0 service user.</p>
+                  </div>
+                  <div class="field">
+                    <label class="field-label" for="local-name">Display name (optional)</label>
+                    <input id="local-name" v-model="localName" class="field-input" placeholder="Defaults to filename" />
+                  </div>
+                  <div class="field">
+                    <label class="field-label" for="local-license">License (optional)</label>
+                    <input id="local-license" v-model="localLicense" class="field-input" placeholder="Apache-2.0" />
+                  </div>
+
+                  <!-- Detection result (after pressing Detect) -->
+                  <div v-if="singleDetected" class="detect-block">
+                    <div class="detect-head">
+                      <span class="detect-label">Detected</span>
+                      <span class="mono-chip">conf {{ Number(singleDetected.confidence).toFixed(2) }}</span>
+                      <span v-if="singleDetected.context_length" class="mono-chip">ctx {{ singleDetected.context_length }}</span>
+                    </div>
+                    <div class="field">
+                      <label class="field-label">Capabilities</label>
+                      <div class="check-row">
+                        <label v-for="c in ALL_CAPS" :key="`scap-${c}`" class="check-pill">
+                          <input
+                            type="checkbox"
+                            :checked="singleEditable.capabilities.includes(c)"
+                            @change="toggleArrayMember(singleEditable.capabilities, c)"
+                          />
+                          <span>{{ c }}</span>
+                        </label>
+                      </div>
+                    </div>
+                    <div class="field">
+                      <label class="field-label">Backends</label>
+                      <div class="check-row">
+                        <label v-for="b in ALL_BACKENDS" :key="`sbk-${b}`" class="check-pill">
+                          <input
+                            type="checkbox"
+                            :checked="singleEditable.backends.includes(b)"
+                            @change="toggleArrayMember(singleEditable.backends, b)"
+                          />
+                          <span>{{ b }}</span>
+                        </label>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- ── Scan-directory ──────────────────────────────── -->
+                <div v-if="localMode === 'scan'" class="local-pane">
+                  <div class="field">
+                    <label class="field-label" for="local-path-scan">Directory path <span class="req">*</span></label>
+                    <input
+                      id="local-path-scan"
+                      v-model="localPath"
+                      class="field-input"
+                      placeholder="/mnt/ai-models"
+                      autocomplete="off"
+                    />
+                  </div>
+                  <label class="check-inline">
+                    <input type="checkbox" v-model="localRecursive" />
+                    <span>Recursive</span>
+                  </label>
+
+                  <div v-if="scanRows.length > 0" class="scan-preview">
+                    <p class="field-hint">{{ scanRows.length }} candidate(s) — edit per row, then commit.</p>
+                    <div class="scan-table-wrap">
+                      <table class="scan-table">
+                        <thead>
+                          <tr>
+                            <th>Path</th>
+                            <th>ID / Name</th>
+                            <th>Backends</th>
+                            <th>Caps</th>
+                            <th>Ctx</th>
+                            <th>Conf</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          <tr v-for="(row, idx) in scanRows" :key="row.path">
+                            <td class="mono-cell scan-path" :title="row.path">{{ row.path }}</td>
+                            <td>
+                              <input v-model="scanRows[idx].id" class="scan-input mono" />
+                              <input v-model="scanRows[idx].name" class="scan-input" placeholder="Name" />
+                            </td>
+                            <td>
+                              <div class="scan-checks">
+                                <label v-for="b in ALL_BACKENDS" :key="`r${idx}b${b}`" class="check-pill check-pill-sm">
+                                  <input
+                                    type="checkbox"
+                                    :checked="row.backends.includes(b)"
+                                    @change="toggleArrayMember(scanRows[idx].backends, b)"
+                                  />
+                                  <span>{{ b }}</span>
+                                </label>
+                              </div>
+                            </td>
+                            <td>
+                              <div class="scan-checks">
+                                <label v-for="c in ALL_CAPS" :key="`r${idx}c${c}`" class="check-pill check-pill-sm">
+                                  <input
+                                    type="checkbox"
+                                    :checked="row.capabilities.includes(c)"
+                                    @change="toggleArrayMember(scanRows[idx].capabilities, c)"
+                                  />
+                                  <span>{{ c }}</span>
+                                </label>
+                              </div>
+                            </td>
+                            <td class="mono-cell">{{ row.context_length ?? '—' }}</td>
+                            <td class="mono-cell">{{ Number(row.confidence ?? 0).toFixed(2) }}</td>
+                          </tr>
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                </div>
+              </div>
             </div>
 
             <div class="modal-footer" v-if="pullTab === 'hf'">
@@ -616,6 +1034,55 @@ const QUANTS = ['Q4_K_M', 'Q5_K_M', 'Q8_0', 'F16', 'BF16']
                 <span v-if="pulling" class="spinner" aria-hidden="true" />
                 {{ pulling ? 'Pulling…' : 'Pull model' }}
               </button>
+            </div>
+
+            <!-- Local-file footer: action depends on sub-mode + state. -->
+            <div class="modal-footer" v-if="pullTab === 'local'">
+              <button class="btn-ghost" type="button" @click="showPull = false; resetLocalState()" :disabled="localBusy">Cancel</button>
+              <template v-if="localMode === 'single'">
+                <button
+                  v-if="!singleDetected"
+                  class="btn-primary"
+                  type="button"
+                  @click="detectSingleFile"
+                  :disabled="localBusy"
+                >
+                  <span v-if="localBusy" class="spinner" aria-hidden="true" />
+                  Detect
+                </button>
+                <button
+                  v-else
+                  class="btn-primary"
+                  type="button"
+                  @click="submitSingleFile"
+                  :disabled="localBusy"
+                >
+                  <span v-if="localBusy" class="spinner" aria-hidden="true" />
+                  Register
+                </button>
+              </template>
+              <template v-else>
+                <button
+                  v-if="scanRows.length === 0"
+                  class="btn-primary"
+                  type="button"
+                  @click="previewScan"
+                  :disabled="localBusy"
+                >
+                  <span v-if="localBusy" class="spinner" aria-hidden="true" />
+                  Preview
+                </button>
+                <button
+                  v-else
+                  class="btn-primary"
+                  type="button"
+                  @click="commitScan"
+                  :disabled="localBusy"
+                >
+                  <span v-if="localBusy" class="spinner" aria-hidden="true" />
+                  Commit {{ scanRows.length }} row(s)
+                </button>
+              </template>
             </div>
           </div>
         </div>
@@ -626,7 +1093,7 @@ const QUANTS = ['Q4_K_M', 'Q5_K_M', 'Q8_0', 'F16', 'BF16']
     <Teleport to="body">
       <Transition name="fade">
         <div v-if="editingModel" class="modal-overlay" @click.self="editingModel = null">
-          <div class="modal-box modal-sm" role="dialog" aria-modal="true" aria-labelledby="edit-model-title">
+          <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="edit-model-title">
             <div class="modal-header">
               <h2 id="edit-model-title" class="modal-title">Edit model</h2>
               <button class="modal-close" type="button" @click="editingModel = null" aria-label="Close">
@@ -639,6 +1106,116 @@ const QUANTS = ['Q4_K_M', 'Q5_K_M', 'Q8_0', 'F16', 'BF16']
                 <input id="edit-model-name" v-model="editForm.name" class="field-input" placeholder="Human-readable name" />
               </div>
               <p class="field-hint mono-text">ID: {{ editingModel.id }}</p>
+
+              <div class="field">
+                <label class="field-label">Capabilities</label>
+                <div class="check-row">
+                  <label v-for="c in ALL_CAPS" :key="`ecap-${c}`" class="check-pill">
+                    <input
+                      type="checkbox"
+                      :checked="editForm.capabilities.includes(c)"
+                      @change="toggleArrayMember(editForm.capabilities, c)"
+                    />
+                    <span>{{ c }}</span>
+                  </label>
+                </div>
+              </div>
+
+              <div class="field">
+                <label class="field-label">Backends</label>
+                <div class="check-row">
+                  <label v-for="b in ALL_BACKENDS" :key="`ebk-${b}`" class="check-pill">
+                    <input
+                      type="checkbox"
+                      :checked="editForm.backends.includes(b)"
+                      @change="toggleArrayMember(editForm.backends, b)"
+                    />
+                    <span>{{ b }}</span>
+                  </label>
+                </div>
+              </div>
+
+              <!-- Re-detect from file: round-trips through /scan/preview, then
+                   diffs against current editable values. Apply overwrites. -->
+              <div class="redetect-block" v-if="editingModel.path">
+                <button
+                  type="button"
+                  class="btn-ghost btn-xs"
+                  @click="reDetectModel"
+                  :disabled="editReDetecting"
+                >
+                  <span v-if="editReDetecting" class="spinner" aria-hidden="true" />
+                  Re-detect from file
+                </button>
+                <div v-if="editDetected" class="redetect-diff">
+                  <p class="field-hint">
+                    Detected backends: <span class="mono-text">{{ (editDetected.suggested_backends ?? []).join(', ') || '—' }}</span><br/>
+                    Detected capabilities: <span class="mono-text">{{ (editDetected.suggested_capabilities ?? []).join(', ') || '—' }}</span><br/>
+                    Detected ctx: <span class="mono-text">{{ editDetected.context_length ?? '—' }}</span>
+                  </p>
+                  <button type="button" class="btn-primary btn-xs" @click="applyDetected">Apply detected</button>
+                </div>
+              </div>
+
+              <!-- Advanced disclosure: per-field defaults + Reset-to-detected. -->
+              <details class="adv-block" :open="editAdvOpen" @toggle="editAdvOpen = $event.target.open">
+                <summary class="adv-summary">Advanced</summary>
+                <div class="field">
+                  <div class="field-label-row">
+                    <label class="field-label" for="edit-ctx">context_size</label>
+                    <button type="button" class="btn-link btn-xs" @click="resetDefaultField('context_size')">Reset to detected</button>
+                  </div>
+                  <input
+                    id="edit-ctx"
+                    v-model.number="editForm.defaults.context_size"
+                    type="number"
+                    min="0"
+                    class="field-input"
+                    placeholder="Inherit slot default"
+                  />
+                </div>
+                <div class="field">
+                  <div class="field-label-row">
+                    <label class="field-label" for="edit-ngl">n_gpu_layers</label>
+                    <button type="button" class="btn-link btn-xs" @click="resetDefaultField('n_gpu_layers')">Reset to detected</button>
+                  </div>
+                  <input
+                    id="edit-ngl"
+                    v-model.number="editForm.defaults.n_gpu_layers"
+                    type="number"
+                    class="field-input"
+                    placeholder="-1 = all on GPU, 0 = CPU"
+                  />
+                </div>
+                <div class="field">
+                  <div class="field-label-row">
+                    <label class="field-label" for="edit-rope">rope_freq_base</label>
+                    <button type="button" class="btn-link btn-xs" @click="resetDefaultField('rope_freq_base')">Reset to detected</button>
+                  </div>
+                  <input
+                    id="edit-rope"
+                    v-model.number="editForm.defaults.rope_freq_base"
+                    type="number"
+                    step="any"
+                    class="field-input"
+                    placeholder="e.g. 10000"
+                  />
+                </div>
+                <div class="field">
+                  <div class="field-label-row">
+                    <label class="field-label" for="edit-extra">extra_args</label>
+                    <button type="button" class="btn-link btn-xs" @click="resetDefaultField('extra_args')">Reset to detected</button>
+                  </div>
+                  <textarea
+                    id="edit-extra"
+                    v-model="editForm.defaults.extra_args"
+                    class="field-input"
+                    rows="2"
+                    placeholder="--threads 4 --batch-size 512"
+                  ></textarea>
+                  <p class="field-hint">Merged with slot extra_args at launch (slot wins on conflict).</p>
+                </div>
+              </details>
             </div>
             <div class="modal-footer">
               <button class="btn-ghost" type="button" @click="editingModel = null" :disabled="editSubmitting">Cancel</button>
@@ -652,13 +1229,17 @@ const QUANTS = ['Q4_K_M', 'Q5_K_M', 'Q8_0', 'F16', 'BF16']
       </Transition>
     </Teleport>
 
-    <!-- ── Delete confirm ────────────────────────────────────────── -->
+    <!-- ── Delete confirm ──────────────────────────────────────────
+         Backend cascade defaults to true: unload referencing slots,
+         clear their [model].default, drop registry row. Disk files are
+         NEVER touched — call it out explicitly so operators don't
+         expect a cleanup. -->
     <ConfirmDialog
       :open="!!deletingModel"
       :title="`Delete &quot;${deletingModel?.name ?? deletingModel?.id ?? ''}&quot;?`"
       :message="deletingModelSlots.length > 0
-        ? `${deletingModelSlots.length} slot(s) use this model and will be unassigned. The model files on disk will be removed.`
-        : 'The model files on disk will be permanently removed.'"
+        ? `This will unload it from ${deletingModelSlots.length} slot(s): ${deletingModelSlots.map((s) => '\`' + s.name + '\`').join(', ')} and clear the model from their config. Files on disk untouched.`
+        : 'Files on disk untouched.'"
       danger
       confirm-label="Delete model"
       :impact="deletingModelSlots.length > 1 ? 2 : 1"
@@ -960,4 +1541,153 @@ const QUANTS = ['Q4_K_M', 'Q5_K_M', 'Q8_0', 'F16', 'BF16']
 
 .fade-enter-active, .fade-leave-active { transition: opacity 0.12s; }
 .fade-enter-from, .fade-leave-to { opacity: 0; }
+
+/* ── Model badges (row-level capability + backend chips) ────────── */
+.model-badges { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+.badge {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  border: 1px solid var(--color-border);
+  background: var(--color-surface-2);
+  color: var(--color-fg-muted);
+  line-height: 1.5;
+  letter-spacing: 0.02em;
+}
+.badge-cap {
+  color: var(--hal0-accent);
+  border-color: color-mix(in oklch, var(--hal0-accent) 28%, transparent);
+  background: color-mix(in oklch, var(--hal0-accent) 10%, transparent);
+}
+.badge-bk { color: var(--color-fg-faint); }
+
+/* ── Wider modal for Local-file tab (scan-preview table needs room) ── */
+.modal-wide { width: min(820px, 100%); }
+
+/* ── Local-file mode toggle (Single / Scan) ─────────────────────── */
+.local-mode-toggle {
+  display: inline-flex;
+  border-radius: var(--radius);
+  border: 1px solid var(--color-border);
+  overflow: hidden;
+  margin-bottom: 12px;
+}
+.local-mode-btn {
+  padding: 6px 14px;
+  font-size: 12px;
+  background: transparent;
+  border: none;
+  color: var(--color-fg-faint);
+  cursor: pointer;
+  font-family: inherit;
+}
+.local-mode-btn + .local-mode-btn { border-left: 1px solid var(--color-border); }
+.local-mode-btn.active { background: var(--hal0-accent); color: #000; }
+.local-pane { display: flex; flex-direction: column; gap: 12px; }
+
+/* Checkbox pill group used in Local-file + Edit modals. */
+.check-row { display: flex; flex-wrap: wrap; gap: 6px; }
+.check-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--color-border);
+  background: var(--color-surface-2);
+  color: var(--color-fg-muted);
+  font-size: 11.5px;
+  cursor: pointer;
+  user-select: none;
+}
+.check-pill input[type="checkbox"] { margin: 0; width: 11px; height: 11px; accent-color: var(--hal0-accent); }
+.check-pill:has(input:checked) {
+  background: color-mix(in oklch, var(--hal0-accent) 14%, transparent);
+  border-color: color-mix(in oklch, var(--hal0-accent) 40%, transparent);
+  color: var(--hal0-accent);
+}
+.check-pill-sm { padding: 2px 6px; font-size: 10.5px; }
+.check-inline { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--color-fg-muted); }
+.check-inline input { accent-color: var(--hal0-accent); }
+
+.detect-block {
+  display: flex; flex-direction: column; gap: 10px;
+  padding: 12px;
+  border: 1px dashed var(--color-border-hi);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface-2);
+}
+.detect-head { display: flex; align-items: center; gap: 8px; }
+.detect-label {
+  font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em;
+  color: var(--hal0-accent); font-family: var(--font-mono); font-weight: 600;
+}
+
+/* Scan preview table */
+.scan-preview { display: flex; flex-direction: column; gap: 6px; }
+.scan-table-wrap { overflow-x: auto; border: 1px solid var(--color-border); border-radius: var(--radius); }
+.scan-table { width: 100%; border-collapse: collapse; font-size: 11.5px; }
+.scan-table th {
+  text-align: left; padding: 6px 8px;
+  background: var(--hal0-bg-sunken);
+  color: var(--hal0-accent);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-weight: 500;
+  border-bottom: 1px solid var(--color-border);
+}
+.scan-table td {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--color-border);
+  vertical-align: top;
+  color: var(--color-fg-muted);
+}
+.scan-table tr:last-child td { border-bottom: none; }
+.scan-path { max-width: 240px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.scan-input {
+  width: 100%;
+  padding: 3px 6px;
+  border-radius: 4px;
+  border: 1px solid var(--color-border);
+  background: var(--color-surface);
+  color: var(--color-fg);
+  font-size: 11px;
+  outline: none;
+  box-sizing: border-box;
+  display: block;
+}
+.scan-input + .scan-input { margin-top: 3px; }
+.scan-input.mono { font-family: var(--font-mono); }
+.scan-checks { display: flex; flex-wrap: wrap; gap: 3px; max-width: 220px; }
+
+/* Re-detect + diff block in Edit modal */
+.redetect-block { display: flex; flex-direction: column; gap: 8px; }
+.redetect-diff {
+  padding: 10px;
+  border: 1px dashed var(--color-border-hi);
+  border-radius: var(--radius);
+  background: var(--color-surface-2);
+  display: flex; flex-direction: column; gap: 8px;
+}
+
+/* Advanced disclosure */
+.adv-block { border-top: 1px solid var(--color-border); padding-top: 12px; }
+.adv-summary {
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-fg-muted);
+  margin-bottom: 8px;
+  list-style: none;
+  user-select: none;
+}
+.adv-summary::-webkit-details-marker { display: none; }
+.adv-summary::before { content: "▸ "; font-family: var(--font-mono); }
+details[open] > .adv-summary::before { content: "▾ "; }
+
+.field-label-row { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.btn-xs { padding: 3px 8px; font-size: 10.5px; }
 </style>
