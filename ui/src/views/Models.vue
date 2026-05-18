@@ -987,21 +987,21 @@ const QUANTS = ['Q4_K_M', 'Q5_K_M', 'Q8_0', 'F16', 'BF16']
                       <table class="scan-table">
                         <thead>
                           <tr>
-                            <th>Name / ID</th>
-                            <th>Path</th>
-                            <th>Backends</th>
-                            <th>Caps</th>
-                            <th>Ctx</th>
-                            <th>Conf</th>
+                            <th class="col-name">Name / ID</th>
+                            <th class="col-path">Path</th>
+                            <th class="col-backends">Backends</th>
+                            <th class="col-caps">Caps</th>
+                            <th class="col-ctx">Ctx</th>
+                            <th class="col-conf">Conf</th>
                           </tr>
                         </thead>
                         <tbody>
                           <tr v-for="(row, idx) in scanRows" :key="row.path">
-                            <td>
+                            <td class="col-name">
                               <input v-model="scanRows[idx].name" class="scan-input scan-name" placeholder="Name" />
                               <input v-model="scanRows[idx].id" class="scan-input mono" />
                             </td>
-                            <td class="mono-cell scan-path" :title="row.path">{{ row.path }}</td>
+                            <td class="mono-cell scan-path col-path" :title="row.path">{{ row.path }}</td>
                             <td>
                               <div class="scan-checks">
                                 <label v-for="b in ALL_BACKENDS" :key="`r${idx}b${b}`" class="check-pill check-pill-sm">
@@ -1636,7 +1636,13 @@ const QUANTS = ['Q4_K_M', 'Q5_K_M', 'Q8_0', 'F16', 'BF16']
 /* Scan preview table */
 .scan-preview { display: flex; flex-direction: column; gap: 6px; }
 .scan-table-wrap { overflow-x: auto; border: 1px solid var(--color-border); border-radius: var(--radius); }
-.scan-table { width: 100%; border-collapse: collapse; font-size: 11.5px; }
+.scan-table { width: 100%; border-collapse: collapse; font-size: 11.5px; table-layout: fixed; }
+.scan-table .col-name     { width: 240px; min-width: 240px; }
+.scan-table .col-path     { width: auto; }
+.scan-table .col-backends { width: 180px; }
+.scan-table .col-caps     { width: 150px; }
+.scan-table .col-ctx      { width: 64px; }
+.scan-table .col-conf     { width: 64px; }
 .scan-table th {
   text-align: left; padding: 6px 8px;
   background: var(--hal0-bg-sunken);
@@ -1656,7 +1662,6 @@ const QUANTS = ['Q4_K_M', 'Q5_K_M', 'Q8_0', 'F16', 'BF16']
 }
 .scan-table tr:last-child td { border-bottom: none; }
 .scan-path {
-  max-width: 320px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
