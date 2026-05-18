@@ -1,4 +1,4 @@
-"""Scope × verb matrix tests for the ``require_writer`` gate.
+"""Scope x verb matrix tests for the ``require_writer`` gate.
 
 Issue #29: admin routers previously accepted any valid token regardless of
 scope. A ``read-only`` or ``v1-only`` token could PUT/POST/DELETE on every
@@ -72,9 +72,7 @@ READER_ROUTES = [
 
 @pytest.mark.parametrize("path", READER_ROUTES)
 @pytest.mark.parametrize("scope", ["admin", "all", "read-only", "v1-only"])
-def test_reader_routes_accept_every_scope(
-    auth_app: TestClient, scope: str, path: str
-) -> None:
+def test_reader_routes_accept_every_scope(auth_app: TestClient, scope: str, path: str) -> None:
     """GETs on admin routers must accept every valid scope.
 
     We allow any non-401/403 status — the handler may still 5xx on a

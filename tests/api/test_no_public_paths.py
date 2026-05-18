@@ -31,7 +31,6 @@ from fastapi.testclient import TestClient
 from hal0.api import create_app
 from hal0.api.middleware import auth as auth_middleware
 
-
 # ── Invariant 1: the symbol is gone ─────────────────────────────────────────
 
 

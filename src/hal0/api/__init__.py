@@ -260,7 +260,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # picks up its own bounded deque without route-side bookkeeping.
     import collections
 
-    def _new_tps_deque() -> "collections.deque[tuple[float, int]]":
+    def _new_tps_deque() -> collections.deque[tuple[float, int]]:
         return collections.deque(maxlen=4096)
 
     app.state.tps_events = collections.defaultdict(_new_tps_deque)

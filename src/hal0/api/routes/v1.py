@@ -172,13 +172,9 @@ async def _dispatch_and_forward(
 
     response = await dispatcher.forward(call)
     if isinstance(response, StreamingResponse):
-        return _instrument_streaming_throughput(
-            response, request.app.state, call.upstream_name
-        )
+        return _instrument_streaming_throughput(response, request.app.state, call.upstream_name)
     if isinstance(response, Response) and getattr(response, "body", None):
-        _record_nonstreaming_throughput(
-            response.body, request.app.state, call.upstream_name
-        )
+        _record_nonstreaming_throughput(response.body, request.app.state, call.upstream_name)
     return response
 
 

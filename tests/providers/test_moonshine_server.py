@@ -54,8 +54,19 @@ def client(server_module: types.ModuleType) -> TestClient:
 
 def test_redact_ffmpeg_argv_masks_input_path(server_module: types.ModuleType) -> None:
     argv = [
-        "ffmpeg", "-y", "-loglevel", "error", "-i", "/tmp/tmp123abc.bin",
-        "-ac", "1", "-ar", "16000", "-f", "wav", "/tmp/tmp123abc.bin.wav",
+        "ffmpeg",
+        "-y",
+        "-loglevel",
+        "error",
+        "-i",
+        "/tmp/tmp123abc.bin",
+        "-ac",
+        "1",
+        "-ar",
+        "16000",
+        "-f",
+        "wav",
+        "/tmp/tmp123abc.bin.wav",
     ]
     redacted = server_module._redact_ffmpeg_argv(argv, "/tmp/tmp123abc.bin")
     # The standalone input path is fully masked.

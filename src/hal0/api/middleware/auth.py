@@ -10,7 +10,7 @@ This module exposes three FastAPI dependencies:
   - :func:`require_admin` — strictest gate, only ``admin`` scope. Used
     on the token-CRUD subrouter.
 
-Scope × verb matrix (admin routers: ``/api/slots``, ``/api/models``,
+Scope x verb matrix (admin routers: ``/api/slots``, ``/api/models``,
 ``/api/settings``, ``/api/hardware``, ``/api/logs``, ``/api/providers``,
 ``/api/updates``, ``/api/images``)::
 
