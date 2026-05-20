@@ -328,12 +328,16 @@ class CapabilityOrchestrator:
         provider_changed = merged.provider != before_provider
 
         try:
-            # Backend or provider change while enabled → rewrite the slot
-            # TOML so the next load/swap picks up the new values. Done
-            # before swap/load so the spawn reads the right config.
-            if (backend_changed or provider_changed) and (
-                merged.enabled or before_enabled
-            ):
+            # Reconcile the slot TOML against the merged selection whenever
+            # the slot is going to be enabled. We rewrite unconditionally —
+            # not just on a selection diff — because capabilities.toml and
+            # the slot TOML can drift independently: a previous apply() that
+            # failed mid-flight, a manual edit, or an install/migration seed
+            # can leave the two disagreeing. Diffing the new selection
+            # against the *old selection* would miss that drift and let
+            # load()/swap() spawn against the stale slot TOML while we
+            # report the new selection as live.
+            if merged.enabled:
                 await self._rewrite_underlying_slot(slot_name, merged)
 
             if enabled_changed and merged.enabled:
