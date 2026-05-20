@@ -593,6 +593,16 @@ class ModelsConfig(BaseModel):
             "Filename suffixes treated as candidate model files (lowercase, includes the dot)."
         ),
     )
+    pull_root: str = Field(
+        default="/var/lib/hal0/models",
+        description=(
+            "Destination directory for HuggingFace pulls. Must be an absolute path. "
+            "Tempfiles stage under <pull_root>/.tmp/ and finished downloads land at "
+            "<pull_root>/<model_id>/<filename>. ComfyUI assets still route to "
+            "/var/lib/hal0/comfyui/models/<subdir>/. This directory is auto-included "
+            "in the discovery scan so pulled files are immediately visible."
+        ),
+    )
 
     @field_validator("roots")
     @classmethod
@@ -609,6 +619,16 @@ class ModelsConfig(BaseModel):
                 )
             out.append(s)
         return out
+
+    @field_validator("pull_root")
+    @classmethod
+    def pull_root_is_absolute(cls, v: str) -> str:
+        s = str(v).strip()
+        if not s:
+            raise ValueError("models.pull_root must not be empty")
+        if not Path(s).is_absolute():
+            raise ValueError(f"models.pull_root {s!r} must be an absolute path")
+        return s
 
 
 class Hal0Config(BaseModel):

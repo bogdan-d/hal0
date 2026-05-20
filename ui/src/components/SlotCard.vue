@@ -10,6 +10,7 @@
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { isSlotServing } from '../composables/useSlotStats.js'
 import { api } from '../composables/useApi.js'
+import { usePullJob, fmtBytes } from '../composables/usePullJob.js'
 import { useToastsStore } from '../stores/toasts.js'
 
 const props = defineProps({
@@ -304,30 +305,64 @@ function onPopoverKey(ev) {
   }
 }
 
+// Pull job for the inline popover — when the user clicks an un-downloaded
+// model row, we kick off /api/models/{id}/pull, hold the popover open
+// while the bar fills, then fire the swap once weights are on disk.
+const swapPull = usePullJob()
+
 async function selectSwapModel(model) {
-  if (!model || swapSubmitting.value) return
+  if (!model || swapSubmitting.value || swapPull.inFlight.value) return
   const modelId = model.id || model.name || model
   if (modelId === currentModelId.value) {
     closeSwap()
     return
   }
-  swapSubmitting.value = true
-  try {
-    // Per spec: inline swap does NOT change ctx_size. Body is model_id only.
-    await api(`/api/slots/${encodeURIComponent(props.slot.name)}/swap`, {
-      method: 'POST',
-      body: JSON.stringify({ model_id: modelId }),
-    })
-    toasts.success(`swapped ${props.slot.name} → ${model.name || modelId}`)
-    emit('swapped', { slot: props.slot.name, model_id: modelId })
-    closeSwap()
-  } catch (err) {
-    const msg = err?.message || 'swap failed'
-    toasts.error(`swap failed: ${msg}`)
-    swapError.value = msg
-  } finally {
-    swapSubmitting.value = false
+  const slotName = props.slot.name
+  const label = model.name || modelId
+
+  // First: download if missing. `installed === false` is the registry's
+  // signal that the GGUF isn't on disk yet. We keep the popover open
+  // during the pull so progress is visible in-context, then transition
+  // to the swap once the file lands. If the model entry has no HF
+  // coords (upstream-routed stub), short-circuit with a clear error
+  // rather than 422-ing on /pull.
+  if (model.installed === false) {
+    const pullable = !!(model.hf_repo && (model.hf_filename || model.hf_file))
+    if (!pullable) {
+      const msg = `"${label}" has no download source (upstream-routed). ` +
+        `Add hf_repo + hf_filename on the registry entry to enable pull.`
+      toasts.error(msg)
+      swapError.value = msg
+      return
+    }
+    try {
+      await swapPull.pullAndWait(modelId)
+      toasts.success(`downloaded ${label}`)
+    } catch (err) {
+      toasts.error(`download ${label} failed: ${err?.message || err}`)
+      swapError.value = String(err?.message || err)
+      return
+    }
   }
+
+  // Backend swap is unload → systemctl restart → wait-for-health,
+  // routinely 10-30s and a 180s timeout on failure. Fire and forget so
+  // the popover doesn't lock up for minutes; the SlotCard's existing
+  // state ring animates warming → ready on its own.
+  toasts.success(`swapping ${slotName} → ${label}…`)
+  emit('swapped', { slot: slotName, model_id: modelId })
+  closeSwap()
+  api(`/api/slots/${encodeURIComponent(slotName)}/swap`, {
+    method: 'POST',
+    body: JSON.stringify({ model_id: modelId }),
+  })
+    .then(() => {
+      toasts.success(`${slotName} ready on ${label}`)
+    })
+    .catch((err) => {
+      const msg = err?.message || 'swap failed'
+      toasts.error(`swap ${slotName} failed: ${msg}`)
+    })
 }
 
 onBeforeUnmount(() => {
@@ -478,7 +513,46 @@ const sparkSvg = computed(() => {
             @click="selectSwapModel(m)"
             @focus="swapIndex = i"
           >
-            <span class="sc-swap-name mono">{{ m.name || m.id }}</span>
+            <span class="sc-swap-name mono">
+              <!-- Three states:
+                     ● downloaded  — file on disk, ready to load
+                     ⬇ pullable    — has hf_repo/hf_file, click downloads
+                     ✕ no-source   — upstream-routed stub; not pullable
+                   `installed` is the registry's authoritative on-disk
+                   signal; the hf_repo + hf_filename pair is what
+                   /api/models/{id}/pull needs to fetch from HuggingFace. -->
+              <span
+                v-if="m.installed !== false"
+                class="sc-swap-dl ready"
+                title="On disk, ready to load"
+                aria-label="downloaded"
+              >
+                <svg width="9" height="9" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                  <circle cx="12" cy="12" r="6"/>
+                </svg>
+              </span>
+              <span
+                v-else-if="m.hf_repo && (m.hf_filename || m.hf_file)"
+                class="sc-swap-dl needs-dl"
+                title="Click to download (not on disk yet)"
+                aria-label="needs download"
+              >
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true">
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M12 4v12m0 0l-5-5m5 5l5-5M5 20h14"/>
+                </svg>
+              </span>
+              <span
+                v-else
+                class="sc-swap-dl no-source"
+                title="No download source (upstream-routed stub)"
+                aria-label="no download source"
+              >
+                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" aria-hidden="true">
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M6 6l12 12M18 6L6 18"/>
+                </svg>
+              </span>
+              {{ m.name || m.id }}
+            </span>
             <span class="sc-swap-meta mono">
               <span v-if="m.size_gb != null" class="sc-swap-size">{{ Number(m.size_gb).toFixed(1) }}G</span>
               <span v-if="modelFit(m) === true"  class="sc-swap-fit fit-yes" title="should fit">fits</span>
@@ -489,6 +563,13 @@ const sparkSvg = computed(() => {
         </ul>
 
         <div v-if="swapSubmitting" class="sc-swap-foot mono">swapping…</div>
+        <div v-if="swapPull.inFlight.value" class="sc-swap-pull">
+          <div class="sc-swap-pull-bar"><div class="sc-swap-pull-fill" :style="{ width: (swapPull.pct.value ?? 0) + '%' }" /></div>
+          <span class="sc-swap-pull-label mono">
+            ↓ {{ swapPull.modelId.value }} · {{ swapPull.pct.value ?? 0 }}% · {{ fmtBytes(swapPull.downloaded.value) }} / {{ fmtBytes(swapPull.total.value) }}
+          </span>
+          <button class="sc-swap-pull-cancel mono" type="button" @click="swapPull.cancel()">cancel</button>
+        </div>
       </div>
     </Teleport>
 
@@ -577,12 +658,19 @@ const sparkSvg = computed(() => {
   display: flex;
   flex-direction: column;
   background: var(--color-surface);
-  border: 1px solid var(--color-border);
+  border: 1px solid color-mix(in oklch, var(--hal0-accent) 22%, var(--color-border));
   border-radius: var(--radius-lg);
   padding: 0;
   overflow: hidden;
   color: var(--color-fg);
   transition: border-color 0.18s ease, box-shadow 0.18s ease, opacity 0.18s ease;
+}
+.slot-card::before {
+  content: '';
+  position: absolute; inset: 0;
+  border-radius: var(--radius-lg);
+  pointer-events: none;
+  box-shadow: inset 0 0 0 1px color-mix(in oklch, var(--hal0-accent) 8%, transparent);
 }
 /* Running slot is the headline metric — amber top rail (symmetric vs the
    previous left-side inset; reads cleaner in a grid of cards). */
@@ -597,16 +685,17 @@ const sparkSvg = computed(() => {
 .sc-head {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 10px 12px 4px;
+  gap: 8px;
+  padding: 14px 16px 6px;
 }
-.sc-name { font-family: var(--font-mono); font-weight: 600; font-size: 13px; color: var(--color-fg); }
+.sc-name { font-size: 14px; font-weight: 600; color: var(--hal0-accent); margin: 0; text-transform: uppercase; letter-spacing: 0.04em; }
 .sc-port { margin-left: auto; font-size: 11px; color: var(--color-fg-faint); font-feature-settings: 'zero' 1, 'ss02' 1, 'tnum' 1; }
 .sc-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 999px;
-  background: var(--color-fg-faint);
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--hal0-accent);
+  box-shadow: 0 0 6px -1px var(--hal0-accent);
   flex-shrink: 0;
 }
 .sc-state-live .sc-dot   { background: var(--hal0-accent); box-shadow: 0 0 0 4px color-mix(in srgb, var(--hal0-accent) 22%, transparent), 0 0 8px var(--hal0-accent); animation: dot-pulse 1.4s ease-in-out infinite; }
@@ -628,21 +717,21 @@ const sparkSvg = computed(() => {
   .slot-card.sc-flash, .slot-card.sc-flash .sc-dot { animation: none; }
 }
 .sc-state-idle .sc-dot   { background: var(--hal0-accent); opacity: 0.65; }
-.sc-state-loading .sc-dot { background: var(--color-warning); animation: dot-pulse 1.4s ease-in-out infinite; }
-.sc-state-error .sc-dot  { background: var(--color-danger); }
-.sc-state-offline .sc-dot { background: var(--color-fg-faint); }
+.sc-state-loading .sc-dot { background: var(--color-warning); box-shadow: 0 0 6px -1px var(--color-warning); animation: dot-pulse 1.4s ease-in-out infinite; }
+.sc-state-error .sc-dot  { background: var(--color-danger); box-shadow: 0 0 6px -1px var(--color-danger); }
+.sc-state-offline .sc-dot { background: var(--color-fg-faint); box-shadow: none; }
 @keyframes dot-pulse {
   0%, 100% { box-shadow: 0 0 0 0 color-mix(in oklch, currentColor, transparent 70%); }
   50%      { box-shadow: 0 0 0 4px color-mix(in oklch, currentColor, transparent 90%); }
 }
 
 .sc-models {
-  padding: 0 12px;
+  padding: 4px 16px;
   display: flex;
   align-items: center;
   flex-wrap: wrap;
   gap: 4px;
-  min-height: 17px;
+  min-height: 19px;
 }
 .sc-model {
   font-size: 11px;
@@ -668,10 +757,10 @@ const sparkSvg = computed(() => {
 }
 
 .sc-meta {
-  padding: 4px 12px 0;
+  padding: 6px 16px 0;
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 6px;
   flex-wrap: wrap;
 }
 .sc-chip {
@@ -712,8 +801,8 @@ const sparkSvg = computed(() => {
 .sc-chip.hw-unknown { opacity: 0.6; text-transform: lowercase; }
 
 .sc-stats {
-  margin: 8px 12px 0;
-  padding: 6px 0;
+  margin: 12px 16px 0;
+  padding: 10px 0 8px;
   border-top: 1px solid var(--color-border);
   display: grid;
   grid-template-columns: repeat(4, 1fr);
@@ -721,14 +810,14 @@ const sparkSvg = computed(() => {
   font-family: var(--font-mono);
   font-feature-settings: 'zero' 1, 'ss02' 1, 'tnum' 1;
 }
-.sc-stat-l { font-size: 8px; color: var(--hal0-accent); text-transform: uppercase; letter-spacing: 0.08em; opacity: 0.75; }
-.sc-stat-v { font-size: 12px; font-weight: 500; color: var(--color-fg-faint); margin-top: 1px; }
+.sc-stat-l { font-size: 9px; color: var(--hal0-accent); text-transform: uppercase; letter-spacing: 0.08em; opacity: 0.75; }
+.sc-stat-v { font-size: 14px; font-weight: 500; color: var(--color-fg-faint); margin-top: 3px; }
 .sc-stat-v.active { color: var(--hal0-accent); }
 
 .sc-spark {
   position: relative;
-  margin: 4px 12px 0;
-  height: 28px;
+  margin: 8px 16px 4px;
+  height: 64px;
   background: var(--hal0-bg-sunken);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-sm);
@@ -738,10 +827,10 @@ const sparkSvg = computed(() => {
 .sc-spark-inner :deep(svg) { width: 100%; height: 100%; display: block; }
 .sc-spark-label {
   position: absolute;
-  top: 2px;
-  left: 4px;
+  top: 4px;
+  left: 6px;
   font-family: var(--font-mono);
-  font-size: 8px;
+  font-size: 9px;
   color: var(--color-fg-faint);
   text-transform: uppercase;
   letter-spacing: 0.08em;
@@ -750,11 +839,11 @@ const sparkSvg = computed(() => {
 
 .sc-foot {
   margin-top: auto;
-  padding: 8px 10px;
+  padding: 10px 14px;
   border-top: 1px solid var(--color-border);
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 6px;
 }
 .sc-select {
   flex: 1;
@@ -763,26 +852,58 @@ const sparkSvg = computed(() => {
   color: var(--color-fg);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-sm);
-  padding: 4px 6px;
-  font-size: 11px;
+  padding: 5px 8px;
+  font-size: 12px;
 }
 .sc-select:focus { outline: none; border-color: var(--color-accent); }
 .sc-select:disabled { opacity: 0.5; }
 
+/* Default action button — transparent ghost. Edit / Logs / Delete sit
+   here so they don't compete visually with the load-cycle buttons. */
 .sc-btn {
   background: transparent;
-  border: 0;
+  border: 1px solid transparent;
   color: var(--color-fg-faint);
-  padding: 4px 5px;
+  padding: 5px 6px;
   border-radius: var(--radius-sm);
   cursor: pointer;
-  transition: background 0.15s, color 0.15s;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
 }
 .sc-btn:hover:not(:disabled) { background: var(--color-surface-3); color: var(--color-fg); }
 .sc-btn:disabled { opacity: 0.4; cursor: default; }
-.sc-btn.good:hover:not(:disabled)   { color: var(--color-success); background: color-mix(in oklch, var(--color-success), transparent 90%); }
-.sc-btn.warn:hover:not(:disabled)   { color: var(--color-warning); background: color-mix(in oklch, var(--color-warning), transparent 90%); }
-.sc-btn.danger:hover:not(:disabled) { color: var(--color-danger);  background: color-mix(in oklch, var(--color-danger), transparent 90%); }
+
+/* Load-cycle buttons (Start / Restart / Stop) are the operator's
+   primary affordance, so they wear an outline at rest — easy to spot
+   on a card grid. Start = warning yellow (the "do something" hue),
+   Stop = danger red, Restart = also warning yellow but with a different
+   icon for distinction. */
+.sc-btn.good {
+  color: var(--color-warning);
+  border-color: color-mix(in oklch, var(--color-warning) 60%, transparent);
+}
+.sc-btn.good:hover:not(:disabled) {
+  color: var(--color-warning);
+  background: color-mix(in oklch, var(--color-warning), transparent 85%);
+  border-color: var(--color-warning);
+}
+.sc-btn.warn {
+  color: var(--color-warning);
+  border-color: color-mix(in oklch, var(--color-warning) 45%, transparent);
+}
+.sc-btn.warn:hover:not(:disabled) {
+  color: var(--color-warning);
+  background: color-mix(in oklch, var(--color-warning), transparent 88%);
+  border-color: var(--color-warning);
+}
+.sc-btn.danger {
+  color: var(--color-danger);
+  border-color: color-mix(in oklch, var(--color-danger) 55%, transparent);
+}
+.sc-btn.danger:hover:not(:disabled) {
+  color: var(--color-danger);
+  background: color-mix(in oklch, var(--color-danger), transparent 88%);
+  border-color: var(--color-danger);
+}
 
 /* Inline swap trigger — looks like the static model label but reveals a
    caret on hover so the affordance is discoverable. Keeps the same font
@@ -895,7 +1016,20 @@ const sparkSvg = computed(() => {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
 }
+.sc-swap-dl {
+  display: inline-grid;
+  place-items: center;
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+}
+.sc-swap-dl.ready    { color: color-mix(in oklch, var(--hal0-accent) 80%, transparent); }
+.sc-swap-dl.needs-dl { color: var(--color-warning); }
+.sc-swap-dl.no-source { color: var(--color-fg-faint); opacity: 0.6; }
 .sc-swap-meta {
   display: inline-flex;
   align-items: center;
@@ -938,6 +1072,44 @@ const sparkSvg = computed(() => {
   font-size: 10px;
   color: var(--color-fg-faint);
   background: var(--color-surface-2);
+}
+
+/* Inline pull-progress strip rendered under the popover list while an
+ * un-downloaded option is being fetched. Visually narrow so it fits in
+ * the dense popover; matches the capability cards' .cap-pull palette. */
+.sc-swap-pull {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border-top: 1px solid var(--color-border);
+  background: color-mix(in oklch, var(--hal0-accent) 6%, transparent);
+}
+.sc-swap-pull-bar {
+  flex: 1;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--hal0-bg-sunken);
+  overflow: hidden;
+}
+.sc-swap-pull-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--hal0-accent), var(--hal0-accent-hover));
+  transition: width 0.2s ease-out;
+}
+.sc-swap-pull-label { font-size: 9.5px; color: var(--color-fg-muted); white-space: nowrap; }
+.sc-swap-pull-cancel {
+  background: transparent;
+  border: 1px solid var(--color-border);
+  color: var(--color-fg-faint);
+  font-size: 9px;
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.sc-swap-pull-cancel:hover {
+  color: var(--color-danger);
+  border-color: color-mix(in oklch, var(--color-danger) 40%, var(--color-border));
 }
 .sc-swap-popover.is-above { transform-origin: bottom left; }
 .sc-swap-popover.is-below { transform-origin: top left; }

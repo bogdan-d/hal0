@@ -17,12 +17,14 @@ import { computed, ref, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import { useSystemStore } from '../stores/system.js'
 import { useStats, useSlotMetrics } from '../composables/useStats.js'
-import { useSlotStats, isSlotServing } from '../composables/useSlotStats.js'
+import { useSlotStats } from '../composables/useSlotStats.js'
 import { api } from '../composables/useApi.js'
 import PageHeader from '../components/PageHeader.vue'
 import Card from '../components/Card.vue'
 import LoadingSkeleton from '../components/LoadingSkeleton.vue'
 import EmptyState from '../components/EmptyState.vue'
+import SlotCard from '../components/SlotCard.vue'
+import NPUBackendCard from '../components/capabilities/NPUBackendCard.vue'
 
 const router = useRouter()
 const system = useSystemStore()
@@ -132,81 +134,6 @@ const tputAreaPath = computed(() => {
 // ── API health ───────────────────────────────────────────────────────
 const apiOk = computed(() => !system.error && system.status !== null)
 const recentLogs = computed(() => system.status?.recent_logs ?? [])
-
-const stateClass = (status) =>
-  ({
-    running: 'state-running',
-    ready: 'state-running',
-    serving: 'state-running',
-    idle: 'state-idle',
-    warming: 'state-idle',
-    starting: 'state-idle',
-    pulling: 'state-idle',
-    error: 'state-error',
-    'no model': 'state-warn',
-    offline: 'state-offline',
-    unloading: 'state-offline',
-  })[status] ?? 'state-offline'
-
-// ── Slot-row helpers ─────────────────────────────────────────────────
-// Mirrored from SlotCard.vue (not imported — the dashboard row is the
-// compact denser cousin). Keep these in sync if SlotCard.vue's
-// equivalents change. `slotRunning` uses the shared isSlotServing
-// predicate so a slot stuck in ready/serving without a model is
-// reported as not-running — matching the navbar/sidebar count.
-const slotRunning = (slot) => isSlotServing(slot)
-
-// State label shown in the row. When the state machine reports an
-// active state (ready/serving) but the slot has no model loaded and
-// isn't a self-managed provider, the surface state is a lie — render
-// "no model" so the row stops contradicting itself.
-function slotDisplayState(slot) {
-  const raw = slot?.status ?? 'offline'
-  if (['ready', 'serving', 'running'].includes(raw) && !isSlotServing(slot)) {
-    return 'no model'
-  }
-  return raw
-}
-
-// Hardware-target mapping: backend/provider → human chip. Same buckets
-// as SlotCard's hardwareTarget computed.
-function hardwareTarget(slot) {
-  const backend = (slot?.backend || '').toLowerCase()
-  const provider = (slot?.provider || '').toLowerCase()
-  if (backend === 'flm' || provider === 'flm') return { id: 'npu', label: 'NPU' }
-  if (backend === 'cuda' || backend === 'rocm') return { id: 'gpu', label: 'GPU' }
-  if (backend === 'vulkan' || backend === 'metal') return { id: 'igpu', label: 'iGPU' }
-  if (backend === 'cpu') return { id: 'cpu', label: 'CPU' }
-  if (provider === 'kokoro' || provider === 'moonshine') return { id: 'igpu', label: 'iGPU' }
-  return { id: 'unknown', label: backend || provider || 'slot' }
-}
-
-// Model label with the same fallback chain SlotCard uses, truncated
-// shorter to fit the dense single-line row.
-function modelLabel(slot) {
-  const raw = slot?.model_name || slot?.model || slot?.model_id || ''
-  const s = typeof raw === 'string' ? raw : (raw?.default ?? '')
-  if (!s) return 'no model'
-  return s.length > 28 ? s.slice(0, 26) + '…' : s
-}
-
-// Per-slot metric formatters. Backend doesn't yet expose ttft directly;
-// show em-dash so the chip layout stays stable when the field lands.
-function slotTps(name) {
-  const v = metrics.value[name]?.tokens_per_sec ?? metrics.value[name]?.tps
-  return v ? `${v.toFixed(1)} tok/s` : '— tok/s'
-}
-function slotTtft(name) {
-  const m = metrics.value[name] || {}
-  const v = m.ttft_ms ?? m.first_token_ms ?? m.time_to_first_token_ms
-  return v ? `${Math.round(v)}ms` : '— ms'
-}
-function slotMem(name) {
-  const m = metrics.value[name] || {}
-  const mb = m.mem_rss_mb ?? m.rss_mb ?? m.gtt_mb ?? m.vram_mb
-  if (!mb || mb <= 0) return '— GB'
-  return mb >= 1024 ? `${(mb / 1024).toFixed(1)}GB` : `${mb.toFixed(0)}MB`
-}
 
 // ── Chat panel ───────────────────────────────────────────────────────
 const chatModels = ref([])
@@ -399,7 +326,7 @@ loadChatModels()
         <p class="section-eyebrow"><span class="section-eyebrow-dot" aria-hidden="true"></span> Slots</p>
         <h2 id="slots-heading" class="section-title">Slots</h2>
         <template v-if="system.loading && system.slots.length === 0">
-          <div class="slot-list">
+          <div class="slots-grid">
             <Card v-for="i in 3" :key="i"><LoadingSkeleton :lines="3" /></Card>
           </div>
         </template>
@@ -414,29 +341,22 @@ loadChatModels()
           </Card>
         </template>
         <template v-else>
-          <div class="slot-list">
-            <Card v-for="slot in system.slots" :key="slot.name" class="slot-row" :padded="false">
-              <div class="slot-row-main">
-                <span class="state-dot" :class="stateClass(slotDisplayState(slot))" aria-hidden="true" />
-                <span class="state-label" :class="stateClass(slotDisplayState(slot))">{{ slotDisplayState(slot) }}</span>
-                <span class="slot-name">{{ slot.name }}</span>
-                <span
-                  class="slot-model mono"
-                  :class="{ 'needs-model': !(slot.model_name || slot.model || slot.model_id) }"
-                  :title="(slot.model_name || slot.model || slot.model_id) || 'No default model — set one in /etc/hal0/slots/' + slot.name + '.toml or via the Slots page'"
-                >{{ modelLabel(slot) }}</span>
-                <span class="hw-chip" :class="`hw-${hardwareTarget(slot).id}`">{{ hardwareTarget(slot).label }}</span>
-                <span v-if="slot.port" class="mono-chip">:{{ slot.port }}</span>
-                <button class="slot-action-btn" type="button" @click="router.push('/slots')">Manage →</button>
-              </div>
-              <div class="slot-row-stats" :class="{ dim: !slotRunning(slot) }">
-                <span class="stat-chip" :title="`Tokens per second from /api/slots/metrics`">{{ slotTps(slot.name) }}</span>
-                <span class="stat-chip-sep">·</span>
-                <span class="stat-chip" :title="`Time to first token (not yet emitted by backend — placeholder)`">{{ slotTtft(slot.name) }}</span>
-                <span class="stat-chip-sep">·</span>
-                <span class="stat-chip" :title="`Resident memory (RSS or GTT)`">{{ slotMem(slot.name) }}</span>
-              </div>
-            </Card>
+          <div class="slots-grid" role="list" aria-label="Inference slots">
+            <SlotCard
+              v-for="slot in system.slots"
+              :key="slot.name"
+              :slot="slot"
+              :metrics="metrics[slot.name]"
+              @action="() => router.push('/slots')"
+              @logs="() => router.push('/slots')"
+              @edit="() => router.push('/slots')"
+              @delete="() => router.push('/slots')"
+              @swapped="() => { /* slot store re-polls on its own */ }"
+            />
+            <!-- NPU backend lives in the slots grid: it can serve a
+                 chat-shaped model the same way a llama.cpp slot does,
+                 so colocating it here is honest. -->
+            <NPUBackendCard />
           </div>
         </template>
       </section>
@@ -570,47 +490,15 @@ loadChatModels()
 .section-title { font-size: 16px; font-weight: 600; color: var(--color-fg); letter-spacing: -0.01em; margin: 0 0 12px; display: flex; align-items: center; gap: 12px; }
 .section-link { margin-left: auto; font-size: 11px; }
 
-/* ── Slot summary list ──────────────────────────────────────────── */
-/* Dense two-line row: top has identity + chips + Manage; bottom has
-   the per-slot metric strip (tok/s · ttft · mem). Mirrors SlotCard's
-   identity surface without committing to the full card grid. */
-.slot-list { display: flex; flex-direction: column; gap: 6px; }
-.slot-row { display: flex; flex-direction: column; padding: 10px 14px 8px; gap: 4px; }
-.slot-row-main { display: flex; align-items: center; gap: 10px; min-width: 0; }
-.state-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
-.state-running { background: var(--hal0-accent); box-shadow: 0 0 8px var(--hal0-accent); }
-.state-idle    { background: var(--color-warning); }
-.state-error   { background: var(--color-danger); }
-.state-warn    { background: var(--color-warning); }
-.state-offline { background: var(--color-fg-faint); }
-.slot-name { font-family: var(--font-mono); font-size: 13px; font-weight: 600; color: var(--color-fg); flex-shrink: 0; }
-.slot-model { font-size: 11.5px; color: var(--color-fg-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 1; }
-.slot-model.needs-model { color: var(--color-warning); font-style: italic; }
-.mono-chip { font-family: var(--font-mono); font-size: 11px; padding: 2px 7px; border-radius: 4px; background: var(--color-surface-2); border: 1px solid var(--color-border); color: var(--color-fg-faint); font-feature-settings: 'zero' 1, 'ss02' 1, 'tnum' 1; flex-shrink: 0; }
-.state-label { font-family: var(--font-mono); font-size: 10.5px; padding: 2px 8px; border-radius: 4px; text-transform: uppercase; letter-spacing: 0.06em; flex-shrink: 0; }
-.state-label.state-running { background: color-mix(in srgb, var(--hal0-accent) 14%, transparent); color: var(--hal0-accent); }
-.state-label.state-idle    { background: color-mix(in oklch, var(--color-warning) 15%, transparent); color: var(--color-warning); }
-.state-label.state-error   { background: color-mix(in oklch, var(--color-danger) 15%, transparent); color: var(--color-danger); }
-.state-label.state-warn    { background: color-mix(in oklch, var(--color-warning) 15%, transparent); color: var(--color-warning); }
-.state-label.state-offline { background: var(--color-surface-2); color: var(--color-fg-faint); }
-.slot-action-btn { padding: 4px 10px; border-radius: var(--radius); border: 1px solid var(--color-border); background: transparent; color: var(--color-fg-muted); font-size: 11.5px; cursor: pointer; flex-shrink: 0; margin-left: auto; }
-.slot-action-btn:hover { background: var(--color-surface-2); color: var(--color-fg); }
-
-/* Hardware chip — same colour buckets SlotCard uses, slimmer for the
-   inline row. NPU amber, GPU red, iGPU green, CPU muted. */
-.hw-chip { font-family: var(--font-mono); font-size: 10px; padding: 2px 6px; border-radius: 4px; letter-spacing: 0.04em; border: 1px solid var(--color-border); background: var(--color-surface-2); color: var(--color-fg-muted); flex-shrink: 0; }
-.hw-chip.hw-npu  { color: var(--color-warning); border-color: color-mix(in oklch, var(--color-warning), transparent 60%); background: color-mix(in oklch, var(--color-warning), transparent 88%); }
-.hw-chip.hw-gpu  { color: var(--color-danger);  border-color: color-mix(in oklch, var(--color-danger),  transparent 60%); background: color-mix(in oklch, var(--color-danger),  transparent 88%); }
-.hw-chip.hw-igpu { color: var(--color-success); border-color: color-mix(in oklch, var(--color-success), transparent 60%); background: color-mix(in oklch, var(--color-success), transparent 88%); }
-.hw-chip.hw-cpu  { color: var(--color-fg-muted); border-color: var(--color-border-hi); }
-.hw-chip.hw-unknown { opacity: 0.6; text-transform: lowercase; }
-
-/* Metric strip — aligned under the model name so the eye scans
-   identity → live numbers without crossing to a separate region. */
-.slot-row-stats { display: flex; align-items: center; gap: 8px; padding-left: 18px; font-family: var(--font-mono); font-size: 11.5px; color: var(--color-fg-muted); font-feature-settings: 'zero' 1, 'ss02' 1, 'tnum' 1; }
-.slot-row-stats.dim { color: var(--color-fg-faint); opacity: 0.7; }
-.stat-chip { white-space: nowrap; }
-.stat-chip-sep { color: var(--color-fg-faint); opacity: 0.6; }
+/* ── Slot grid ──────────────────────────────────────────────────── */
+/* Wider min-column so the SlotCard's roomier internals (taller spark,
+   outlined load-cycle buttons) breathe without wrapping. Matches the
+   Slots page's grid so the two views stay visually aligned. */
+.slots-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+  gap: 14px;
+}
 
 /* ── Chat panel ─────────────────────────────────────────────────── */
 .chat-card { padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; }

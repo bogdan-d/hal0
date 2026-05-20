@@ -142,30 +142,48 @@ async def get_urls(request: Request) -> dict[str, object]:
 
         {
           "api":               "http://<host>:8080" | "https://<host>",
-          "openwebui":         "http://<host>:3001" | "https://<host>/chat/",
+          "openwebui":         "http://<host>:3001" | "https://chat.<host>",
           "openwebui_enabled": true | false,
         }
 
-    When the request reached us via a reverse proxy (X-Forwarded-* set
-    by Caddy/Traefik/nginx), the URLs are path-based so the auth proxy
-    in front of us still gets to inject ``X-Forwarded-Email`` before
-    the request lands on OpenWebUI. Without that, OpenWebUI's trusted-
-    header mode rejects the request as "provider has not provided a
-    trusted header".
+    ``HAL0_OPENWEBUI_PUBLIC_URL`` (set in /etc/hal0/api.env) wins
+    whenever it's defined — it's how a reverse-proxy deploy declares the
+    public hostname for OpenWebUI (e.g. ``https://hal0-chat.example.com``).
+    Open WebUI emits root-absolute asset URLs and cannot be served under
+    a path prefix, so the proxy must give it its own (sub)domain; there
+    is no safe way to synthesise that from the request alone.
+
+    Without the env var, LAN-direct deploys fall back to
+    ``http://<host>:3001`` (matching the systemd unit's bound port).
+    Reverse-proxy deploys without the env var get ``openwebui_enabled =
+    false`` so the dashboard hides the Chat link instead of dangling it
+    at a broken URL.
     """
+    public = os.environ.get("HAL0_OPENWEBUI_PUBLIC_URL", "").strip().rstrip("/")
     host = _resolve_host(request)
+    enabled = await _openwebui_is_active()
+
+    if public:
+        if _behind_proxy(request):
+            scheme = request.headers.get("x-forwarded-proto") or request.url.scheme
+            forwarded_host = request.headers.get("x-forwarded-host") or host
+            api_url = f"{scheme}://{forwarded_host}"
+        else:
+            api_url = f"http://{host}:{_api_port()}"
+        return {"api": api_url, "openwebui": public, "openwebui_enabled": enabled}
+
     if _behind_proxy(request):
         scheme = request.headers.get("x-forwarded-proto") or request.url.scheme
         forwarded_host = request.headers.get("x-forwarded-host") or host
         return {
             "api": f"{scheme}://{forwarded_host}",
-            "openwebui": f"{scheme}://{forwarded_host}/chat/",
-            "openwebui_enabled": await _openwebui_is_active(),
+            "openwebui": "",
+            "openwebui_enabled": False,
         }
     return {
         "api": f"http://{host}:{_api_port()}",
         "openwebui": f"http://{host}:{_OPENWEBUI_PORT}",
-        "openwebui_enabled": await _openwebui_is_active(),
+        "openwebui_enabled": enabled,
     }
 
 
@@ -206,6 +224,14 @@ async def update_models_config(request: Request) -> dict[str, Any]:
             details=_validation_error_details(exc),
         ) from exc
 
+    # pull_root is always implicitly scanned — otherwise a user who only
+    # ever pulls (never points roots at an external dir) gets an empty
+    # registry after a save.
+    if new_models.pull_root not in new_models.roots:
+        new_models = new_models.model_copy(
+            update={"roots": [*new_models.roots, new_models.pull_root]},
+        )
+
     cfg.models = new_models
     try:
         save_hal0_config(cfg)
@@ -216,10 +242,14 @@ async def update_models_config(request: Request) -> dict[str, Any]:
         ) from exc
 
     # Run a discovery scan so newly-added roots produce results immediately.
+    # The scan walks the filesystem synchronously (potentially seconds on
+    # large/NFS roots), so we offload to a thread — leaving it on the
+    # event loop blocked /api/status and /api/stats/hardware polls and
+    # the browser would surface those as "Fetch failed loading".
     scan_result: dict[str, Any] = {"added": [], "skipped": [], "scanned_roots": []}
     try:
         registry = request.app.state.model_registry
-        scan_result = scan_and_register(registry, new_models)
+        scan_result = await asyncio.to_thread(scan_and_register, registry, new_models)
     except Exception as exc:  # pragma: no cover — defensive
         scan_result = {"added": [], "skipped": [], "scanned_roots": [], "error": str(exc)}
 

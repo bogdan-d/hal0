@@ -23,6 +23,7 @@ import { computed, ref } from 'vue'
 import { useCapabilities } from '../../composables/useCapabilities.js'
 import { useSlotMetrics } from '../../composables/useStats.js'
 import { useToastsStore } from '../../stores/toasts.js'
+import { usePullJob, fmtBytes } from '../../composables/usePullJob.js'
 import CapabilityToggle from './CapabilityToggle.vue'
 
 const props = defineProps({
@@ -55,13 +56,24 @@ function optionsFor(capability) {
   for (const b of cap.backends.value) {
     for (const m of models) {
       if (m.backend !== b.id) continue
+      // Three-state icon, native <option> can't host SVG so use Unicode:
+      //   ◉ downloaded — on disk, ready to load
+      //   ⬇ pullable but not downloaded — first click triggers a pull
+      //   ✕ not pullable — upstream route stub with no HF coords; the
+      //     handler short-circuits with a clear "no download source"
+      //     toast rather than 422'ing on /pull.
+      const ready = m.downloaded !== false
+      const pullable = m.pullable !== false
+      const icon = ready ? '◉' : pullable ? '⬇' : '✕'
       opts.push({
         key: `${b.id}::${m.provider || ''}::${m.id}`,
-        label: `${b.short} / ${m.id}`,
+        label: `${icon} ${b.short} / ${m.id}`,
         backend: b.id,
         provider: m.provider,
         model: m.id,
         size_gb: m.size_gb,
+        downloaded: ready,
+        pullable,
       })
     }
   }
@@ -81,10 +93,46 @@ function selectedModel(capability) {
     .find((m) => m.backend === s.backend && m.id === s.model) ?? null
 }
 
+// One pull job per capability child — `embed` and `rerank` can race in
+// parallel without sharing progress state. Each card exposes its own
+// inline progress strip driven off these reactive refs.
+const pull = {
+  embed: usePullJob(),
+  rerank: usePullJob(),
+}
+
 async function onChange(capability, ev) {
   const v = ev.target.value
   if (!v) return
   const [backend, provider, model] = v.split('::')
+  // Intercept un-downloaded picks: trigger /api/models/{id}/pull, wait
+  // for the SSE stream to terminate, then apply the selection. The pull
+  // composable surfaces progress reactively so the inline strip below
+  // the dropdown lights up without us touching toasts.
+  const opt = optionsFor(capability).find((o) => o.key === v)
+  if (opt && opt.downloaded === false) {
+    if (opt.pullable === false) {
+      toasts.error(
+        `"${model}" has no download source (upstream-routed model). ` +
+        `Add an hf_repo + hf_filename on the registry entry to enable pull.`,
+      )
+      ev.target.value = currentValue(capability)
+      return
+    }
+    try {
+      await pull[capability].pullAndWait(model)
+      // Catalog rows carry `downloaded` snapshots from the last
+      // /api/capabilities fetch. Refresh so the icon flips to ◉ on the
+      // next render.
+      await cap.refresh()
+    } catch (err) {
+      toasts.error(`download "${model}" failed: ${err?.message ?? err}`)
+      // Reset the <select> back to its previous value so the user can
+      // try again or pick a different option.
+      ev.target.value = currentValue(capability)
+      return
+    }
+  }
   try {
     await cap.setSelection('embed', capability, {
       backend,
@@ -197,7 +245,7 @@ const headerPill = computed(() => {
       <select
         class="cap-select"
         :value="currentValue('embed')"
-        :disabled="togglePending.embed"
+        :disabled="togglePending.embed || pull.embed.inFlight.value"
         @change="onChange('embed', $event)"
       >
         <option value="" disabled>pick model…</option>
@@ -207,6 +255,13 @@ const headerPill = computed(() => {
           :value="o.key"
         >{{ o.label }}{{ o.size_gb ? ` — ${o.size_gb} GB` : '' }}</option>
       </select>
+      <div v-if="pull.embed.inFlight.value" class="cap-pull">
+        <div class="cap-pull-bar"><div class="cap-pull-fill" :style="{ width: (pull.embed.pct.value ?? 0) + '%' }" /></div>
+        <span class="cap-pull-label mono">
+          ↓ {{ pull.embed.modelId.value }} · {{ pull.embed.pct.value ?? 0 }}% · {{ fmtBytes(pull.embed.downloaded.value) }} / {{ fmtBytes(pull.embed.total.value) }}
+        </span>
+        <button class="cap-pull-cancel" type="button" @click="pull.embed.cancel()">cancel</button>
+      </div>
       <div class="cap-meta">
         <span class="cap-chip" :data-backend="backendFor('embed')?.id">{{ backendFor('embed')?.label || '—' }}</span>
         <span class="cap-meta-item" v-if="selectedModel('embed')?.dims">{{ selectedModel('embed').dims }}-d</span>
@@ -250,7 +305,7 @@ const headerPill = computed(() => {
       <select
         class="cap-select"
         :value="currentValue('rerank')"
-        :disabled="togglePending.rerank"
+        :disabled="togglePending.rerank || pull.rerank.inFlight.value"
         @change="onChange('rerank', $event)"
       >
         <option value="" disabled>pick model…</option>
@@ -260,6 +315,13 @@ const headerPill = computed(() => {
           :value="o.key"
         >{{ o.label }}{{ o.size_gb ? ` — ${o.size_gb} GB` : '' }}</option>
       </select>
+      <div v-if="pull.rerank.inFlight.value" class="cap-pull">
+        <div class="cap-pull-bar"><div class="cap-pull-fill" :style="{ width: (pull.rerank.pct.value ?? 0) + '%' }" /></div>
+        <span class="cap-pull-label mono">
+          ↓ {{ pull.rerank.modelId.value }} · {{ pull.rerank.pct.value ?? 0 }}% · {{ fmtBytes(pull.rerank.downloaded.value) }} / {{ fmtBytes(pull.rerank.total.value) }}
+        </span>
+        <button class="cap-pull-cancel" type="button" @click="pull.rerank.cancel()">cancel</button>
+      </div>
       <div class="cap-meta">
         <span class="cap-chip" :data-backend="backendFor('rerank')?.id">{{ backendFor('rerank')?.label || '—' }}</span>
         <span class="cap-meta-item" v-if="selectedModel('rerank')?.size_gb">{{ selectedModel('rerank').size_gb }} GB</span>

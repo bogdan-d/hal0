@@ -147,9 +147,26 @@ def _sanitise_id(model_id: str) -> str:
     return cleaned
 
 
+def _pull_root() -> Path:
+    """Return the configured pull destination root.
+
+    Reads [models].pull_root from hal0.toml on each call so a Settings
+    save takes effect without an API restart. Falls back to
+    paths.models_dir() (the FHS default) if config load fails — keeps
+    pulls working during bootstrap before the config exists.
+    """
+    try:
+        from hal0.config.loader import load_hal0_config
+
+        cfg = load_hal0_config()
+        return Path(cfg.models.pull_root)
+    except Exception:
+        return paths.models_dir()
+
+
 def _final_path(model_id: str, filename: str) -> Path:
-    """Resolve the final on-disk path: /var/lib/hal0/models/<id>/<file>."""
-    return paths.models_dir() / _sanitise_id(model_id) / filename
+    """Resolve the final on-disk path: <pull_root>/<id>/<file>."""
+    return _pull_root() / _sanitise_id(model_id) / filename
 
 
 def _comfyui_models_dir(subdir: str) -> Path:
@@ -187,8 +204,13 @@ def _final_path_for_entry(
 
 
 def _tmp_dir() -> Path:
-    """Return the tempfile staging directory for in-flight pulls."""
-    return paths.models_dir() / ".tmp"
+    """Return the tempfile staging directory for in-flight pulls.
+
+    Lives under the configured pull_root so the os.replace() into the
+    final path stays on the same filesystem (otherwise atomic rename
+    degrades to a cross-FS copy, which we don't want for multi-GB pulls).
+    """
+    return _pull_root() / ".tmp"
 
 
 def hf_download_url(repo: str, filename: str, revision: str = "main") -> str:

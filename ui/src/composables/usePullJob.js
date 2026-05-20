@@ -1,4 +1,4 @@
-import { ref, computed, onUnmounted } from 'vue'
+import { ref, computed, watch, onUnmounted } from 'vue'
 import { api, Hal0Error } from './useApi.js'
 
 /**
@@ -77,11 +77,21 @@ export function usePullJob() {
   function applyPayload(payload) {
     if (!payload || typeof payload !== 'object') return
     if (typeof payload.state === 'string') state.value = payload.state
-    if (typeof payload.downloaded === 'number') downloaded.value = payload.downloaded
-    if (typeof payload.total === 'number') total.value = payload.total
+    // Backend's PullJob.as_dict (src/hal0/registry/pull.py) emits
+    // bytes_downloaded / bytes_total. The earlier shape (downloaded /
+    // total) was a draft spec that never shipped — keep both readers
+    // so the composable doesn't break if either side rolls forward.
+    const dlField = payload.bytes_downloaded ?? payload.downloaded
+    const totField = payload.bytes_total ?? payload.total
+    if (typeof dlField === 'number') downloaded.value = dlField
+    if (typeof totField === 'number') total.value = totField
     if (typeof payload.speed_bps === 'number') speedBps.value = payload.speed_bps
     if (typeof payload.eta_s === 'number') etaS.value = payload.eta_s
-    if (payload.error) error.value = payload.error
+    if (payload.error) {
+      error.value = typeof payload.error === 'string'
+        ? { code: payload.error_code || 'pull.failed', message: payload.error, details: {} }
+        : payload.error
+    }
     if (TERMINAL_STATES.has(state.value)) closeStream()
   }
 
@@ -124,7 +134,9 @@ export function usePullJob() {
         method: 'POST',
         body: body ? JSON.stringify(body) : undefined,
       })
-      jobId.value = res?.job_id ?? null
+      // Backend's POST /pull returns { id, model_id, state, ... }. The
+      // older draft spec used `job_id`; accept both.
+      jobId.value = res?.id ?? res?.job_id ?? null
       attachStream(id)
       return res
     } catch (e) {
@@ -136,6 +148,32 @@ export function usePullJob() {
       }
       throw e
     }
+  }
+
+  /**
+   * Start a pull and return a Promise that resolves on `completed`
+   * (and rejects on `failed`/`cancelled` or a POST failure). Wraps
+   * `start()` so callers that need to wait for the SSE terminal frame
+   * can `await pullAndWait(id)` instead of subscribing to state.value
+   * by hand. The composable's existing reactive state is still updated
+   * along the way so any inline progress UI keeps working.
+   */
+  function pullAndWait(id, body = null) {
+    return new Promise((resolve, reject) => {
+      const stop = watch(state, (s) => {
+        if (s === 'completed') {
+          stop()
+          resolve()
+        } else if (s === 'failed' || s === 'cancelled') {
+          stop()
+          reject(new Error(error.value?.message || s))
+        }
+      })
+      start(id, body).catch((e) => {
+        stop()
+        reject(e)
+      })
+    })
   }
 
   /**
@@ -192,7 +230,7 @@ export function usePullJob() {
     // derived
     pct, inFlight, terminal,
     // actions
-    start, cancel, reattach, reset,
+    start, pullAndWait, cancel, reattach, reset,
   }
 }
 

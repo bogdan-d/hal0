@@ -26,6 +26,7 @@ def test_get_models_config_returns_defaults(isolated_client: TestClient) -> None
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["roots"] == ["/var/lib/hal0/models"]
+    assert body["pull_root"] == "/var/lib/hal0/models"
     assert body["auto_scan_on_start"] is True
     assert ".gguf" in body["file_extensions"]
     assert ".safetensors" in body["file_extensions"]
@@ -42,7 +43,10 @@ def test_put_models_config_persists(
     )
     assert r.status_code == 200, r.text
     body = r.json()
-    assert body["roots"] == [str(new_root)]
+    # pull_root is auto-included in roots so a save that only mentioned
+    # an extra root still leaves the pull destination scannable.
+    assert str(new_root) in body["roots"]
+    assert body["pull_root"] in body["roots"]
     assert body["auto_scan_on_start"] is False
     assert "scan" in body
     assert isinstance(body["scan"]["added"], list)
@@ -50,7 +54,7 @@ def test_put_models_config_persists(
     toml_path = Path(tmp_hal0_home) / "etc" / "hal0" / "hal0.toml"
     assert toml_path.exists(), f"expected hal0.toml at {toml_path}"
     parsed = tomllib.loads(toml_path.read_text(encoding="utf-8"))
-    assert parsed["models"]["roots"] == [str(new_root)]
+    assert str(new_root) in parsed["models"]["roots"]
     assert parsed["models"]["auto_scan_on_start"] is False
 
 
@@ -66,3 +70,34 @@ def test_put_models_config_relative_path_rejected(isolated_client: TestClient) -
     # Pydantic surfaces the failed field path; we don't pin the exact key
     # shape (depends on pydantic version) — just that we got something.
     assert details
+
+
+def test_put_pull_root_persists_and_is_auto_scanned(
+    isolated_client: TestClient, tmp_hal0_home: str, tmp_path: Path
+) -> None:
+    new_dir = tmp_path / "mnt-models"
+    new_dir.mkdir()
+    r = isolated_client.put(
+        "/api/config/models",
+        json={"pull_root": str(new_dir)},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["pull_root"] == str(new_dir)
+    # pull_root must appear in the effective scan roots even though the
+    # caller didn't pass it explicitly.
+    assert str(new_dir) in body["roots"]
+
+    toml_path = Path(tmp_hal0_home) / "etc" / "hal0" / "hal0.toml"
+    parsed = tomllib.loads(toml_path.read_text(encoding="utf-8"))
+    assert parsed["models"]["pull_root"] == str(new_dir)
+
+
+def test_put_pull_root_relative_path_rejected(isolated_client: TestClient) -> None:
+    r = isolated_client.put(
+        "/api/config/models",
+        json={"pull_root": "models"},
+    )
+    assert r.status_code == 400, r.text
+    body = r.json()
+    assert body["error"]["code"] == "config.invalid"

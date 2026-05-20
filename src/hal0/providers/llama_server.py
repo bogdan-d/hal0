@@ -408,14 +408,39 @@ class LlamaServerProvider(Provider):
 
         models_base = slot_paths.get("models_base") or str(_cfg_paths.models_dir())
         mounts: list[tuple[str, str]] = [(models_base, models_base)]
-        # Also bind-mount the model file's actual parent if it lives
-        # outside models_base — e.g. a model registered against a shared
-        # /mnt/ai-models path. Without this the in-container llama-server
-        # gets an ENOENT on the model path even though the registry has
-        # the right absolute path.
+
+        def _mount_dir(d: str) -> None:
+            """Add (d, d) to mounts unless an ancestor is already mounted.
+
+            Skips empty strings and relative paths — without the relative
+            guard, an unset HAL0_MODEL_PATH passed through Path("").parent
+            collapses to ``.``, which docker rejects with ``invalid mount
+            path: '.' mount path must be absolute`` and the slot crashes
+            into a restart loop before llama-server ever runs.
+            """
+            if not d or not d.startswith("/"):
+                return
+            for host, _ in mounts:
+                # `d` already covered by an existing mount; nothing to do.
+                if d == host or d.startswith(host.rstrip("/") + "/"):
+                    return
+            mounts.append((d, d))
+
+        # The registry path may point inside the models_base, into a
+        # shared store like /mnt/ai-models, or into a HuggingFace cache
+        # whose snapshots/*.gguf entries are symlinks into ../../blobs/.
+        # Without resolving the symlink we mount the snapshots dir but
+        # not the blobs dir, and llama-server inside the container ENOENTs
+        # on the symlink target. Always cover both the path-as-given AND
+        # the realpath's parent so the symlink resolves inside.
         model_dir = str(Path(model_path).parent)
-        if not model_dir.startswith(models_base):
-            mounts.append((model_dir, model_dir))
+        _mount_dir(model_dir)
+        try:
+            real_model_path = os.path.realpath(model_path)
+        except OSError:
+            real_model_path = model_path
+        if real_model_path != model_path:
+            _mount_dir(str(Path(real_model_path).parent))
         # Bind-mount /etc/hal0 so flags referencing absolute config paths
         # (--chat-template-file etc.) resolve at the same path inside.
         config_root = "/etc/hal0"

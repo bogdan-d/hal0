@@ -28,7 +28,7 @@ def test_urls_use_request_host(client: TestClient) -> None:
     body = resp.json()
     assert "hal0-test.lan" in body["api"], body
     assert "hal0-test.lan" in body["openwebui"], body
-    # Port still :3001 for the chat link, regardless of how the API was reached.
+    # LAN-direct fallback: port :3001 for the chat link.
     assert body["openwebui"].endswith(":3001")
 
 
@@ -56,10 +56,13 @@ def test_urls_openwebui_enabled_false_when_systemctl_missing(
     assert resp.json()["openwebui_enabled"] is False
 
 
-def test_urls_path_based_when_behind_proxy(client: TestClient) -> None:
-    """When X-Forwarded-* is present, openwebui is a /chat/ path on the
-    forwarded host — not a direct host:3001 URL that bypasses the proxy
-    and skips X-Forwarded-Email injection."""
+def test_urls_behind_proxy_without_public_url_hides_chat(client: TestClient) -> None:
+    """Proxy deploys must declare HAL0_OPENWEBUI_PUBLIC_URL.
+
+    Without it we can't know where OpenWebUI is publicly reachable
+    (it can't be served under a path prefix), so the Chat link is
+    hidden rather than dangled at a broken URL.
+    """
     resp = client.get(
         "/api/config/urls",
         headers={
@@ -69,5 +72,37 @@ def test_urls_path_based_when_behind_proxy(client: TestClient) -> None:
     )
     assert resp.status_code == 200
     body = resp.json()
-    assert body["openwebui"] == "https://ai-dev.thinmint.dev/chat/", body
+    assert body["openwebui"] == "", body
+    assert body["openwebui_enabled"] is False, body
     assert body["api"] == "https://ai-dev.thinmint.dev", body
+
+
+def test_urls_public_url_env_wins_behind_proxy(
+    monkeypatch,
+    client: TestClient,
+) -> None:
+    """HAL0_OPENWEBUI_PUBLIC_URL is the canonical override for proxy deploys."""
+    monkeypatch.setenv("HAL0_OPENWEBUI_PUBLIC_URL", "https://hal0-chat.example.com/")
+    resp = client.get(
+        "/api/config/urls",
+        headers={
+            "x-forwarded-host": "hal0.example.com",
+            "x-forwarded-proto": "https",
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    # Trailing slash stripped so links concat predictably.
+    assert body["openwebui"] == "https://hal0-chat.example.com", body
+    assert body["api"] == "https://hal0.example.com", body
+
+
+def test_urls_public_url_env_overrides_lan_direct(
+    monkeypatch,
+    client: TestClient,
+) -> None:
+    """The env var also overrides the LAN-direct host:3001 default."""
+    monkeypatch.setenv("HAL0_OPENWEBUI_PUBLIC_URL", "http://chat.lan:7000")
+    resp = client.get("/api/config/urls", headers={"host": "hal0-test.lan:8080"})
+    body = resp.json()
+    assert body["openwebui"] == "http://chat.lan:7000", body

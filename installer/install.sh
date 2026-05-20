@@ -61,20 +61,30 @@ NO_START=0
 #             for hosts behind an existing reverse proxy (Traefik etc.)
 #             or for trusted-LAN dev boxes that don't need TLS.
 NO_TLS=0
+# Pull destination for `hal0 model pull` and the dashboard's pull buttons.
+# Empty → ask interactively when stdin is a tty, default to <var-lib>/models
+# otherwise. The chosen path is written to hal0.toml as [models].pull_root
+# and also auto-included in [models].roots so it's scanned at startup.
+MODELS_DIR="${HAL0_MODELS_DIR:-}"
 for arg in "$@"; do
     case "$arg" in
         --dev) DEV_MODE=1 ;;
         --no-start) NO_START=1 ;;
         --no-tls) NO_TLS=1 ;;
+        --models-dir=*) MODELS_DIR="${arg#--models-dir=}" ;;
         --help|-h)
             cat <<EOF
-Usage: install.sh [--dev] [--no-start] [--no-tls]
-  --dev          install under \$PWD/.hal0ai/, no systemd setup
-  --no-start     set up everything but don't enable/start the API
-  --no-tls       skip the Caddy reverse proxy; bind FastAPI on
-                 0.0.0.0:8080 directly. No TLS, no edge proxy. Auth
-                 (password + tokens) still works — set it up in the
-                 first-run wizard or via the dashboard's Settings panel.
+Usage: install.sh [--dev] [--no-start] [--no-tls] [--models-dir=PATH]
+  --dev               install under \$PWD/.hal0ai/, no systemd setup
+  --no-start          set up everything but don't enable/start the API
+  --no-tls            skip the Caddy reverse proxy; bind FastAPI on
+                      0.0.0.0:8080 directly. No TLS, no edge proxy. Auth
+                      (password + tokens) still works — set it up in the
+                      first-run wizard or via the dashboard's Settings panel.
+  --models-dir=PATH   absolute path where HuggingFace pulls land
+                      (default: /var/lib/hal0/models — or \$PWD/.hal0ai/var/lib/hal0/models
+                      under --dev). Can also be set with HAL0_MODELS_DIR=PATH.
+                      Asks interactively if running on a tty and not provided.
 EOF
             exit 0
             ;;
@@ -128,6 +138,26 @@ else
 fi
 VENV_DIR="${PREFIX}/.venv"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# Resolve pull destination: explicit flag / env wins, then an interactive
+# prompt (only when attached to a tty), then the FHS default. Always
+# absolute — relative paths under sudo would land in /root or wherever
+# the install was launched, which is never what the operator wanted.
+DEFAULT_MODELS_DIR="${VAR_DIR}/models"
+if [[ -z "${MODELS_DIR}" ]]; then
+    if [[ -t 0 && -t 1 ]]; then
+        printf '\n  Model pull directory (where downloaded .gguf/.safetensors land)\n'
+        printf '  [%s]: ' "${DEFAULT_MODELS_DIR}"
+        read -r MODELS_DIR_INPUT || MODELS_DIR_INPUT=""
+        MODELS_DIR="${MODELS_DIR_INPUT:-${DEFAULT_MODELS_DIR}}"
+    else
+        MODELS_DIR="${DEFAULT_MODELS_DIR}"
+    fi
+fi
+if [[ "${MODELS_DIR}" != /* ]]; then
+    die "--models-dir must be an absolute path (got: ${MODELS_DIR})"
+fi
+info "Pull destination: ${MODELS_DIR}"
 
 # Step total — base 8, +1 for the optional TLS / Caddy setup. Kept
 # here so editors who add or remove a ui_step bump the visible counter
@@ -192,18 +222,9 @@ if ! preflight_python; then
     # Version warning already printed; keep going.
 fi
 
-# preflight_docker in HAL0_DOCKER_REQUIRED mode auto-installs docker.io
-# on apt hosts and hard-fails (returns non-zero) on others with the
-# right remediation one-liner. We do NOT flip the flag in dev mode —
-# dev installs skip the openwebui unit and the slot containers, so a
-# missing docker is a warning, not a blocker. Operator who genuinely
-# wants docker on their dev tree can apt install it by hand.
-if [[ "${DEV_MODE}" -eq 0 ]]; then
-    HAL0_DOCKER_REQUIRED=1 preflight_docker || \
-        die "docker preflight failed — see remediation above, then re-run install.sh"
-else
-    preflight_docker
-fi
+# preflight_docker is soft (always returns 0 with a warning when
+# Docker is absent), so we don't need to guard the call.
+preflight_docker
 
 # Disk + port-collision checks only matter for the live install — dev
 # mode lays files under $PWD/.hal0ai and never binds 8080/3001. We
@@ -225,13 +246,54 @@ ui_step "Filesystem layout"
 mkdir -p \
     "${PREFIX}" \
     "${ETC_DIR}/slots" \
-    "${VAR_DIR}/models" \
+    "${MODELS_DIR}" \
     "${VAR_DIR}/registry" \
     "${VAR_DIR}/slots" \
     "${VAR_DIR}/openwebui" \
     "${VAR_DIR}/cache" \
     "${UNIT_DIR}"
-info "directories under ${PREFIX}, ${ETC_DIR}, ${VAR_DIR}"
+info "directories under ${PREFIX}, ${ETC_DIR}, ${VAR_DIR} (pulls → ${MODELS_DIR})"
+
+# Seed hal0.toml's [models].pull_root when the operator picked a non-default
+# directory, so the API and CLI both read the same value from the
+# canonical config without an extra dashboard step. Idempotent: a
+# previous run with the same value is a no-op; a different value
+# overwrites (operator just re-ran the installer with a new path).
+HAL0_TOML="${ETC_DIR}/hal0.toml"
+if [[ "${MODELS_DIR}" != "/var/lib/hal0/models" ]]; then
+    if ! grep -qE "^\\s*pull_root\\s*=\\s*\"${MODELS_DIR//\//\\/}\"" "${HAL0_TOML}" 2>/dev/null; then
+        if [[ -f "${HAL0_TOML}" ]] && grep -q "^\\[models\\]" "${HAL0_TOML}"; then
+            # [models] table exists — patch pull_root in place (or append
+            # under the existing table). Cheap awk pass; no toml parser
+            # so we accept the limitation that nested tables under
+            # [models.xxx] aren't supported (the schema has none).
+            python3 - "${HAL0_TOML}" "${MODELS_DIR}" <<'PYEOF'
+import sys, re, pathlib
+path = pathlib.Path(sys.argv[1])
+new_root = sys.argv[2]
+text = path.read_text(encoding="utf-8")
+# Replace existing pull_root inside [models], else append before the next [section]
+m = re.search(r"^\[models\][^\[]*", text, flags=re.MULTILINE)
+if m:
+    block = m.group(0)
+    if re.search(r"^\s*pull_root\s*=", block, flags=re.MULTILINE):
+        new_block = re.sub(r"^\s*pull_root\s*=.*$",
+                           f'pull_root = "{new_root}"',
+                           block, count=1, flags=re.MULTILINE)
+    else:
+        new_block = block.rstrip() + f'\npull_root = "{new_root}"\n\n'
+    text = text[:m.start()] + new_block + text[m.end():]
+else:
+    text = text.rstrip() + f'\n\n[models]\npull_root = "{new_root}"\n'
+path.write_text(text, encoding="utf-8")
+PYEOF
+        else
+            mkdir -p "${ETC_DIR}"
+            printf '\n[models]\npull_root = "%s"\n' "${MODELS_DIR}" >> "${HAL0_TOML}"
+        fi
+        info "wrote [models].pull_root → ${HAL0_TOML}"
+    fi
+fi
 
 ui_step "Python environment"
 

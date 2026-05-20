@@ -16,6 +16,7 @@ import { computed, ref } from 'vue'
 import { useCapabilities } from '../../composables/useCapabilities.js'
 import { useSlotMetrics } from '../../composables/useStats.js'
 import { useToastsStore } from '../../stores/toasts.js'
+import { usePullJob, fmtBytes } from '../../composables/usePullJob.js'
 import CapabilityToggle from './CapabilityToggle.vue'
 
 const props = defineProps({
@@ -41,23 +42,50 @@ function optionsFor() {
   for (const b of cap.backends.value) {
     for (const m of models) {
       if (m.backend !== b.id) continue
+      // ◉ downloaded · ⬇ pullable · ✕ no source — see EmbedCard.vue.
+      const ready = m.downloaded !== false
+      const pullable = m.pullable !== false
+      const icon = ready ? '◉' : pullable ? '⬇' : '✕'
       opts.push({
         key: `${b.id}::${m.provider || ''}::${m.id}`,
-        label: `${b.short} / ${m.id}`,
+        label: `${icon} ${b.short} / ${m.id}`,
         backend: b.id,
         provider: m.provider,
         model: m.id,
         size_gb: m.size_gb,
+        downloaded: ready,
+        pullable,
       })
     }
   }
   return opts
 }
 
+const pull = usePullJob()
+
 async function onChange(ev) {
   const v = ev.target.value
   if (!v) return
   const [backend, provider, model] = v.split('::')
+  const opt = optionsFor().find((o) => o.key === v)
+  if (opt && opt.downloaded === false) {
+    if (opt.pullable === false) {
+      toasts.error(
+        `"${model}" has no download source (upstream-routed model). ` +
+        `Add an hf_repo + hf_filename on the registry entry to enable pull.`,
+      )
+      ev.target.value = currentValue.value
+      return
+    }
+    try {
+      await pull.pullAndWait(model)
+      await cap.refresh()
+    } catch (err) {
+      toasts.error(`download "${model}" failed: ${err?.message ?? err}`)
+      ev.target.value = currentValue.value
+      return
+    }
+  }
   try {
     await cap.setSelection('img', 'img', {
       backend,
@@ -165,7 +193,7 @@ const headerPill = computed(() => {
       <select
         class="cap-select"
         :value="currentValue"
-        :disabled="togglePending"
+        :disabled="togglePending || pull.inFlight.value"
         @change="onChange"
       >
         <option value="" disabled>pick model…</option>
@@ -173,6 +201,13 @@ const headerPill = computed(() => {
           {{ o.label }}{{ o.size_gb ? ` — ${o.size_gb} GB` : '' }}
         </option>
       </select>
+      <div v-if="pull.inFlight.value" class="cap-pull">
+        <div class="cap-pull-bar"><div class="cap-pull-fill" :style="{ width: (pull.pct.value ?? 0) + '%' }" /></div>
+        <span class="cap-pull-label mono">
+          ↓ {{ pull.modelId.value }} · {{ pull.pct.value ?? 0 }}% · {{ fmtBytes(pull.downloaded.value) }} / {{ fmtBytes(pull.total.value) }}
+        </span>
+        <button class="cap-pull-cancel" type="button" @click="pull.cancel()">cancel</button>
+      </div>
       <div class="cap-meta">
         <span class="cap-chip" :data-backend="selectedBackend?.id">{{ selectedBackend?.label || '—' }}</span>
         <span class="cap-meta-item" v-if="selected?.size_gb">{{ selected.size_gb }} GB</span>

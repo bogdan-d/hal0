@@ -12,6 +12,7 @@ import { computed, ref } from 'vue'
 import { useCapabilities } from '../../composables/useCapabilities.js'
 import { useSlotMetrics } from '../../composables/useStats.js'
 import { useToastsStore } from '../../stores/toasts.js'
+import { usePullJob, fmtBytes } from '../../composables/usePullJob.js'
 import CapabilityToggle from './CapabilityToggle.vue'
 
 const props = defineProps({
@@ -42,13 +43,19 @@ function optionsFor(capability) {
   for (const b of cap.backends.value) {
     for (const m of models) {
       if (m.backend !== b.id) continue
+      // ◉ downloaded · ⬇ pullable · ✕ no source — see EmbedCard.vue.
+      const ready = m.downloaded !== false
+      const pullable = m.pullable !== false
+      const icon = ready ? '◉' : pullable ? '⬇' : '✕'
       opts.push({
         key: `${b.id}::${m.provider || ''}::${m.id}`,
-        label: `${b.short} / ${m.id}`,
+        label: `${icon} ${b.short} / ${m.id}`,
         backend: b.id,
         provider: m.provider,
         model: m.id,
         size_gb: m.size_gb,
+        downloaded: ready,
+        pullable,
       })
     }
   }
@@ -73,10 +80,36 @@ function backendFor(capability) {
   return s ? cap.backendById(s.backend) : null
 }
 
+// One pull job per voice child (stt, tts) so they can race in parallel
+// with independent progress strips.
+const pull = {
+  stt: usePullJob(),
+  tts: usePullJob(),
+}
+
 async function onChange(capability, ev) {
   const v = ev.target.value
   if (!v) return
   const [backend, provider, model] = v.split('::')
+  const opt = optionsFor(capability).find((o) => o.key === v)
+  if (opt && opt.downloaded === false) {
+    if (opt.pullable === false) {
+      toasts.error(
+        `"${model}" has no download source (upstream-routed model). ` +
+        `Add an hf_repo + hf_filename on the registry entry to enable pull.`,
+      )
+      ev.target.value = currentValue(capability)
+      return
+    }
+    try {
+      await pull[capability].pullAndWait(model)
+      await cap.refresh()
+    } catch (err) {
+      toasts.error(`download "${model}" failed: ${err?.message ?? err}`)
+      ev.target.value = currentValue(capability)
+      return
+    }
+  }
   try {
     await cap.setSelection('voice', capability, {
       backend,
@@ -166,7 +199,7 @@ const headerPill = computed(() => {
       <select
         class="cap-select"
         :value="currentValue(c)"
-        :disabled="togglePending[c]"
+        :disabled="togglePending[c] || pull[c].inFlight.value"
         @change="onChange(c, $event)"
       >
         <option value="" disabled>pick model…</option>
@@ -174,6 +207,13 @@ const headerPill = computed(() => {
           {{ o.label }}{{ o.size_gb ? ` — ${o.size_gb} GB` : '' }}
         </option>
       </select>
+      <div v-if="pull[c].inFlight.value" class="cap-pull">
+        <div class="cap-pull-bar"><div class="cap-pull-fill" :style="{ width: (pull[c].pct.value ?? 0) + '%' }" /></div>
+        <span class="cap-pull-label mono">
+          ↓ {{ pull[c].modelId.value }} · {{ pull[c].pct.value ?? 0 }}% · {{ fmtBytes(pull[c].downloaded.value) }} / {{ fmtBytes(pull[c].total.value) }}
+        </span>
+        <button class="cap-pull-cancel" type="button" @click="pull[c].cancel()">cancel</button>
+      </div>
       <div class="cap-meta">
         <span class="cap-chip" :data-backend="backendFor(c)?.id">{{ backendFor(c)?.label || '—' }}</span>
         <span class="cap-meta-item" v-if="selectedModel(c)?.size_gb">{{ selectedModel(c).size_gb }} GB</span>

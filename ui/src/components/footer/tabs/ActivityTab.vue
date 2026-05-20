@@ -24,7 +24,17 @@ function sevClass(s) {
 }
 function tsText(ts) {
   if (!ts) return ''
-  const d = new Date(ts * 1000)
+  // Two timestamp formats reach this ring:
+  //   - Backend SSE events send `ts` as ISO 8601 strings (the FastAPI
+  //     event router serializes datetime to isoformat).
+  //   - Client-side synthetic events (useEvents.push) use seconds since
+  //     epoch as a number.
+  // Treat numbers as seconds-since-epoch, anything else as a string the
+  // Date constructor can parse directly. The prior `new Date(ts * 1000)`
+  // multiplied an ISO string by 1000, gave NaN, and the UI rendered
+  // "Invalid Date" for every backend event.
+  const d = typeof ts === 'number' ? new Date(ts * 1000) : new Date(ts)
+  if (Number.isNaN(d.getTime())) return ''
   return d.toLocaleTimeString(undefined, { hour12: false })
 }
 </script>

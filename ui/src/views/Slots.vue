@@ -27,6 +27,7 @@ import LoadingSkeleton from '../components/LoadingSkeleton.vue'
 import EmptyState from '../components/EmptyState.vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
 import SlotCard from '../components/SlotCard.vue'
+import NPUBackendCard from '../components/capabilities/NPUBackendCard.vue'
 import CapabilitiesSection from '../components/capabilities/CapabilitiesSection.vue'
 
 // Mirror src/hal0/slots/__init__.py BUILTIN_SLOTS — these cannot be deleted.
@@ -53,6 +54,13 @@ const showCreate = ref(false)
 const createForm = ref(defaultCreateForm())
 const createErrors = ref({})
 const creating = ref(false)
+
+// Per-slot model selection for the inline load dropdown — lives OUTSIDE
+// the augmented-slots computed so it survives system.slots polls.
+// Previously `_selectedModel` was carried on the wrapper object, which
+// was rebuilt every poll, so the user's selection vanished on the next
+// 2.5s refresh and "Start" got an empty model id.
+const slotSelections = ref({})
 
 // Edit slot drawer
 const editingSlot      = ref(null)
@@ -153,7 +161,7 @@ async function slotAction(slotName, action, body = null) {
 }
 
 async function doLoad(slot) {
-  const model = slot._selectedModel
+  const model = slotSelections.value[slot.name] || slot._selectedModel
   if (!model) { toasts.warning('Select a model first'); return }
   await slotAction(slot.name, 'load', { model })
 }
@@ -350,21 +358,35 @@ async function submitEdit() {
     const slotName = slot.name
 
     // Fast path: only `model` changed AND the slot is live → /swap.
-    // No config rewrite needed; swap already updates the running container
-    // and the model field gets re-read on next config load.
+    //
+    // The backend swap is unload → systemctl restart → wait-for-health,
+    // which routinely takes 10-30s and can hit a 180s health timeout on
+    // failure. Awaiting that inline locks the modal for minutes. We
+    // close the modal optimistically, surface a toast, and let the slot
+    // state SSE ring (liveStates) animate the card through
+    // warming → ready. On error the swap's promise rejects and we toast
+    // the failure even though the modal is already gone.
     if (changed.size === 1 && changed.has('model') && isLive && editForm.value.model) {
-      await api(`/api/slots/${slotName}/swap`, {
-        method: 'POST',
-        body: JSON.stringify({ model_id: editForm.value.model }),
-      })
-      toasts.success(`Swapped "${slotName}" → ${editForm.value.model}`)
+      const targetModel = editForm.value.model
       editingSlot.value = null
-      await system.fetchStatus()
+      editing.value = false
+      toasts.success(`Swapping "${slotName}" → ${targetModel}…`)
+      api(`/api/slots/${slotName}/swap`, {
+        method: 'POST',
+        body: JSON.stringify({ model_id: targetModel }),
+      })
+        .then(() => {
+          toasts.success(`"${slotName}" ready on ${targetModel}`)
+          return system.fetchStatus()
+        })
+        .catch((e) => {
+          toasts.error(`Swap "${slotName}" failed: ${e.message}`)
+        })
       return
     }
 
-    // Slow path: PUT full config. Backend shallow-merges flat keys into
-    // sectioned schema (verified against PUT /api/slots/{name}/config).
+    // Slow path: PUT full config. Fast on the server (no container
+    // restart), so we keep the inline await.
     if (changed.size === 0) {
       editingSlot.value = null
       return
@@ -501,17 +523,21 @@ const liveStates = computed(() => {
   return out
 })
 
-// ── Augmented slots list (adds _selectedModel for load UI) ────────────
+// ── Augmented slots list ──────────────────────────────────────────────
 //
 // Overlays the ring-derived `liveStates[name].state` onto the polled
 // snapshot's `status` field. Without this, transitions only appear on
 // the next 5s poll tick; with it, SlotCard re-renders within ~1 RTT of
 // a state machine transition.
+//
+// `_selectedModel` is read from slotSelections (not stored on the
+// wrapper object), so the dropdown's pending selection survives across
+// store polls — see the slotSelections declaration above.
 const slots = computed(() =>
   system.slots.map((s) => {
     const live = liveStates.value[s.name]
     const status = live?.state ?? s.status
-    return { ...s, status, _selectedModel: s._selectedModel ?? '' }
+    return { ...s, status, _selectedModel: slotSelections.value[s.name] ?? '' }
   })
 )
 
@@ -592,17 +618,21 @@ const SLOT_TYPES = ['llama-server', 'flm', 'moonshine', 'kokoro']
             :models="models"
             :selected-model="slot._selectedModel"
             :action-loading="actionBusy[slot.name]"
-            @select-model="(v) => { const s = slots.find(x => x.name === slot.name); if (s) s._selectedModel = v }"
+            @select-model="(v) => { slotSelections[slot.name] = v }"
             @action="(a) => a === 'load' ? doLoad(slot) : slotAction(slot.name, a)"
             @logs="openLogs(slot)"
             @edit="openEdit(slot)"
             @swap="openEdit(slot)"
             @delete="deletingSlot = slot"
           />
+          <!-- NPU backend rides in the same grid as the other slot
+               cards now — it serves chat-shaped models the same way a
+               local llama.cpp slot does. -->
+          <NPUBackendCard />
         </div>
       </template>
 
-      <!-- Capability slots — embed / voice / img cards + NPU backend rollup. -->
+      <!-- Capability slots — embed / voice / img cards. -->
       <CapabilitiesSection />
 
       <!-- Legacy row layout retained for the row-error rendering path
@@ -648,7 +678,7 @@ const SLOT_TYPES = ['llama-server', 'flm', 'moonshine', 'kokoro']
                 <select
                   class="model-select"
                   :value="slot._selectedModel"
-                  @change="(e) => { const s = slots.find(x => x.name === slot.name); if (s) s._selectedModel = e.target.value }"
+                  @change="(e) => { slotSelections[slot.name] = e.target.value }"
                   :aria-label="`Select model for slot ${slot.name}`"
                 >
                   <option value="">Select model…</option>
@@ -1036,8 +1066,8 @@ const SLOT_TYPES = ['llama-server', 'flm', 'moonshine', 'kokoro']
 /* ── Slot list ────────────────────────────────────────────────── */
 .slots-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-  gap: 12px;
+  grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+  gap: 14px;
 }
 .slots-list { display: flex; flex-direction: column; gap: 4px; }
 

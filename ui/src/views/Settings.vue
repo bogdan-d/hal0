@@ -399,6 +399,7 @@ function formatTimestamp(iso) {
 // PUT /api/config/models persists the same shape and immediately re-scans;
 // the response carries a `scan` sub-object the toast can summarise.
 const modelsCfg = reactive({
+  pull_root: '/var/lib/hal0/models',
   roots: [],
   auto_scan_on_start: true,
   file_extensions: ['.gguf', '.safetensors'],
@@ -412,7 +413,14 @@ async function loadModelsCfg() {
   modelsCfgError.value = null
   try {
     const data = await api('/api/config/models')
-    modelsCfg.roots = Array.isArray(data.roots) ? [...data.roots] : []
+    modelsCfg.pull_root = typeof data.pull_root === 'string' && data.pull_root
+      ? data.pull_root
+      : '/var/lib/hal0/models'
+    // Filter pull_root out of the editable scan-roots list — the API
+    // auto-includes it on save, and showing it twice would let the user
+    // remove it accidentally.
+    const rawRoots = Array.isArray(data.roots) ? data.roots : []
+    modelsCfg.roots = rawRoots.filter((r) => r !== modelsCfg.pull_root)
     modelsCfg.auto_scan_on_start = !!data.auto_scan_on_start
     modelsCfg.file_extensions = Array.isArray(data.file_extensions)
       ? [...data.file_extensions]
@@ -436,12 +444,17 @@ async function saveAndScanModelRoots() {
   modelsCfgSaving.value = true
   try {
     const body = JSON.stringify({
+      pull_root: (modelsCfg.pull_root || '').trim() || '/var/lib/hal0/models',
       roots: modelsCfg.roots.map((r) => r.trim()).filter((r) => r.length > 0),
       auto_scan_on_start: modelsCfg.auto_scan_on_start,
       file_extensions: modelsCfg.file_extensions,
     })
     const updated = await api('/api/config/models', { method: 'PUT', body })
-    modelsCfg.roots = [...(updated.roots || [])]
+    modelsCfg.pull_root = typeof updated.pull_root === 'string' && updated.pull_root
+      ? updated.pull_root
+      : '/var/lib/hal0/models'
+    const rawRoots = Array.isArray(updated.roots) ? updated.roots : []
+    modelsCfg.roots = rawRoots.filter((r) => r !== modelsCfg.pull_root)
     modelsCfg.auto_scan_on_start = !!updated.auto_scan_on_start
     modelsCfg.file_extensions = [...(updated.file_extensions || [])]
     const scan = updated.scan || { added: [], skipped: [] }
@@ -587,14 +600,29 @@ onMounted(async () => {
       <Card>
         <h3 class="section-title">Model locations</h3>
         <p class="field-hint">
-          Filesystem roots scanned for downloaded model files (.gguf, .safetensors).
-          Add <code class="mono">/mnt/ai-models</code> or a custom mount and hit
-          <strong>Save &amp; re-scan</strong> — every matching file under the root
-          is registered and routable.
+          <strong>Pull destination</strong> is where <code class="mono">hal0 model pull</code>
+          (and the dashboard's pull buttons) write new files —
+          <code class="mono">&lt;pull_root&gt;/&lt;model_id&gt;/&lt;filename&gt;</code>.
+          <strong>Scan roots</strong> are extra directories walked for already-present
+          model files (.gguf, .safetensors). The pull destination is always scanned
+          automatically, so you only need extra roots for read-only stores like
+          <code class="mono">/mnt/ai-models</code>.
         </p>
         <div v-if="modelsCfgError" class="error-banner" role="alert">{{ modelsCfgError }}</div>
         <div v-else-if="modelsCfgLoading" class="loading-row">Loading…</div>
         <div v-else class="roots-list">
+          <div class="pull-root-row">
+            <label for="pull-root" class="field-label">Pull destination</label>
+            <input
+              id="pull-root"
+              v-model="modelsCfg.pull_root"
+              type="text"
+              class="field-input"
+              placeholder="/var/lib/hal0/models"
+              :disabled="modelsCfgSaving"
+            />
+          </div>
+          <div class="roots-section-label">Extra scan roots</div>
           <div v-for="(_, i) in modelsCfg.roots" :key="i" class="root-row">
             <input
               v-model="modelsCfg.roots[i]"
@@ -614,7 +642,7 @@ onMounted(async () => {
             </button>
           </div>
           <div v-if="modelsCfg.roots.length === 0" class="empty-row">
-            No roots configured — scanning is a no-op until you add one.
+            No extra roots — only the pull destination is scanned.
           </div>
           <div class="roots-actions">
             <button
@@ -1076,6 +1104,9 @@ onMounted(async () => {
 
 /* ── Model locations ─────────────────────────────────────────────────── */
 .roots-list { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
+.pull-root-row { display: flex; flex-direction: column; gap: 4px; margin-bottom: 4px; }
+.pull-root-row .field-input { font-family: var(--font-mono); }
+.roots-section-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--hal0-accent); font-family: var(--font-mono); margin-top: 6px; }
 .root-row { display: flex; align-items: center; gap: 8px; }
 .root-row .field-input { flex: 1; font-family: var(--font-mono); }
 .roots-actions { display: flex; align-items: center; gap: 12px; margin-top: 6px; flex-wrap: wrap; }

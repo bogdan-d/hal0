@@ -19,7 +19,10 @@ import { useCapabilities } from '../../composables/useCapabilities.js'
 import EmbedCard from './EmbedCard.vue'
 import VoiceCard from './VoiceCard.vue'
 import ImgCard from './ImgCard.vue'
-import NPUBackendCard from './NPUBackendCard.vue'
+// NPUBackendCard now lives in the Slots section — see Slots.vue /
+// Dashboard.vue. It can serve regular chat-style models alongside the
+// hal0-slot@* templates, so colocating it with those cards reads more
+// honestly than treating it as a capability-only widget.
 import LoadingSkeleton from '../LoadingSkeleton.vue'
 import EmptyState from '../EmptyState.vue'
 
@@ -65,7 +68,6 @@ const hasData = computed(() => !!(embedSel.value || voiceSel.value || imgSel.val
       <EmbedCard v-if="embedSel" :selection="embedSel" />
       <VoiceCard v-if="voiceSel" :selection="voiceSel" />
       <ImgCard   v-if="imgSel"   :selection="imgSel" />
-      <NPUBackendCard />
     </div>
   </section>
 </template>
@@ -261,4 +263,50 @@ const hasData = computed(() => !!(embedSel.value || voiceSel.value || imgSel.val
 .cap-metric-headline .cap-metric-v { color: var(--hal0-accent); }
 .cap-metric-mem .cap-metric-v { color: var(--color-fg-muted); }
 .cap-metric-na .cap-metric-v { color: var(--color-fg-faint); opacity: 0.7; }
+
+/* Pull progress strip — appears under the select while a `⬇` option is
+ * downloading. Mirrors the bar styling on NPUBackendCard's .bc-bar so
+ * the visual language stays consistent across capability surfaces. */
+.cap-pull {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+  padding: 6px 8px;
+  border: 1px solid color-mix(in oklch, var(--hal0-accent) 30%, var(--color-border));
+  border-radius: var(--radius);
+  background: color-mix(in oklch, var(--hal0-accent) 6%, transparent);
+}
+.cap-pull-bar {
+  flex: 1;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--hal0-bg-sunken);
+  overflow: hidden;
+}
+.cap-pull-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--hal0-accent), var(--hal0-accent-hover));
+  transition: width 0.2s ease-out;
+}
+.cap-pull-label {
+  font-size: 10.5px;
+  color: var(--color-fg-muted);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.cap-pull-cancel {
+  background: transparent;
+  border: 1px solid var(--color-border);
+  color: var(--color-fg-faint);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  padding: 2px 8px;
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+.cap-pull-cancel:hover {
+  color: var(--color-danger);
+  border-color: color-mix(in oklch, var(--color-danger) 40%, var(--color-border));
+}
 </style>
