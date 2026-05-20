@@ -30,7 +30,7 @@ command on any modern Linux box.
 |-------------|----------------------|-----------------------------------|
 | llama.cpp   | Vulkan (default) / ROCm | chat, embed, rerank, vision    |
 | FLM         | AMD XDNA NPU (opt-in)| chat / embed / ASR multiplex     |
-| Moonshine   | CPU / Vulkan         | STT (`/v1/audio/transcriptions`) |
+| Moonshine   | CPU                  | STT (`/v1/audio/transcriptions`) |
 | Kokoro      | CPU / Vulkan         | TTS                              |
 | ComfyUI     | ROCm                 | image gen (`/v1/images/generations`) |
 

@@ -28,7 +28,8 @@ home installs, OpenAI-compatible inference, bundled OpenWebUI chat.
   - Provider abstraction with **five** providers in v1:
     - `llama.cpp` (Vulkan default, ROCm opt-in) — chat / embed / rerank / vision
     - `flm` (AMD NPU, optional) — chat / embed / ASR multiplex
-    - `moonshine` (STT) — CPU/Vulkan, OpenAI-compatible
+    - `moonshine` (STT) — CPU (upstream `useful-moonshine-onnx` wheel
+      ships ONNX-runtime CPU EP only), OpenAI-compatible
     - `kokoro` (TTS) — CPU/Vulkan
     - `comfyui` (ROCm) — image gen, OpenAI-compatible `/v1/images/generations`
       (shipped ahead of schedule via Team K, 2026-05-15 — `1a8a480`, `76b7f8b`)
@@ -584,6 +585,14 @@ sha256 digests for vulkan, rocm, moonshine, kokoro, and comfyui
 (`3449b2c chore(manifest): pin comfyui digest + refresh others`). The
 `flm` digest stays `null` until that toolbox publishes successfully;
 the runtime falls back to pulling by tag with a warning in that case.
+
+**Moonshine rebuild (2026-05-20):** Republished `hal0-toolbox-moonshine:v1`
+at digest `sha256:a5bbb78b…` after fixing `moonshine_server.py` to pass
+both `models_dir` and `model_name` to `MoonshineOnnxModel` (commit
+`61c62c2`). The prior `:v1` could never load local `.ort` weights — it
+treated `--model_path` as an HF identifier and 404'd against a stale HF
+layout. Anyone who pulled `:v1` before this date should `docker pull`
+again. `manifest.json` still pins the older sha; refresh on next release.
 
 When kyuz0 PRs land, mirror back to upstream and re-converge.
 
