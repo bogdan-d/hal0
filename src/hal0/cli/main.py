@@ -26,6 +26,7 @@ from hal0.cli._shared import (
     api_post,
     die,
 )
+from hal0.cli.capabilities_commands import app as capabilities_app
 from hal0.cli.config_commands import app as config_app
 from hal0.cli.doctor_commands import app as doctor_app
 from hal0.cli.model_commands import app as model_app
@@ -50,6 +51,7 @@ app.add_typer(slot_app, name="slot")
 app.add_typer(model_app, name="model")
 app.add_typer(config_app, name="config")
 app.add_typer(doctor_app, name="doctor")
+app.add_typer(capabilities_app, name="capabilities")
 
 
 # ---------------------------------------------------------------------------

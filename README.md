@@ -29,10 +29,16 @@ command on any modern Linux box.
 | Backend     | Hardware             | Use case                          |
 |-------------|----------------------|-----------------------------------|
 | llama.cpp   | Vulkan (default) / ROCm | chat, embed, rerank, vision    |
-| FLM         | AMD XDNA NPU (opt-in)| chat / embed / ASR multiplex     |
+| FLM         | AMD XDNA NPU (opt-in)| chat + embed (ASR routes through Moonshine for now) |
 | Moonshine   | CPU                  | STT (`/v1/audio/transcriptions`) |
 | Kokoro      | CPU / Vulkan         | TTS                              |
 | ComfyUI     | ROCm                 | image gen (`/v1/images/generations`) |
+
+The NPU/FLM column is populated at runtime from `flm list -j` inside
+the FLM toolbox image — hal0 doesn't pretend a GGUF runs on the NPU,
+and the dashboard's model picker narrows the backend dropdown to the
+backends a given model can actually serve. (`hal0 capabilities
+migrate` cleans up persisted selections that pre-date this check.)
 
 ## Project layout
 

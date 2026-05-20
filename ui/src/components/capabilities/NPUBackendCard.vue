@@ -46,17 +46,28 @@ const FALLBACK = {
 const snap = computed(() => npu.value ?? FALLBACK)
 
 // Build the "+ load NPU model" option list from the union of every
-// capability's catalog where backend === 'npu'. Each option carries the
-// capability so we can post the right shape if/when v1.1 wires this up.
+// capability's catalog where the model can run on the NPU backend. Each
+// option carries the capability so we can post the right shape if/when
+// v1.1 wires this up. The catalog rows are model-first grouped (see
+// hal0.capabilities.catalog.models_for_capability) so a model belongs
+// to NPU when its `backends` list contains an entry with id === 'npu'.
 const npuModels = computed(() => {
   const out = []
   const cats = cap.catalogs.value ?? {}
   for (const slot of Object.keys(cats)) {
     for (const capability of Object.keys(cats[slot] ?? {})) {
       for (const m of cats[slot][capability] ?? []) {
-        if (m.backend === 'npu') {
-          out.push({ slot, capability, ...m })
-        }
+        const npu = (m.backends ?? []).find((b) => b.id === 'npu')
+        if (!npu) continue
+        out.push({
+          slot,
+          capability,
+          id: m.id,
+          size_gb: m.size_gb,
+          provider: npu.provider,
+          downloaded: npu.downloaded,
+          pullable: npu.pullable,
+        })
       }
     }
   }

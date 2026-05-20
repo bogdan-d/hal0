@@ -461,17 +461,16 @@ def _iter_registry_models(registry: ModelRegistry | None) -> list[Any]:
         return []
 
 
-def models_for_capability(
+def _flat_rows_for_capability(
     capability: str,
     *,
     registry: ModelRegistry | None = None,
 ) -> list[dict[str, Any]]:
-    """Return picker rows for one capability child ('embed' / 'rerank' / …).
+    """Build per-(model, backend) flat rows for one capability child.
 
-    Walks the curated catalogue plus the optional :class:`ModelRegistry`.
-    Each compatible model contributes one row per backend it can run on,
-    so the dashboard can show "the same nomic-embed model on Vulkan and
-    CPU" as two rows.
+    Internal helper for :func:`models_for_capability`. Each compatible
+    model emits one row per backend it can run on; FLM/NPU rows are
+    appended after the curated / registry / llama-server fan-out.
 
     HaloaiModel entries (the upstream-routed seed in
     ``seeds/haloai_models.json``) are intentionally skipped here even
@@ -498,7 +497,134 @@ def models_for_capability(
                 continue
             seen.add(key)
             rows.append(_entry_to_row(entry, backend_id, caps, registry=registry))
+
+    for npu_row in _flm_rows_for_capability(capability):
+        key = (npu_row["id"], npu_row["backend"])
+        if key in seen:
+            continue
+        seen.add(key)
+        rows.append(npu_row)
+
     return rows
+
+
+def models_for_capability(
+    capability: str,
+    *,
+    registry: ModelRegistry | None = None,
+) -> list[dict[str, Any]]:
+    """Return picker entries for one capability child, grouped by model id.
+
+    Each entry carries the model-level fields plus a ``backends`` list,
+    one element per backend the model can actually run on::
+
+        {
+            "id":           "nomic-embed-text-v1.5-q8_0",
+            "capabilities": ["embed"],
+            "size_gb":      0.14,
+            "backends": [
+                {"id": "gpu-vulkan", "provider": "llama-server",
+                 "downloaded": True, "pullable": True},
+                {"id": "cpu",        "provider": "llama-server",
+                 "downloaded": True, "pullable": True},
+                {"id": "gpu-rocm",   "provider": "llama-server",
+                 "downloaded": True, "pullable": True},
+            ],
+        }
+
+    The model-first shape lets the dashboard offer the user a single
+    model dropdown and narrow the backend dropdown to the picked model's
+    legal options — replacing the old flat per-(model, backend) row
+    layout that allowed the operator to mix incompatible pairs (e.g.
+    ``backend=npu`` + an llama.cpp GGUF) which then crashed the slot at
+    start-up.
+
+    Backends preserve the order produced by :func:`_flat_rows_for_capability`
+    (llama.cpp fan-out first, FLM/NPU appended).
+    """
+    flat = _flat_rows_for_capability(capability, registry=registry)
+    grouped: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+    for row in flat:
+        rid = row["id"]
+        entry = grouped.get(rid)
+        if entry is None:
+            entry = {
+                "id": rid,
+                "capabilities": list(row["capabilities"]),
+                "size_gb": row["size_gb"],
+                "backends": [],
+            }
+            grouped[rid] = entry
+            order.append(rid)
+        else:
+            # Defensive: a provider could in theory tag the same model
+            # differently per backend. Union rather than silently drop.
+            for cap in row["capabilities"]:
+                if cap not in entry["capabilities"]:
+                    entry["capabilities"].append(cap)
+        entry["backends"].append(
+            {
+                "id": row["backend"],
+                "provider": row["provider"],
+                "downloaded": row["downloaded"],
+                "pullable": row["pullable"],
+            }
+        )
+    return [grouped[rid] for rid in order]
+
+
+def _flm_rows_for_capability(capability: str) -> list[dict[str, Any]]:
+    """Return picker rows the NPU/FLM toolbox can serve for one capability.
+
+    Probes :func:`hal0.providers.flm.flm_served_models` (cached at module
+    scope after first call) and projects each FLM tag into a picker row
+    with ``backend="npu"`` / ``provider="flm"``. Scope is intentionally
+    limited to ``chat`` and ``embed`` per the 2026-05-20 design call —
+    FLM also serves ``stt`` (whisper-v3, gemma4-it asr=true) but the NPU
+    voice path through the slot manager is a later slice.
+
+    ``pullable`` is reported as False even though ``flm pull <tag>``
+    works inside the toolbox: the existing ``POST /api/models/{id}/pull``
+    handler resolves a HuggingFace repo + filename, which FLM tags don't
+    carry. Wiring an FLM-aware pull path is a follow-up; until then,
+    operators run ``flm pull`` manually via the toolbox container and
+    the catalog will flip ``downloaded`` to True on the next probe-cache
+    refresh (process restart).
+    """
+    if capability not in {"chat", "embed"}:
+        return []
+    # Local import so catalog.py doesn't drag the provider module (and
+    # its httpx dependency) onto every import path.
+    from hal0.providers.flm import flm_served_models
+
+    out: list[dict[str, Any]] = []
+    for entry in flm_served_models():
+        if capability not in entry["capabilities"]:
+            continue
+        # Filter capabilities reported to the dashboard down to the
+        # in-scope subset; otherwise an "stt" tag would leak through on a
+        # chat row and confuse the picker.
+        reported_caps = [c for c in entry["capabilities"] if c in {"chat", "embed"}]
+        # FLM's reported `size` is the raw weights footprint; for
+        # quantized models it under-reports actual disk usage, so prefer
+        # the larger of size and runtime footprint as the displayed value.
+        size_gb_from_bytes = (
+            round(entry["size_bytes"] / (1024**3), 2) if entry["size_bytes"] else 0.0
+        )
+        size_gb = max(size_gb_from_bytes, entry["footprint_gb"])
+        out.append(
+            {
+                "id": entry["tag"],
+                "backend": "npu",
+                "provider": "flm",
+                "size_gb": size_gb,
+                "capabilities": reported_caps,
+                "downloaded": entry["installed"],
+                "pullable": False,
+            }
+        )
+    return out
 
 
 def catalogs_by_slot(

@@ -24,6 +24,7 @@
 #   cli-model-register      hal0 model register <id> --path <local-gguf>
 #   cli-model-show          hal0 model show <id>
 #   cli-update-check        hal0 update --check
+#   cli-capabilities-migrate-dry  hal0 capabilities migrate --dry-run (asserts catalog invariant)
 #   cli-slot-show-primary   hal0 slot show primary (expected: 404-equivalent before create)
 #   cli-slot-create-test    hal0 slot create <test-slot> --provider llama-server --backend vulkan --model <id>
 #   cli-model-assign        hal0 model assign <id> --slot <test-slot>
@@ -167,6 +168,31 @@ run_update_check_row() {
     fi
 }
 run_update_check_row
+
+# Catalog invariant: every persisted capability selection must be a legal
+# (model, backend) pair against the live catalog. `hal0 capabilities
+# migrate --dry-run` exits 0 in both clean and dirty cases — distinguish
+# by parsing for the "nothing to migrate" sentinel; finding it means the
+# orchestrator's pair-validation is doing its job and no drift escaped.
+run_capabilities_migrate_dry_row() {
+    local log="${SCRIPT_DIR}/reports/cli-cli-capabilities-migrate-dry.log"
+    local start; start=$(start_ms)
+    set +e
+    "${HAL0_BIN}" capabilities migrate --dry-run >"${log}" 2>&1
+    local rc=$?
+    set -e
+    if [[ "${rc}" -ne 0 ]]; then
+        add_row "cli-capabilities-migrate-dry" "fail" "$(since_ms "${start}")" \
+            "exit=${rc}: $(tail -n1 "${log}" 2>/dev/null | tr -d '\n')"
+    elif grep -q "nothing to migrate" "${log}"; then
+        add_row "cli-capabilities-migrate-dry" "pass" "$(since_ms "${start}")" \
+            "every persisted selection is a legal (backend, model) pair"
+    else
+        add_row "cli-capabilities-migrate-dry" "fail" "$(since_ms "${start}")" \
+            "drift detected: $(grep -c '│' "${log}") selection(s) would be rewritten"
+    fi
+}
+run_capabilities_migrate_dry_row
 
 # ── write rows: register + show + assign + delete ───────────────────────────
 log_step "Mutating CLI rows"

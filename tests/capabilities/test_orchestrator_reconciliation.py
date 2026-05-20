@@ -131,7 +131,7 @@ def orchestrator(
     monkeypatch.setattr(
         CapabilityOrchestrator,
         "_validate_model_in_catalog",
-        lambda self, slot, child, model_id: None,
+        lambda self, slot, child, model_id, backend_id: None,
     )
     fake = FakeSlotManager()
     orch = CapabilityOrchestrator(slot_manager=fake)

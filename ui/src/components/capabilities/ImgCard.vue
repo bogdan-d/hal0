@@ -11,6 +11,9 @@
  * Metrics show `imgs/h` (req/s × 3600) when available — operator-visible
  * throughput is rare-event-y for image gen, so a per-hour rollup reads
  * more usefully than the underlying per-sec rate.
+ *
+ * Picker: model dropdown → backend dropdown (narrowed to that model's
+ * legal backends). Same pattern as EmbedCard / VoiceCard.
  */
 import { computed, ref } from 'vue'
 import { useCapabilities } from '../../composables/useCapabilities.js'
@@ -36,66 +39,89 @@ function fmtMem(mb) {
   return mb >= 1024 ? `${(mb / 1024).toFixed(1)} GB` : `${mb} MB`
 }
 
-function optionsFor() {
-  const models = cap.modelsForCapability('img', 'img')
-  const opts = []
-  for (const b of cap.backends.value) {
-    for (const m of models) {
-      if (m.backend !== b.id) continue
-      // ◉ downloaded · ⬇ pullable · ✕ no source — see EmbedCard.vue.
-      const ready = m.downloaded !== false
-      const pullable = m.pullable !== false
-      const icon = ready ? '◉' : pullable ? '⬇' : '✕'
-      opts.push({
-        key: `${b.id}::${m.provider || ''}::${m.id}`,
-        label: `${icon} ${b.short} / ${m.id}`,
-        backend: b.id,
-        provider: m.provider,
-        model: m.id,
-        size_gb: m.size_gb,
-        downloaded: ready,
-        pullable,
-      })
+function modelsFor() {
+  return cap.modelsForCapability('img', 'img')
+}
+
+const selectedEntry = computed(() => {
+  const s = props.selection?.img
+  if (!s?.model) return null
+  return modelsFor().find((m) => m.id === s.model) ?? null
+})
+
+const backendOptions = computed(() => {
+  const entry = selectedEntry.value
+  if (!entry) return []
+  return entry.backends.map((b) => {
+    const meta = cap.backendById(b.id) ?? null
+    return {
+      id: b.id,
+      label: meta?.label ?? b.id,
+      short: meta?.short ?? b.id,
+      provider: b.provider,
+      downloaded: b.downloaded,
+      pullable: b.pullable,
     }
-  }
-  return opts
+  })
+})
+
+function backendIcon(b) {
+  if (b.downloaded !== false) return '◉'
+  return b.pullable !== false ? '⬇' : '✕'
 }
 
 const pull = usePullJob()
 
-async function onChange(ev) {
-  const v = ev.target.value
-  if (!v) return
-  const [backend, provider, model] = v.split('::')
-  const opt = optionsFor().find((o) => o.key === v)
-  if (opt && opt.downloaded === false) {
-    if (opt.pullable === false) {
+async function commit(modelId, backendId) {
+  const entry = modelsFor().find((m) => m.id === modelId)
+  if (!entry) return
+  const backend = entry.backends.find((b) => b.id === backendId)
+  if (!backend) return
+  if (backend.downloaded === false) {
+    if (backend.pullable === false) {
       toasts.error(
-        `"${model}" has no download source (upstream-routed model). ` +
+        `"${modelId}" has no download source (upstream-routed model). ` +
         `Add an hf_repo + hf_filename on the registry entry to enable pull.`,
       )
-      ev.target.value = currentValue.value
       return
     }
     try {
-      await pull.pullAndWait(model)
+      await pull.pullAndWait(modelId)
       await cap.refresh()
     } catch (err) {
-      toasts.error(`download "${model}" failed: ${err?.message ?? err}`)
-      ev.target.value = currentValue.value
+      toasts.error(`download "${modelId}" failed: ${err?.message ?? err}`)
       return
     }
   }
   try {
     await cap.setSelection('img', 'img', {
-      backend,
-      provider: provider || null,
-      model,
+      backend: backendId,
+      provider: backend.provider || null,
+      model: modelId,
     })
-    toasts.success(`img.img → ${model}`)
+    toasts.success(`img.img → ${modelId} on ${backendId}`)
   } catch (err) {
     toasts.error(`failed to set img: ${err?.message ?? err}`)
   }
+}
+
+async function onModelChange(ev) {
+  const modelId = ev.target.value
+  if (!modelId) return
+  const entry = modelsFor().find((m) => m.id === modelId)
+  if (!entry || entry.backends.length === 0) return
+  const current = props.selection?.img?.backend
+  const keep = entry.backends.find((b) => b.id === current)
+  const backendId = keep?.id ?? entry.backends[0].id
+  await commit(modelId, backendId)
+}
+
+async function onBackendChange(ev) {
+  const backendId = ev.target.value
+  if (!backendId) return
+  const modelId = props.selection?.img?.model
+  if (!modelId) return
+  await commit(modelId, backendId)
 }
 
 async function onToggle(enabled) {
@@ -109,17 +135,6 @@ async function onToggle(enabled) {
   }
 }
 
-const currentValue = computed(() => {
-  const s = props.selection?.img
-  if (!s) return ''
-  return `${s.backend}::${s.provider || ''}::${s.model}`
-})
-const selected = computed(() => {
-  const s = props.selection?.img
-  if (!s) return null
-  return cap.modelsForCapability('img', 'img')
-    .find((m) => m.backend === s.backend && m.id === s.model) ?? null
-})
 const selectedBackend = computed(() => {
   const s = props.selection?.img
   return s ? cap.backendById(s.backend) : null
@@ -190,17 +205,30 @@ const headerPill = computed(() => {
           @update:model-value="onToggle"
         />
       </div>
-      <select
-        class="cap-select"
-        :value="currentValue"
-        :disabled="togglePending || pull.inFlight.value"
-        @change="onChange"
-      >
-        <option value="" disabled>pick model…</option>
-        <option v-for="o in optionsFor()" :key="o.key" :value="o.key">
-          {{ o.label }}{{ o.size_gb ? ` — ${o.size_gb} GB` : '' }}
-        </option>
-      </select>
+      <div class="cap-pickers">
+        <select
+          class="cap-select cap-select-model"
+          :value="selection?.img?.model || ''"
+          :disabled="togglePending || pull.inFlight.value"
+          @change="onModelChange"
+        >
+          <option value="" disabled>pick model…</option>
+          <option v-for="m in modelsFor()" :key="m.id" :value="m.id">
+            {{ m.id }}{{ m.size_gb ? ` — ${m.size_gb} GB` : '' }}
+          </option>
+        </select>
+        <select
+          class="cap-select cap-select-backend"
+          :value="selection?.img?.backend || ''"
+          :disabled="togglePending || pull.inFlight.value || !selectedEntry"
+          @change="onBackendChange"
+        >
+          <option value="" disabled>backend…</option>
+          <option v-for="b in backendOptions" :key="b.id" :value="b.id">
+            {{ backendIcon(b) }} {{ b.short }}
+          </option>
+        </select>
+      </div>
       <div v-if="pull.inFlight.value" class="cap-pull">
         <div class="cap-pull-bar"><div class="cap-pull-fill" :style="{ width: (pull.pct.value ?? 0) + '%' }" /></div>
         <span class="cap-pull-label mono">
@@ -210,7 +238,7 @@ const headerPill = computed(() => {
       </div>
       <div class="cap-meta">
         <span class="cap-chip" :data-backend="selectedBackend?.id">{{ selectedBackend?.label || '—' }}</span>
-        <span class="cap-meta-item" v-if="selected?.size_gb">{{ selected.size_gb }} GB</span>
+        <span class="cap-meta-item" v-if="selectedEntry?.size_gb">{{ selectedEntry.size_gb }} GB</span>
         <span class="cap-meta-item">comfyui handles VAE + text encoder</span>
       </div>
       <div v-if="isActive" class="cap-metrics">
@@ -270,4 +298,8 @@ const headerPill = computed(() => {
   background: color-mix(in oklch, var(--color-danger) 12%, transparent);
   color: var(--color-danger);
 }
+
+.cap-pickers { display: flex; gap: 8px; align-items: stretch; }
+.cap-select-model    { flex: 1; min-width: 0; }
+.cap-select-backend  { flex: 0 0 auto; min-width: 110px; }
 </style>

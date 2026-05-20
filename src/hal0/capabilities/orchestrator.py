@@ -317,7 +317,9 @@ class CapabilityOrchestrator:
         # caller didn't explicitly clear it. We don't fail when the model
         # is empty — that's the "unset" state.
         if merged.model:
-            self._validate_model_in_catalog(slot, child, merged.model)
+            self._validate_model_in_catalog(
+                slot, child, merged.model, merged.backend
+            )
 
         cfg.selections[slot][child] = merged
 
@@ -382,27 +384,63 @@ class CapabilityOrchestrator:
 
     # ── slot TOML helpers ────────────────────────────────────────────────────
 
-    def _validate_model_in_catalog(self, slot: str, child: str, model_id: str) -> None:
-        """Raise :class:`NotFound` when ``model_id`` is not advertised for this child.
+    def _validate_model_in_catalog(
+        self,
+        slot: str,
+        child: str,
+        model_id: str,
+        backend_id: str,
+    ) -> None:
+        """Reject the merged selection if it's illegal against the catalog.
 
-        Pulls the per-capability picker rows and checks the id against
-        them. Unknown ids likely indicate a stale dashboard cache or a
-        manual TOML edit referencing a removed model.
+        Two distinct failure modes:
+
+          1. ``model_id`` isn't advertised at all for this capability →
+             :class:`NotFound` ``capability.unknown_model``. Likely a
+             stale dashboard cache or a manual TOML edit referencing a
+             removed model. The registry is consulted as a permissive
+             secondary check, since users can install models the curated
+             catalogue doesn't know about.
+
+          2. ``model_id`` IS advertised, but ``backend_id`` is not in
+             that model's ``backends`` list → :class:`BadRequest`
+             ``capability.illegal_backend_model_pair``. This is the
+             foot-gun the model-first catalog reshape was built to
+             prevent (e.g. picking ``backend=npu`` with a llama.cpp GGUF
+             which then crashes FLM at start-up with "Model not found").
+
+        Empty ``backend_id`` skips the pair check — backend is allowed
+        to be unset transiently while the user is still mid-selection;
+        the slot lifecycle won't start until a backend lands anyway.
         """
         capability = _CHILD_TO_CAPABILITY.get((slot, child))
         if capability is None:
             return
         rows = models_for_capability(capability, registry=self._registry)
-        if not any(row["id"] == model_id for row in rows):
-            # Don't hard-fail — the registry may carry the model even when
-            # the curated catalogue doesn't. Try the registry directly as
-            # a permissive secondary check.
+        match = next((row for row in rows if row["id"] == model_id), None)
+        if match is None:
             if self._registry is not None and self._registry.has(model_id):
                 return
             raise NotFound(
                 f"model {model_id!r} not advertised for {slot}.{child}",
                 code="capability.unknown_model",
                 details={"slot": slot, "child": child, "model": model_id},
+            )
+        if not backend_id:
+            return
+        legal_backends = [b["id"] for b in match.get("backends", [])]
+        if backend_id not in legal_backends:
+            raise BadRequest(
+                f"backend {backend_id!r} cannot serve model {model_id!r} "
+                f"for {slot}.{child}",
+                code="capability.illegal_backend_model_pair",
+                details={
+                    "slot": slot,
+                    "child": child,
+                    "model": model_id,
+                    "backend": backend_id,
+                    "legal_backends": legal_backends,
+                },
             )
 
     async def _ensure_slot_exists(

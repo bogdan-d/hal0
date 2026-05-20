@@ -364,3 +364,158 @@ class FLMProvider(Provider):
                 f"FLM transport error: {exc}",
                 details={"port": port},
             ) from exc
+
+
+# ── FLM catalog probe ─────────────────────────────────────────────────────────
+#
+# What FLM can actually serve. Slot picking lives in
+# hal0.capabilities.catalog, which calls flm_served_models() to learn
+# which model tags the NPU advertises.
+#
+# Design call (2026-05-20): cache the probe result until process restart.
+# Toolbox image upgrades require an hal0-api restart anyway, and the
+# catalog refresh path is rare enough that a TTL would add complexity
+# without buying us much. Tests + a future manual-refresh CLI can call
+# reset_flm_catalog_cache() to invalidate.
+
+
+_FLM_CATALOG_CACHE: list[dict[str, Any]] | None = None
+_FLM_PROBE_OK: bool = False
+
+
+def _classify_flm_model(entry: dict[str, Any]) -> list[str]:
+    """Map an ``flm list -j`` entry to hal0 capability strings.
+
+    Rules, applied in order:
+
+      1. ``label`` contains ``"embeddings"``                → ``["embed"]``
+      2. chat-y signal (``"reasoning"`` or ``"tool-calling"`` label) →
+         ``["chat"]`` and, if ``asr: true`` is also set, append
+         ``"stt"`` (e.g. ``gemma4-it:e2b`` is a multimodal chat + asr
+         model).
+      3. ``asr: true`` alone, no chat-y labels (e.g. ``whisper-v3:turbo``)
+         → ``["stt"]``.
+      4. Anything else falls back to ``["chat"]``.
+
+    Returned strings line up with the hal0 capability vocabulary used by
+    :mod:`hal0.capabilities.catalog` (``embed``, ``chat``, ``stt``).
+    """
+    labels = set(entry.get("label", []) or [])
+    if "embeddings" in labels:
+        return ["embed"]
+    has_asr = bool(entry.get("asr"))
+    if labels & {"reasoning", "tool-calling"}:
+        return ["chat", "stt"] if has_asr else ["chat"]
+    if has_asr:
+        return ["stt"]
+    return ["chat"]
+
+
+def _probe_flm_catalog() -> list[dict[str, Any]] | None:
+    """Run ``flm list -j`` in the toolbox image and parse the JSON output.
+
+    Returns the raw model list (FLM's own shape) or ``None`` on any
+    failure — missing docker, image not pulled locally, container
+    crash, parse error, timeout. The caller treats ``None`` as
+    "advertise NPU with no served models" so the dashboard renders
+    cleanly instead of breaking on a probe error.
+
+    The probe does NOT pass ``--device /dev/accel/accel0`` because
+    ``flm list`` reads the bundled ``model_list.json`` and never touches
+    NPU hardware — keeping the device flag out makes the probe usable on
+    dev hosts without XDNA passthrough.
+    """
+    import json
+    import subprocess
+
+    image = os.environ.get("HAL0_TOOLBOX_IMAGE_FLM", _DEFAULT_FLM_IMAGE)
+    cmd = [
+        "docker", "run", "--rm",
+        "--security-opt", "apparmor=unconfined",
+        image,
+        "list", "-j",
+    ]
+    try:
+        proc = subprocess.run(
+            cmd,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=30.0,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return None
+    if proc.returncode != 0:
+        return None
+    try:
+        payload = json.loads(proc.stdout.decode("utf-8", errors="replace"))
+    except (ValueError, UnicodeError):
+        return None
+    models = payload.get("models")
+    if not isinstance(models, list):
+        return None
+    return models
+
+
+def flm_served_models() -> list[dict[str, Any]]:
+    """Return what the FLM toolbox can serve, classified into hal0 capabilities.
+
+    Each entry is a dict in hal0's shape (NOT FLM's raw JSON)::
+
+        {
+            "tag":          "embed-gemma:300m",  # id `flm pull / flm serve` consume
+            "capabilities": ["embed"],           # hal0 capability strings
+            "installed":    False,               # FLM reports weights on disk
+            "size_bytes":   300_000_000,         # FLM's reported model size
+            "footprint_gb": 0.62,                # FLM's runtime memory estimate
+            "family":       "embed-gemma",       # details.family — useful for grouping
+        }
+
+    Cached at module scope on first successful probe; subsequent calls
+    are O(1). On probe failure the result is an empty list (also
+    cached) so the catalog still renders — call
+    :func:`reset_flm_catalog_cache` to force a re-probe.
+    """
+    global _FLM_CATALOG_CACHE, _FLM_PROBE_OK
+    if _FLM_CATALOG_CACHE is not None:
+        return _FLM_CATALOG_CACHE
+
+    raw = _probe_flm_catalog()
+    if raw is None:
+        _FLM_CATALOG_CACHE = []
+        _FLM_PROBE_OK = False
+        return _FLM_CATALOG_CACHE
+
+    out: list[dict[str, Any]] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        tag = entry.get("model") or entry.get("name")
+        if not isinstance(tag, str) or not tag:
+            continue
+        details = entry.get("details") if isinstance(entry.get("details"), dict) else {}
+        out.append(
+            {
+                "tag": tag,
+                "capabilities": _classify_flm_model(entry),
+                "installed": bool(entry.get("installed")),
+                "size_bytes": int(entry.get("size") or 0),
+                "footprint_gb": float(entry.get("footprint") or 0.0),
+                "family": str(details.get("family") or ""),
+            }
+        )
+
+    _FLM_CATALOG_CACHE = out
+    _FLM_PROBE_OK = True
+    return _FLM_CATALOG_CACHE
+
+
+def reset_flm_catalog_cache() -> None:
+    """Drop the cached FLM catalog so the next call re-probes.
+
+    Exposed for tests and for a future "refresh catalog" CLI/UI hook.
+    Production code relies on process restart to invalidate.
+    """
+    global _FLM_CATALOG_CACHE, _FLM_PROBE_OK
+    _FLM_CATALOG_CACHE = None
+    _FLM_PROBE_OK = False

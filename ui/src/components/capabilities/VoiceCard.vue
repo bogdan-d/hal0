@@ -3,10 +3,10 @@
  * VoiceCard
  *
  * Capability slot card for the `voice` slot. Two stacked sections (STT /
- * TTS) — each with a status pill + on/off toggle + cross-backend
- * dropdown + live metrics strip. See EmbedCard for the long-form
- * comments — this card is the same shape, just with different
- * capabilities + endpoint sub-labels.
+ * TTS) — each with a status pill + on/off toggle + two cascading
+ * dropdowns (model → backend) + live metrics strip. See EmbedCard for
+ * the long-form comments — this card is the same shape, just with
+ * different capabilities + endpoint sub-labels.
  */
 import { computed, ref } from 'vue'
 import { useCapabilities } from '../../composables/useCapabilities.js'
@@ -37,42 +37,35 @@ function fmtMem(mb) {
   return mb >= 1024 ? `${(mb / 1024).toFixed(1)} GB` : `${mb} MB`
 }
 
-function optionsFor(capability) {
-  const models = cap.modelsForCapability('voice', capability)
-  const opts = []
-  for (const b of cap.backends.value) {
-    for (const m of models) {
-      if (m.backend !== b.id) continue
-      // ◉ downloaded · ⬇ pullable · ✕ no source — see EmbedCard.vue.
-      const ready = m.downloaded !== false
-      const pullable = m.pullable !== false
-      const icon = ready ? '◉' : pullable ? '⬇' : '✕'
-      opts.push({
-        key: `${b.id}::${m.provider || ''}::${m.id}`,
-        label: `${icon} ${b.short} / ${m.id}`,
-        backend: b.id,
-        provider: m.provider,
-        model: m.id,
-        size_gb: m.size_gb,
-        downloaded: ready,
-        pullable,
-      })
-    }
-  }
-  return opts
-}
-
-function currentValue(capability) {
-  const s = props.selection?.[capability]
-  if (!s) return ''
-  return `${s.backend}::${s.provider || ''}::${s.model}`
-}
-
-function selectedModel(capability) {
-  const s = props.selection?.[capability]
-  if (!s) return null
+function modelsFor(capability) {
   return cap.modelsForCapability('voice', capability)
-    .find((m) => m.backend === s.backend && m.id === s.model) ?? null
+}
+
+function selectedEntry(capability) {
+  const s = props.selection?.[capability]
+  if (!s?.model) return null
+  return modelsFor(capability).find((m) => m.id === s.model) ?? null
+}
+
+function backendOptionsFor(capability) {
+  const entry = selectedEntry(capability)
+  if (!entry) return []
+  return entry.backends.map((b) => {
+    const meta = cap.backendById(b.id) ?? null
+    return {
+      id: b.id,
+      label: meta?.label ?? b.id,
+      short: meta?.short ?? b.id,
+      provider: b.provider,
+      downloaded: b.downloaded,
+      pullable: b.pullable,
+    }
+  })
+}
+
+function backendIcon(b) {
+  if (b.downloaded !== false) return '◉'
+  return b.pullable !== false ? '⬇' : '✕'
 }
 
 function backendFor(capability) {
@@ -87,39 +80,56 @@ const pull = {
   tts: usePullJob(),
 }
 
-async function onChange(capability, ev) {
-  const v = ev.target.value
-  if (!v) return
-  const [backend, provider, model] = v.split('::')
-  const opt = optionsFor(capability).find((o) => o.key === v)
-  if (opt && opt.downloaded === false) {
-    if (opt.pullable === false) {
+async function commit(capability, modelId, backendId) {
+  const entry = modelsFor(capability).find((m) => m.id === modelId)
+  if (!entry) return
+  const backend = entry.backends.find((b) => b.id === backendId)
+  if (!backend) return
+  if (backend.downloaded === false) {
+    if (backend.pullable === false) {
       toasts.error(
-        `"${model}" has no download source (upstream-routed model). ` +
+        `"${modelId}" has no download source (upstream-routed model). ` +
         `Add an hf_repo + hf_filename on the registry entry to enable pull.`,
       )
-      ev.target.value = currentValue(capability)
       return
     }
     try {
-      await pull[capability].pullAndWait(model)
+      await pull[capability].pullAndWait(modelId)
       await cap.refresh()
     } catch (err) {
-      toasts.error(`download "${model}" failed: ${err?.message ?? err}`)
-      ev.target.value = currentValue(capability)
+      toasts.error(`download "${modelId}" failed: ${err?.message ?? err}`)
       return
     }
   }
   try {
     await cap.setSelection('voice', capability, {
-      backend,
-      provider: provider || null,
-      model,
+      backend: backendId,
+      provider: backend.provider || null,
+      model: modelId,
     })
-    toasts.success(`voice.${capability} → ${model}`)
+    toasts.success(`voice.${capability} → ${modelId} on ${backendId}`)
   } catch (err) {
     toasts.error(`failed to set ${capability}: ${err?.message ?? err}`)
   }
+}
+
+async function onModelChange(capability, ev) {
+  const modelId = ev.target.value
+  if (!modelId) return
+  const entry = modelsFor(capability).find((m) => m.id === modelId)
+  if (!entry || entry.backends.length === 0) return
+  const current = props.selection?.[capability]?.backend
+  const keep = entry.backends.find((b) => b.id === current)
+  const backendId = keep?.id ?? entry.backends[0].id
+  await commit(capability, modelId, backendId)
+}
+
+async function onBackendChange(capability, ev) {
+  const backendId = ev.target.value
+  if (!backendId) return
+  const modelId = props.selection?.[capability]?.model
+  if (!modelId) return
+  await commit(capability, modelId, backendId)
 }
 
 async function onToggle(capability, enabled) {
@@ -196,17 +206,30 @@ const headerPill = computed(() => {
           @update:model-value="(v) => onToggle(c, v)"
         />
       </div>
-      <select
-        class="cap-select"
-        :value="currentValue(c)"
-        :disabled="togglePending[c] || pull[c].inFlight.value"
-        @change="onChange(c, $event)"
-      >
-        <option value="" disabled>pick model…</option>
-        <option v-for="o in optionsFor(c)" :key="o.key" :value="o.key">
-          {{ o.label }}{{ o.size_gb ? ` — ${o.size_gb} GB` : '' }}
-        </option>
-      </select>
+      <div class="cap-pickers">
+        <select
+          class="cap-select cap-select-model"
+          :value="selection?.[c]?.model || ''"
+          :disabled="togglePending[c] || pull[c].inFlight.value"
+          @change="onModelChange(c, $event)"
+        >
+          <option value="" disabled>pick model…</option>
+          <option v-for="m in modelsFor(c)" :key="m.id" :value="m.id">
+            {{ m.id }}{{ m.size_gb ? ` — ${m.size_gb} GB` : '' }}
+          </option>
+        </select>
+        <select
+          class="cap-select cap-select-backend"
+          :value="selection?.[c]?.backend || ''"
+          :disabled="togglePending[c] || pull[c].inFlight.value || !selectedEntry(c)"
+          @change="onBackendChange(c, $event)"
+        >
+          <option value="" disabled>backend…</option>
+          <option v-for="b in backendOptionsFor(c)" :key="b.id" :value="b.id">
+            {{ backendIcon(b) }} {{ b.short }}
+          </option>
+        </select>
+      </div>
       <div v-if="pull[c].inFlight.value" class="cap-pull">
         <div class="cap-pull-bar"><div class="cap-pull-fill" :style="{ width: (pull[c].pct.value ?? 0) + '%' }" /></div>
         <span class="cap-pull-label mono">
@@ -216,7 +239,7 @@ const headerPill = computed(() => {
       </div>
       <div class="cap-meta">
         <span class="cap-chip" :data-backend="backendFor(c)?.id">{{ backendFor(c)?.label || '—' }}</span>
-        <span class="cap-meta-item" v-if="selectedModel(c)?.size_gb">{{ selectedModel(c).size_gb }} GB</span>
+        <span class="cap-meta-item" v-if="selectedEntry(c)?.size_gb">{{ selectedEntry(c).size_gb }} GB</span>
         <span class="cap-meta-item" v-if="backendFor(c)?.multiplex">⚡ shared {{ backendFor(c).label }} process</span>
       </div>
       <div v-if="isActive(c)" class="cap-metrics">
@@ -276,4 +299,8 @@ const headerPill = computed(() => {
   background: color-mix(in oklch, var(--color-danger) 12%, transparent);
   color: var(--color-danger);
 }
+
+.cap-pickers { display: flex; gap: 8px; align-items: stretch; }
+.cap-select-model    { flex: 1; min-width: 0; }
+.cap-select-backend  { flex: 0 0 auto; min-width: 110px; }
 </style>

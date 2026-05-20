@@ -9,11 +9,16 @@
  *     the header, driven by `selection.status` from /api/capabilities.
  *   - A CapabilityToggle on the right that POSTs `{enabled: …}` to
  *     /api/capabilities/embed/{child}.
- *   - A cross-backend dropdown listing every `<BACKEND>/<MODEL>` pair
- *     available for that capability (POSTs `{backend, provider, model}`
- *     on change).
+ *   - Two cascading dropdowns: pick a model first, then the backend
+ *     dropdown narrows to the backends that model can actually run on.
+ *     A POST `{backend, provider, model}` lands on either change.
  *   - A metrics strip wired to useSlotMetrics() — embed → `embed`,
  *     rerank → `embed-rerank` (mirrors the backend's slot naming).
+ *
+ * The model-first picker replaced an older single-dropdown of all
+ * (backend, model) pairs. Two dropdowns prevent the operator from
+ * mixing incompatible pairs (e.g. backend=npu + an llama.cpp GGUF)
+ * which used to crash the slot at start-up.
  *
  * Selection comes from the singleton useCapabilities() store; the parent
  * just hands us the slice. We call setSelection() ourselves so the
@@ -50,47 +55,54 @@ function fmtMem(mb) {
   return mb >= 1024 ? `${(mb / 1024).toFixed(1)} GB` : `${mb} MB`
 }
 
-function optionsFor(capability) {
-  const models = cap.modelsForCapability('embed', capability)
-  const opts = []
-  for (const b of cap.backends.value) {
-    for (const m of models) {
-      if (m.backend !== b.id) continue
-      // Three-state icon, native <option> can't host SVG so use Unicode:
-      //   ◉ downloaded — on disk, ready to load
-      //   ⬇ pullable but not downloaded — first click triggers a pull
-      //   ✕ not pullable — upstream route stub with no HF coords; the
-      //     handler short-circuits with a clear "no download source"
-      //     toast rather than 422'ing on /pull.
-      const ready = m.downloaded !== false
-      const pullable = m.pullable !== false
-      const icon = ready ? '◉' : pullable ? '⬇' : '✕'
-      opts.push({
-        key: `${b.id}::${m.provider || ''}::${m.id}`,
-        label: `${icon} ${b.short} / ${m.id}`,
-        backend: b.id,
-        provider: m.provider,
-        model: m.id,
-        size_gb: m.size_gb,
-        downloaded: ready,
-        pullable,
-      })
-    }
-  }
-  return opts
-}
-
-function currentValue(capability) {
-  const s = props.selection?.[capability]
-  if (!s) return ''
-  return `${s.backend}::${s.provider || ''}::${s.model}`
-}
-
-function selectedModel(capability) {
-  const s = props.selection?.[capability]
-  if (!s) return null
+// Grouped per-model catalog entries for this child capability.
+function modelsFor(capability) {
   return cap.modelsForCapability('embed', capability)
-    .find((m) => m.backend === s.backend && m.id === s.model) ?? null
+}
+
+// The catalog entry currently selected for this capability — model-level
+// metadata such as size_gb and the legal backends list. Null when the
+// selection has no model yet.
+function selectedEntry(capability) {
+  const s = props.selection?.[capability]
+  if (!s?.model) return null
+  return modelsFor(capability).find((m) => m.id === s.model) ?? null
+}
+
+// The per-backend descriptor for the current (model, backend) pair — the
+// place where `downloaded` and `pullable` live in the new shape. Null
+// when either side of the pair is unset.
+function selectedBackend(capability) {
+  const entry = selectedEntry(capability)
+  const s = props.selection?.[capability]
+  if (!entry || !s?.backend) return null
+  return entry.backends.find((b) => b.id === s.backend) ?? null
+}
+
+// Backend dropdown options for the picked model. Joined with
+// cap.backends.value so the option carries display metadata (short
+// label, multiplex flag) the catalog row alone doesn't include.
+function backendOptionsFor(capability) {
+  const entry = selectedEntry(capability)
+  if (!entry) return []
+  return entry.backends.map((b) => {
+    const meta = cap.backendById(b.id) ?? null
+    return {
+      id: b.id,
+      label: meta?.label ?? b.id,
+      short: meta?.short ?? b.id,
+      provider: b.provider,
+      downloaded: b.downloaded,
+      pullable: b.pullable,
+    }
+  })
+}
+
+// Three-state download icon for a backend option (`◉` downloaded,
+// `⬇` pullable, `✕` upstream-only / no download path).
+function backendIcon(b) {
+  if (b.downloaded !== false) return '◉'
+  return b.pullable !== false ? '⬇' : '✕'
 }
 
 // One pull job per capability child — `embed` and `rerank` can race in
@@ -101,48 +113,63 @@ const pull = {
   rerank: usePullJob(),
 }
 
-async function onChange(capability, ev) {
-  const v = ev.target.value
-  if (!v) return
-  const [backend, provider, model] = v.split('::')
-  // Intercept un-downloaded picks: trigger /api/models/{id}/pull, wait
-  // for the SSE stream to terminate, then apply the selection. The pull
-  // composable surfaces progress reactively so the inline strip below
-  // the dropdown lights up without us touching toasts.
-  const opt = optionsFor(capability).find((o) => o.key === v)
-  if (opt && opt.downloaded === false) {
-    if (opt.pullable === false) {
+// Commit a (model, backend) pair. Pulls first when the chosen pair
+// isn't on disk; reverts the optimistic UI if the pull or apply fails.
+async function commit(capability, modelId, backendId) {
+  const entry = modelsFor(capability).find((m) => m.id === modelId)
+  if (!entry) return
+  const backend = entry.backends.find((b) => b.id === backendId)
+  if (!backend) return
+  if (backend.downloaded === false) {
+    if (backend.pullable === false) {
       toasts.error(
-        `"${model}" has no download source (upstream-routed model). ` +
+        `"${modelId}" has no download source (upstream-routed model). ` +
         `Add an hf_repo + hf_filename on the registry entry to enable pull.`,
       )
-      ev.target.value = currentValue(capability)
       return
     }
     try {
-      await pull[capability].pullAndWait(model)
+      await pull[capability].pullAndWait(modelId)
       // Catalog rows carry `downloaded` snapshots from the last
       // /api/capabilities fetch. Refresh so the icon flips to ◉ on the
       // next render.
       await cap.refresh()
     } catch (err) {
-      toasts.error(`download "${model}" failed: ${err?.message ?? err}`)
-      // Reset the <select> back to its previous value so the user can
-      // try again or pick a different option.
-      ev.target.value = currentValue(capability)
+      toasts.error(`download "${modelId}" failed: ${err?.message ?? err}`)
       return
     }
   }
   try {
     await cap.setSelection('embed', capability, {
-      backend,
-      provider: provider || null,
-      model,
+      backend: backendId,
+      provider: backend.provider || null,
+      model: modelId,
     })
-    toasts.success(`embed.${capability} → ${model}`)
+    toasts.success(`embed.${capability} → ${modelId} on ${backendId}`)
   } catch (err) {
     toasts.error(`failed to set ${capability}: ${err?.message ?? err}`)
   }
+}
+
+async function onModelChange(capability, ev) {
+  const modelId = ev.target.value
+  if (!modelId) return
+  const entry = modelsFor(capability).find((m) => m.id === modelId)
+  if (!entry || entry.backends.length === 0) return
+  // Hold the current backend if the new model can serve it; otherwise
+  // snap to the model's first legal backend.
+  const current = props.selection?.[capability]?.backend
+  const keep = entry.backends.find((b) => b.id === current)
+  const backendId = keep?.id ?? entry.backends[0].id
+  await commit(capability, modelId, backendId)
+}
+
+async function onBackendChange(capability, ev) {
+  const backendId = ev.target.value
+  if (!backendId) return
+  const modelId = props.selection?.[capability]?.model
+  if (!modelId) return
+  await commit(capability, modelId, backendId)
 }
 
 async function onToggle(capability, enabled) {
@@ -174,9 +201,6 @@ function metricsFor(capability) {
 
 function reqRate(m) {
   if (!m) return null
-  // Prefer a precomputed rate; otherwise expose the running processing
-  // count so the user sees something meaningful even before a window
-  // averages out.
   if (m.requests_per_sec != null) return m.requests_per_sec
   if (m.tokens_per_sec   != null) return m.tokens_per_sec
   return null
@@ -242,19 +266,34 @@ const headerPill = computed(() => {
           @update:model-value="(v) => onToggle('embed', v)"
         />
       </div>
-      <select
-        class="cap-select"
-        :value="currentValue('embed')"
-        :disabled="togglePending.embed || pull.embed.inFlight.value"
-        @change="onChange('embed', $event)"
-      >
-        <option value="" disabled>pick model…</option>
-        <option
-          v-for="o in optionsFor('embed')"
-          :key="o.key"
-          :value="o.key"
-        >{{ o.label }}{{ o.size_gb ? ` — ${o.size_gb} GB` : '' }}</option>
-      </select>
+      <div class="cap-pickers">
+        <select
+          class="cap-select cap-select-model"
+          :value="selection?.embed?.model || ''"
+          :disabled="togglePending.embed || pull.embed.inFlight.value"
+          @change="onModelChange('embed', $event)"
+        >
+          <option value="" disabled>pick model…</option>
+          <option
+            v-for="m in modelsFor('embed')"
+            :key="m.id"
+            :value="m.id"
+          >{{ m.id }}{{ m.size_gb ? ` — ${m.size_gb} GB` : '' }}</option>
+        </select>
+        <select
+          class="cap-select cap-select-backend"
+          :value="selection?.embed?.backend || ''"
+          :disabled="togglePending.embed || pull.embed.inFlight.value || !selectedEntry('embed')"
+          @change="onBackendChange('embed', $event)"
+        >
+          <option value="" disabled>backend…</option>
+          <option
+            v-for="b in backendOptionsFor('embed')"
+            :key="b.id"
+            :value="b.id"
+          >{{ backendIcon(b) }} {{ b.short }}</option>
+        </select>
+      </div>
       <div v-if="pull.embed.inFlight.value" class="cap-pull">
         <div class="cap-pull-bar"><div class="cap-pull-fill" :style="{ width: (pull.embed.pct.value ?? 0) + '%' }" /></div>
         <span class="cap-pull-label mono">
@@ -264,8 +303,7 @@ const headerPill = computed(() => {
       </div>
       <div class="cap-meta">
         <span class="cap-chip" :data-backend="backendFor('embed')?.id">{{ backendFor('embed')?.label || '—' }}</span>
-        <span class="cap-meta-item" v-if="selectedModel('embed')?.dims">{{ selectedModel('embed').dims }}-d</span>
-        <span class="cap-meta-item" v-if="selectedModel('embed')?.size_gb">{{ selectedModel('embed').size_gb }} GB</span>
+        <span class="cap-meta-item" v-if="selectedEntry('embed')?.size_gb">{{ selectedEntry('embed').size_gb }} GB</span>
         <span class="cap-meta-item" v-if="backendFor('embed')?.multiplex">⚡ shared {{ backendFor('embed').label }} process</span>
       </div>
       <div v-if="embedActive" class="cap-metrics">
@@ -302,19 +340,34 @@ const headerPill = computed(() => {
           @update:model-value="(v) => onToggle('rerank', v)"
         />
       </div>
-      <select
-        class="cap-select"
-        :value="currentValue('rerank')"
-        :disabled="togglePending.rerank || pull.rerank.inFlight.value"
-        @change="onChange('rerank', $event)"
-      >
-        <option value="" disabled>pick model…</option>
-        <option
-          v-for="o in optionsFor('rerank')"
-          :key="o.key"
-          :value="o.key"
-        >{{ o.label }}{{ o.size_gb ? ` — ${o.size_gb} GB` : '' }}</option>
-      </select>
+      <div class="cap-pickers">
+        <select
+          class="cap-select cap-select-model"
+          :value="selection?.rerank?.model || ''"
+          :disabled="togglePending.rerank || pull.rerank.inFlight.value"
+          @change="onModelChange('rerank', $event)"
+        >
+          <option value="" disabled>pick model…</option>
+          <option
+            v-for="m in modelsFor('rerank')"
+            :key="m.id"
+            :value="m.id"
+          >{{ m.id }}{{ m.size_gb ? ` — ${m.size_gb} GB` : '' }}</option>
+        </select>
+        <select
+          class="cap-select cap-select-backend"
+          :value="selection?.rerank?.backend || ''"
+          :disabled="togglePending.rerank || pull.rerank.inFlight.value || !selectedEntry('rerank')"
+          @change="onBackendChange('rerank', $event)"
+        >
+          <option value="" disabled>backend…</option>
+          <option
+            v-for="b in backendOptionsFor('rerank')"
+            :key="b.id"
+            :value="b.id"
+          >{{ backendIcon(b) }} {{ b.short }}</option>
+        </select>
+      </div>
       <div v-if="pull.rerank.inFlight.value" class="cap-pull">
         <div class="cap-pull-bar"><div class="cap-pull-fill" :style="{ width: (pull.rerank.pct.value ?? 0) + '%' }" /></div>
         <span class="cap-pull-label mono">
@@ -324,7 +377,7 @@ const headerPill = computed(() => {
       </div>
       <div class="cap-meta">
         <span class="cap-chip" :data-backend="backendFor('rerank')?.id">{{ backendFor('rerank')?.label || '—' }}</span>
-        <span class="cap-meta-item" v-if="selectedModel('rerank')?.size_gb">{{ selectedModel('rerank').size_gb }} GB</span>
+        <span class="cap-meta-item" v-if="selectedEntry('rerank')?.size_gb">{{ selectedEntry('rerank').size_gb }} GB</span>
         <span class="cap-meta-item" v-if="backendFor('rerank')?.multiplex">⚡ shared {{ backendFor('rerank').label }} process</span>
       </div>
       <div v-if="rerankActive" class="cap-metrics">
@@ -382,7 +435,13 @@ const headerPill = computed(() => {
 }
 .cap-pill-err {
   border-color: color-mix(in oklch, var(--color-danger) 30%, transparent);
-  background: color-mix(in oklch, var(--color-danger) 12%, transparent);
+  background: color-mix(in oklch, var(--color-danger) 8%, transparent);
   color: var(--color-danger);
 }
+
+/* Two-dropdown picker: model (flex-grow) | backend (auto width). The
+ * backend dropdown is disabled until a model is picked. */
+.cap-pickers { display: flex; gap: 8px; align-items: stretch; }
+.cap-select-model    { flex: 1; min-width: 0; }
+.cap-select-backend  { flex: 0 0 auto; min-width: 110px; }
 </style>
