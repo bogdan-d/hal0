@@ -35,6 +35,15 @@ home installs, OpenAI-compatible inference, bundled OpenWebUI chat.
       (shipped ahead of schedule via Team K, 2026-05-15 — `1a8a480`, `76b7f8b`)
   - External-LLM upstreams (OpenRouter, Anthropic, OpenAI, custom
     OpenAI-compatible)
+  - **Capability slots overlay** (shipped 2026-05-19 — `78d749b`,
+    `d6f34e1`) — UX layer over the flat slot layer. Dashboard renders
+    Embed / Voice / Image cards + an NPU-backend rollup; user
+    selections persist in `/etc/hal0/capabilities.toml` and
+    `CapabilityOrchestrator.apply()` reconciles `slots/*.toml` against
+    the selection on every call (drift fix `39adaf7`). FLM-aware
+    catalog (`b90a569`) groups models first, narrows the backend
+    dropdown to backends a model can actually serve, and ships
+    `hal0 capabilities migrate` for stale persisted selections.
 - **Auth + reverse proxy** (per [ADR-0001](docs/adr/0001-collapse-edge-auth-into-fastapi.md),
   collapsed to a single FastAPI layer in PRs #58 + #59; original dual-layer
   shipped ahead of schedule via Team J, 2026-05-15 — `ba79427`, `f62902c`)
@@ -397,16 +406,20 @@ The installer got a UX pass that lands in v1:
 
 ### First-run wizard (dashboard route)
 
-Triggers when `/var/lib/hal0/models/` is empty. Page asks:
+Triggers when `/var/lib/hal0/models/` is empty. The prototype shipped
+in Phase 4 was replaced with a **linear 5-step wizard** in `d715611`:
 
-1. **Pick a default model** — curated list with size + VRAM + license:
-   - Qwen3 4B (general, vision, 4GB)
-   - Llama 3.2 3B (general, 2GB)
-   - Phi-3 Mini (general, fast, 2.4GB)
-   - Custom Hugging Face URL
-2. **License confirm** — surfaces each model's license (Apache 2.0 / Llama / etc.)
-3. **Download + assign** — pulls model, assigns to `primary` slot, starts the slot
-4. **Done** — "open chat" link to OpenWebUI
+1. **Welcome** — what hal0 does + privacy posture
+2. **Hardware** — render the probed `hardware.json` cards inline
+3. **Models** — curated list (Qwen3 4B / Llama 3.2 3B / Phi-3 Mini /
+   custom HF URL) with size + VRAM + license per row
+4. **Capabilities** — assign picked models to capability cards (Embed /
+   Voice / Image / NPU rollup) — projects into `slots/*.toml` via the
+   orchestrator
+5. **HF token** — conditional; only shown when any selected model is
+   gated. Token writes into the registry's HF credential store.
+
+A final "Done" panel deep-links to OpenWebUI at `:3001`.
 
 ---
 
@@ -586,6 +599,14 @@ sha256 digests for vulkan, rocm, moonshine, kokoro, and comfyui
 `flm` digest stays `null` until that toolbox publishes successfully;
 the runtime falls back to pulling by tag with a warning in that case.
 
+**NPU live (2026-05-19/20):** the FLM toolbox image now self-contains
+the XRT staging tree — `9c8f3e7` preserves `LD_LIBRARY_PATH` so
+`libxrt_coreutil.so.2` resolves inside the container, and `c998106`
+drops the prior host bind-mount entirely. The `FLMProvider` invokes
+`flm list -j` against the image to enumerate its own model-tag
+namespace (`b90a569`), so the dashboard NPU rollup advertises only
+models FLM can actually serve.
+
 **Moonshine rebuild (2026-05-20):** Republished `hal0-toolbox-moonshine:v1`
 at digest `sha256:a5bbb78b…` after fixing `moonshine_server.py` to pass
 both `models_dir` and `model_name` to `MoonshineOnnxModel` (commit
@@ -679,7 +700,7 @@ Working assumption: 1 person full-time + Claude as pair. Adjust if not.
 **Phase 4 — UI polish (weeks 6-7)** — ✅ done 2026-05-15
 - All 9 views built out, dark mode, hardware-aware slot form ✅
 - SSE plumbing for slot status + log tail ✅ (Team B verified real `EventSource` per slot — not polling — overlays the 5s `/api/status` poll)
-- FirstRun wizard end-to-end with model download ✅ (Models.vue `pullProgress` bug fixed in PR #7; γ-3 spec rewritten for Wave-3 per-id pull URL in PR #12)
+- FirstRun wizard end-to-end with model download ✅ (Models.vue `pullProgress` bug fixed in PR #7; γ-3 spec rewritten for Wave-3 per-id pull URL in PR #12; prototype replaced with linear 5-step wizard in `d715611` — welcome / hardware / models / capabilities / HF-token)
 - Empty states, loading skeletons, toasts everywhere ✅
 - Hal0-web brand language: sodium amber + JBM/Geist applied
 
@@ -732,7 +753,7 @@ own decisions before relevant milestones:
 | ~~Cosign release pipeline + signed-artifact verification has nasty edges~~ | RESOLVED | Verify-roundtrip prototype proven locally; `release.yml` drafted; cosign 3.x compat handled (`--new-bundle-format=false`). First real tag-push still pending to validate keyless OIDC end-to-end |
 | ~~Toolbox images on `ghcr.io/hal0ai/` blocked by org provisioning~~ | RESOLVED | `Hal0ai` GitHub org exists (decided 2026-05-15) |
 | **GHCR image visibility — `ghcr.io/hal0ai/*` returns `unauthorized` on pull** | **High** | Task #25 — launch blocker; user must flip org-package visibility to public OR document `docker login` requirement in installer/README.md. Harness finding #8 |
-| FLM (XDNA2) toolbox build flakiness | Medium | Team I on iteration 7 (`884cbd9`); upstream xrtdeps.sh + Rust toolchain + ffmpeg/nasm now in Dockerfile. CI run 25951155295 in flight. `optional: true` on FLM matrix entry has been masking real failures — to be removed once stable (task #26) |
+| ~~FLM (XDNA2) toolbox build flakiness~~ | RESOLVED | Self-contained toolbox image lands the XRT staging tree (`c998106`) + preserves `LD_LIBRARY_PATH` (`9c8f3e7`); first end-to-end NPU model load through the slot API landed in `9f3bdae`. `manifest.json` digest pin still pending (task #15). |
 | OpenWebUI internal API changes break prewire env | Low | Pin OpenWebUI container version per hal0 release; CI smoke test in PR #4 boots the real container + asserts `/api/models` round-trips |
 | Strix Halo NPU driver flakiness on `hal0-test` LXC delays integration | Medium | Build CI path on Vulkan-CPU first; NPU is release-gate only, not per-commit |
 | Self-update mechanism corrupts an install | Low–Medium | Atomic symlink swap + retained previous version + `hal0 update --rollback` command. Test rollback as part of release-gate. `HAL0_UPDATE_SKIP_COSIGN` gated to pre-release builds (PR #6) so v1.0.0 mandates signature verification |

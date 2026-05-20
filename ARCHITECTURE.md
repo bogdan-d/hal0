@@ -32,21 +32,37 @@ a model in its own memory.
 ```
 src/hal0/
 ├── api/             # FastAPI app + routers + middleware
-│   ├── routes/      # one APIRouter per concern (10 modules)
+│   ├── routes/      # one APIRouter per concern (18 modules incl.
+│   │                #   capabilities, backends, images, events, auth)
 │   └── middleware/  # error envelope, request id, cors
 ├── slots/           # slot lifecycle (state machine, unit rendering)
 ├── dispatcher/      # routing, single-flight, decision logging
-├── providers/       # backend abstraction (llama_server, flm, moonshine, kokoro)
-├── registry/        # model registry (atomic TOML, mtime cache)
+├── providers/       # backend abstraction (llama_server, flm, moonshine,
+│                    #   kokoro, comfyui)
+├── capabilities/    # UX overlay grouping flat slots into capability
+│                    #   cards (catalog + config + orchestrator);
+│                    #   persists selections in capabilities.toml and
+│                    #   reconciles slot TOMLs on every apply
+├── registry/        # model registry (atomic TOML, mtime cache, GGUF
+│                    #   magic-byte detect, HF-cache repo-name fallback)
 ├── hardware/        # probe + stats (GPU, NPU, RAM, disk)
 ├── upstreams/       # external LLM providers (OpenRouter, etc.)
 ├── config/          # pydantic schemas, TOML loader, migrations
+├── auth/            # password + Bearer token storage (per ADR-0001)
+├── events/          # in-process pub/sub for SSE streams
 ├── updater/         # self-update (cosign-verified, atomic swap)
 ├── installer/       # first-run wizard backend, hardware probe writer
 ├── voice/           # Moonshine + Kokoro provider glue
 ├── openwebui/       # companion service env file writer
-└── cli/             # `hal0` Typer CLI
+└── cli/             # `hal0` Typer CLI (incl. `capabilities migrate`)
 ```
+
+The capabilities layer is a **thin overlay** on the flat slot layer,
+not a replacement. Slot configs under `/etc/hal0/slots/*.toml` remain
+authoritative; `capabilities.toml` records which capability picks
+should be projected back onto those slot files. `hal0 capabilities
+migrate` cleans up persisted selections whose (backend, model) pair
+is no longer valid — primarily for FLM model-tag namespace drift.
 
 ## Key boundaries
 
@@ -60,9 +76,14 @@ src/hal0/
   offline, it returns a structured error; restarting is a separate API
   call.
 - **Providers are stateless.** Each provider (`LlamaServerProvider`,
-  `FLMProvider`, etc.) is a class with `build_env()`, `start_cmd()`,
+  `FLMProvider`, `MoonshineProvider`, `KokoroProvider`,
+  `ComfyUIProvider`) is a class with `build_env()`, `start_cmd()`,
   `health()`, `infer()`. They don't hold connection state, don't manage
   systemd, and don't share globals. One provider per backend type.
+  `FLMProvider` additionally probes `flm list -j` inside the toolbox
+  image to advertise its own model-tag namespace
+  (`share/flm/model_list.json`) — it does **not** run arbitrary GGUFs
+  from the registry.
 - **The registry is the only source of truth for "what models exist."**
   Atomic TOML files under `/var/lib/hal0/registry/`. mtime-cached. Slot
   configs reference model IDs from the registry; if a model is deleted,
