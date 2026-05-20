@@ -172,6 +172,36 @@ sudo systemctl restart hal0-api
 migration or fall back to the haloai stack (which still has all its
 data intact under `/opt/haloai/` until Phase 5).
 
+## Cleaning stale capability selections (`hal0 capabilities migrate`)
+
+The model-first picker reshape (commit b90a569) added per-`(backend,
+model)` validation to the capabilities overlay: any selection that mixes
+a backend with a model the backend can't serve (e.g. `backend=npu` +
+an llama.cpp GGUF, or `backend=vulkan` + an FLM-only chat tag) is now
+rejected at apply time with `capability.illegal_backend_model_pair`.
+
+The runtime guard only protects writes. Already-persisted selections
+in `/etc/hal0/capabilities.toml` survive until they're touched again.
+Run the migration once after upgrading to snap legacy selections to
+something the live catalog will accept:
+
+```bash
+hal0 capabilities migrate --dry-run   # show what would change
+hal0 capabilities migrate             # rewrite + persist atomically
+```
+
+Behaviour by selection state (`src/hal0/cli/capabilities_commands.py`):
+
+- **legal** — left alone.
+- **illegal `(backend, model)` pair** — backend is snapped to the
+  model's first legal backend (and provider re-resolved against the
+  matching catalog row). The model selection is preserved.
+- **unknown model** — model is cleared; backend stays so the dashboard
+  still shows what was previously chosen.
+
+Idempotent — running twice is a no-op once everything is legal. Safe
+to run pre-/post-upgrade.
+
 ## CLI reference
 
 | Flag | Default | Notes |
