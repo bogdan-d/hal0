@@ -59,9 +59,12 @@ intentional, since there is no real signed artifact behind it yet.
   "notes_url": "https://github.com/hal0ai/hal0/releases/tag/v0.1.1",
   "manifest_url": "https://releases.hal0.dev/stable.json",
   "toolbox_images": {
-    "vulkan": { "tag": "ghcr.io/hal0ai/hal0-toolbox-vulkan:v0.1.1", "digest": "sha256:..." },
-    "rocm":   { "tag": "ghcr.io/hal0ai/hal0-toolbox-rocm:v0.1.1",   "digest": "sha256:..." },
-    "flm":    { "tag": "ghcr.io/hal0ai/hal0-toolbox-flm:v0.1.1",    "digest": "sha256:..." }
+    "vulkan":    { "tag": "ghcr.io/hal0ai/hal0-toolbox-vulkan:v0.1.1",    "digest": "sha256:..." },
+    "rocm":      { "tag": "ghcr.io/hal0ai/hal0-toolbox-rocm:v0.1.1",      "digest": "sha256:..." },
+    "flm":       { "tag": "ghcr.io/hal0ai/hal0-toolbox-flm:v0.1.1",       "digest": "sha256:..." },
+    "moonshine": { "tag": "ghcr.io/hal0ai/hal0-toolbox-moonshine:v0.1.1", "digest": "sha256:..." },
+    "kokoro":    { "tag": "ghcr.io/hal0ai/hal0-toolbox-kokoro:v0.1.1",    "digest": "sha256:..." },
+    "comfyui":   { "tag": "ghcr.io/hal0ai/hal0-toolbox-comfyui:v0.1.1",   "digest": "sha256:..." }
   }
 }
 ```
@@ -180,6 +183,32 @@ When `hal0.dev` exists and the `release.yml` workflow runs, it must:
    from the toolbox build (`toolbox.yml` already does this for
    `manifest.json`; mirror that block into the release manifest so an
    update pulls the exact image set known-good for that release).
+
+## Currently pinned toolbox images (`manifest.json`)
+
+The in-tree `manifest.json` is the source of truth for what
+`toolbox_images.<name>` the release pipeline must mirror into the
+release manifest. As of `2026-05-20` the pinned set is:
+
+| Name        | Tag                                       | Notes |
+|---|---|---|
+| `vulkan`    | `ghcr.io/hal0ai/hal0-toolbox-vulkan:v1`   | llama.cpp Vulkan backend; default for Strix Halo iGPU. |
+| `rocm`      | `ghcr.io/hal0ai/hal0-toolbox-rocm:v1`     | llama.cpp ROCm backend; multi-arch (gfx1030..gfx1151). |
+| `flm`       | `ghcr.io/hal0ai/hal0-toolbox-flm:v1`      | FastFlowLM on AMD XDNA2 NPU. Image is self-contained (FLM ships under `/opt/fastflowlm/` inside the image — no host bind-mount required since commit c998106). Requires host kernel ≥ 6.11 + `amdxdna` driver. |
+| `moonshine` | `ghcr.io/hal0ai/hal0-toolbox-moonshine:v1`| Moonshine STT (CPU ONNX only — upstream wheel has no Vulkan/ROCm EP). **Rebuilt 2026-05-20** to fix the `MoonshineOnnxModel(models_dir=..., model_name=...)` constructor requirement; prior tag would `TypeError` on local-weights load. |
+| `kokoro`    | `ghcr.io/hal0ai/hal0-toolbox-kokoro:v1`   | Kokoro-82M TTS (CPU ONNX); OpenAI-compat `/v1/audio/speech`. |
+| `comfyui`   | `ghcr.io/hal0ai/hal0-toolbox-comfyui:v1`  | ComfyUI image-gen on ROCm; SDXL + SD 1.5 + Flux. Translates OpenAI `/v1/images/generations`. |
+
+All six entries carry pinned `sha256` digests today (no remaining
+`null`/placeholder values); the `release.yml` mirror step can publish
+straight from `manifest.json` without a patch pass.
+
+`available_backends()` only advertises `npu` when the FLM image is
+locally present (`docker image inspect` returns 0). Hosts without
+ghcr credentials therefore see GPU/CPU only rather than spiralling
+into a `docker pull → unauthorized → systemd restart` loop on every
+NPU selection. See
+[models-slots-impl-plan.md → FLM provider live](./models-slots-impl-plan.md#flm-provider-live-npu-srchal0providersflmpy).
 
 ## Related
 
