@@ -20,6 +20,7 @@ cache the heavy work upstream.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from hal0.config.loader import load_hardware_info
@@ -54,16 +55,65 @@ _BACKEND_TO_PROVIDER: dict[str, str] = {
     "comfyui": "comfyui",
 }
 
+# Per-runtime allow-list of host backends the toolbox image can actually
+# bind to. Picker fan-out (`_canonicalize_backends_for_picker`) uses this
+# instead of a one-size-fits-all `(gpu-vulkan, cpu)` because Moonshine's
+# upstream wheel only ships the ONNX CPU EP — letting an operator pick
+# gpu-vulkan would write backend=vulkan into the slot TOML while the
+# container still runs every op on CPU. Order matters: first entry that
+# matches a host backend wins display order in the dropdown.
+_RUNTIME_TO_HOST_BACKENDS: dict[str, tuple[str, ...]] = {
+    "moonshine": ("cpu",),
+    "kokoro": ("gpu-vulkan", "cpu"),
+    "vibevoice": ("gpu-vulkan", "cpu"),
+    "comfyui": ("gpu-vulkan",),
+}
+
 
 # ── Backends ──────────────────────────────────────────────────────────────────
+
+
+_FLM_TOOLBOX_IMAGE = "ghcr.io/hal0ai/hal0-toolbox-flm:v1"
+
+
+def _flm_image_present() -> bool:
+    """True iff the FLM toolbox image is already pulled locally.
+
+    Picking ``backend=npu`` rewrites the slot TOML and asks docker to
+    spawn the FLM container. The image is gated on ghcr.io credentials
+    that aren't part of the public install, so an unauthenticated host
+    spirals into a ``docker pull → unauthorized → systemd restart``
+    loop with no way for the user to recover from the dashboard.
+    Advertising NPU as a backend only after we know docker can spawn
+    the container avoids that whole class of failure.
+
+    Checked via ``docker image inspect`` which returns 0 iff the image
+    id resolves locally. We cache nothing — the toolchain install
+    pulls the image once and the function is called only on the
+    /api/capabilities GET which is already cheap.
+    """
+    import subprocess
+
+    try:
+        proc = subprocess.run(
+            ["docker", "image", "inspect", _FLM_TOOLBOX_IMAGE],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=2.0,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return False
+    return proc.returncode == 0
 
 
 def available_backends() -> list[dict[str, Any]]:
     """Return the list of backends this host can run, ordered.
 
-    Order: NPU first (when XDNA is present), then GPU/Vulkan (always
-    when a GPU is detected), then GPU/ROCm (only when the GPU is
-    ``compute_capable``), then CPU as a guaranteed-available fallback.
+    Order: NPU first (when XDNA is present AND the FLM toolbox image
+    is locally available), then GPU/Vulkan (always when a GPU is
+    detected), then GPU/ROCm (only when the GPU is ``compute_capable``),
+    then CPU as a guaranteed-available fallback.
 
     Each entry carries the fields the dashboard footer renders:
     ``id`` (stable key the selection writer expects), ``label`` (long
@@ -82,7 +132,7 @@ def available_backends() -> list[dict[str, Any]]:
     npu_present = bool(hw and hw.npu and hw.npu.present)
     primary_gpu = hw.gpus[0] if hw and hw.gpus else None
 
-    if npu_present:
+    if npu_present and _flm_image_present():
         out.append(
             {
                 "id": "npu",
@@ -163,6 +213,15 @@ def _model_capabilities(entry: CuratedModel | HaloaiModel | Any) -> list[str]:
     return caps
 
 
+# Capabilities the AMD NPU (XDNA + FLM stack) can serve. Mirrors the
+# ``flm → caps={chat, embed}`` line in src/hal0/registry/detect.py:85.
+# Used to decide whether a llama.cpp-compatible entry should also fan
+# out to ``npu`` when the host has an NPU. Voice (stt/tts) is NOT here
+# — those route through dedicated providers (moonshine, kokoro), not
+# through FLM.
+_NPU_FANOUT_CAPS: frozenset[str] = frozenset({"chat", "embed"})
+
+
 def _backend_variants(entry: Any) -> list[str]:
     """Return the canonical backend ids this entry can run under.
 
@@ -171,7 +230,12 @@ def _backend_variants(entry: Any) -> list[str]:
     ``backends`` list. We map those to the stable backend ids used by
     :func:`available_backends`. Llama.cpp-compatible entries fan out
     across every GPU backend the host advertises (gpu-vulkan / gpu-rocm
-    / cpu) — that's the picker's "this GGUF runs everywhere" UX.
+    / cpu) — that's the picker's "this GGUF runs everywhere" UX. When
+    the host has an NPU AND the entry serves a capability the NPU can
+    handle (chat/embed per :mod:`hal0.registry.detect`), we also fan out
+    to ``npu`` so the picker shows the NPU as an alternative — load-time
+    will surface a clear error if the specific model doesn't have an
+    FLM-packaged variant.
     """
     raw: list[str] = []
     backend = getattr(entry, "backend", None)
@@ -215,12 +279,16 @@ def _backend_variants(entry: Any) -> list[str]:
         elif low in {"cpu"}:
             if "cpu" not in out:
                 out.append("cpu")
-        elif low in {"kokoro", "moonshine", "vibevoice", "comfyui"}:
-            # Provider-specific runtimes pin to the GPU/Vulkan backend
-            # on this host (they ship as their own container but the
-            # operator-facing backend is "the GPU").
+        elif low in _RUNTIME_TO_HOST_BACKENDS:
+            # Provider-specific runtimes only fan out to the host
+            # backends their toolbox image can actually serve. Moonshine
+            # ships with onnxruntime CPU EP only (no Vulkan/ROCm EP in
+            # the upstream wheel), so advertising it on gpu-vulkan would
+            # let the operator pick a backend the slot can't honour —
+            # the slot TOML would say backend=vulkan but the container
+            # would still pin every op to CPU.
             host_backends = {b["id"] for b in available_backends()}
-            for candidate in ("gpu-vulkan", "cpu"):
+            for candidate in _RUNTIME_TO_HOST_BACKENDS[low]:
                 if candidate in host_backends and candidate not in out:
                     out.append(candidate)
         # Unknown backend strings fall through silently — they're
@@ -228,12 +296,38 @@ def _backend_variants(entry: Any) -> list[str]:
     return out
 
 
-def _provider_for_backend(entry_backend: str, backend_id: str) -> str:
-    """Pick the provider that pairs with this backend / entry combo."""
+def _provider_for_backend(
+    entry_backend: str, backend_id: str, *, entry: Any = None
+) -> str:
+    """Pick the provider that pairs with this backend / entry combo.
+
+    Resolution order:
+      1. NPU backend → always FLM.
+      2. The singular ``entry.backend`` tag (CuratedModel uses this).
+      3. The ``entry.backends`` list (registry Model uses this; .backend
+         is absent). Match the first tag that names a provider-specific
+         runtime (moonshine, kokoro, comfyui, …) — skip llama-server,
+         since that's also the generic default below.
+      4. Fall through to llama-server for llama.cpp-compatible models.
+
+    Step 3 used to be missing, which made every registry-derived row
+    (moonshine, kokoro, vibevoice, …) advertise provider="llama-server"
+    in the picker. The dashboard's onChange handler then sent that
+    provider on every dropdown pick, overwriting the user's prior
+    moonshine selection in capabilities.toml and the underlying slot
+    TOML the next time they touched the card.
+    """
     if backend_id == "npu":
         return "flm"
     if entry_backend in _BACKEND_TO_PROVIDER:
         return _BACKEND_TO_PROVIDER[entry_backend]
+    if entry is not None:
+        for b in getattr(entry, "backends", None) or []:
+            if not isinstance(b, str):
+                continue
+            mapped = _BACKEND_TO_PROVIDER.get(b)
+            if mapped and mapped != "llama-server":
+                return mapped
     # Default for llama.cpp-compatible models.
     return "llama-server"
 
@@ -250,17 +344,111 @@ def _size_gb(entry: Any) -> float:
 
 
 def _entry_to_row(
-    entry: Any, backend_id: str, capabilities: list[str]
+    entry: Any,
+    backend_id: str,
+    capabilities: list[str],
+    *,
+    registry: ModelRegistry | None = None,
 ) -> dict[str, Any]:
-    """Project one (entry, backend) pair into a picker row."""
+    """Project one (entry, backend) pair into a picker row.
+
+    ``downloaded`` reflects whether the on-disk weights are actually
+    present. For registry-derived entries we trust the stored path. For
+    curated entries (CURATED + haloai seed) we look the id up in the
+    registry — a curated row is "downloaded" iff a registry entry with
+    that id has a path that exists on disk.
+
+    ``pullable`` reflects whether ``POST /api/models/{id}/pull`` can
+    actually fetch the file. CuratedModel entries (hand-curated Python
+    list) carry hf_repo + hf_file and are pullable. HaloaiModel seed
+    entries are routes into an existing upstream service — there's
+    nothing to download, so the dashboard should not render a ⬇ chip
+    against them and the handler should short-circuit before issuing
+    the pull. Registry entries with hf_repo + hf_filename are pullable
+    too (the user can re-pull a previously-pulled model).
+    """
     raw_backend = getattr(entry, "backend", "") or ""
     return {
         "id": entry.id,
         "backend": backend_id,
-        "provider": _provider_for_backend(raw_backend, backend_id),
+        "provider": _provider_for_backend(raw_backend, backend_id, entry=entry),
         "size_gb": _size_gb(entry),
         "capabilities": capabilities,
+        "downloaded": _is_downloaded(entry, registry=registry),
+        "pullable": _is_pullable(entry, registry=registry),
     }
+
+
+def _is_pullable(entry: Any, *, registry: ModelRegistry | None) -> bool:
+    """True iff this entry has HF coordinates a pull job can use.
+
+    Mirrors :func:`_resolve_pull_source` in routes/models.py — checks
+    the entry itself first (curated CuratedModels carry hf_repo +
+    hf_file) and falls back to the registry (user-added entries with
+    HF coords). HaloaiModel seed rows never have hf_repo and are
+    intentionally not pullable.
+    """
+    repo = (getattr(entry, "hf_repo", "") or "").strip()
+    filename = (
+        (getattr(entry, "hf_file", "") or "").strip()
+        or (getattr(entry, "hf_filename", "") or "").strip()
+    )
+    if repo and filename:
+        return True
+    if registry is None:
+        return False
+    entry_id = getattr(entry, "id", "")
+    if not entry_id:
+        return False
+    try:
+        if not registry.has(entry_id):
+            return False
+        reg_entry = registry.get(entry_id)
+    except Exception:
+        return False
+    reg_repo = (getattr(reg_entry, "hf_repo", "") or "").strip()
+    reg_filename = (getattr(reg_entry, "hf_filename", "") or "").strip()
+    return bool(reg_repo and reg_filename)
+
+
+def _is_downloaded(entry: Any, *, registry: ModelRegistry | None) -> bool:
+    """True iff this entry's weights exist on disk.
+
+    Registry entries: ``entry.path`` is authoritative; check it exists.
+    Curated entries: fall back to a registry lookup by id; treat the
+    curated row as downloaded iff the registry has it AND the recorded
+    path resolves on the host filesystem. We don't probe ``hf_repo`` /
+    HuggingFace cache layouts directly — that's the registry's job
+    (discover.py walks HF caches and registers them).
+    """
+    entry_path = getattr(entry, "path", None)
+    if isinstance(entry_path, str) and entry_path:
+        try:
+            return Path(entry_path).exists()
+        except OSError:
+            return False
+    # No path on the entry → it's a curated stub. Look it up in the
+    # registry. If the registry isn't wired (older test paths), assume
+    # not downloaded — better to show ⬇ on a real model than to claim
+    # a missing model is ready.
+    if registry is None:
+        return False
+    entry_id = getattr(entry, "id", "")
+    if not entry_id:
+        return False
+    try:
+        if not registry.has(entry_id):
+            return False
+        reg_entry = registry.get(entry_id)
+    except Exception:
+        return False
+    reg_path = getattr(reg_entry, "path", None)
+    if not isinstance(reg_path, str) or not reg_path:
+        return False
+    try:
+        return Path(reg_path).exists()
+    except OSError:
+        return False
 
 
 def _iter_registry_models(registry: ModelRegistry | None) -> list[Any]:
@@ -280,15 +468,25 @@ def models_for_capability(
 ) -> list[dict[str, Any]]:
     """Return picker rows for one capability child ('embed' / 'rerank' / …).
 
-    Walks :data:`CURATED` (curated picks + the haloai seed) plus the
-    optional :class:`ModelRegistry`. Each compatible model contributes one
-    row per backend it can run on, so the dashboard can show "the same
-    nomic-embed model on Vulkan and CPU" as two rows.
+    Walks the curated catalogue plus the optional :class:`ModelRegistry`.
+    Each compatible model contributes one row per backend it can run on,
+    so the dashboard can show "the same nomic-embed model on Vulkan and
+    CPU" as two rows.
+
+    HaloaiModel entries (the upstream-routed seed in
+    ``seeds/haloai_models.json``) are intentionally skipped here even
+    though they're still part of :data:`CURATED`. They surface no
+    download path and no working route on a standalone hal0 install, so
+    listing them in the capability dropdowns just produced rows the
+    user couldn't actually pick. They remain visible through
+    ``/api/models/catalogue`` so the Models view's "upstream" tab and
+    any future "wire up an upstream" UX still has them in reach.
     """
     rows: list[dict[str, Any]] = []
     seen: set[tuple[str, str]] = set()
 
-    candidates: list[Any] = list(CURATED) + _iter_registry_models(registry)
+    curated_only = [e for e in CURATED if not isinstance(e, HaloaiModel)]
+    candidates: list[Any] = curated_only + _iter_registry_models(registry)
 
     for entry in candidates:
         caps = _model_capabilities(entry)
@@ -299,7 +497,7 @@ def models_for_capability(
             if key in seen:
                 continue
             seen.add(key)
-            rows.append(_entry_to_row(entry, backend_id, caps))
+            rows.append(_entry_to_row(entry, backend_id, caps, registry=registry))
     return rows
 
 

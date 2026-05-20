@@ -52,8 +52,47 @@ _state: dict[str, object] = {
 
 
 # ── Model load ────────────────────────────────────────────────────────────────
+_ARCH_TO_HF_NAME = {
+    "tiny": "moonshine/tiny",
+    "tiny_streaming": "moonshine/tiny",
+    "base": "moonshine/base",
+    "small": "moonshine/base",
+    "small_streaming": "moonshine/base",
+}
+
+
+def _detect_local_format(model_dir: Path) -> str | None:
+    """Return 'ort' or 'onnx' based on which encoder weights exist locally.
+
+    MoonshineOnnxModel resolves encoder/decoder paths as
+    f"{models_dir}/{encoder_model|decoder_model_merged}.{model_format}",
+    so we just look for the encoder file in either suffix.
+    """
+    if (model_dir / "encoder_model.ort").is_file():
+        return "ort"
+    if (model_dir / "encoder_model.onnx").is_file():
+        return "onnx"
+    return None
+
+
 def _load_model(model_arch: str, model_path: str | None) -> None:
-    """Load the Moonshine ONNX model and stash on _state."""
+    """Load the Moonshine ONNX model and stash on _state.
+
+    Two paths:
+      1. Local weights — when ``model_path`` is a dir containing
+         encoder_model.{ort,onnx}, call MoonshineOnnxModel(models_dir=...,
+         model_format=...). The library uses the dir directly and skips
+         HuggingFace entirely.
+      2. HF download — otherwise pass model_name=<canonical> and let the
+         library fetch from UsefulSensors/moonshine. Requires network +
+         a correct canonical mapping for the requested arch.
+
+    Bug history: the prior implementation always passed the local dir as
+    `model_name`, which the library treats as an HF identifier — so it
+    never read the local files and always tried to download. Use the
+    keyword-only kwargs the constructor exposes (`models_dir`, `model_name`)
+    to keep the two paths unambiguous.
+    """
     try:
         import moonshine_onnx  # type: ignore
     except ImportError as exc:  # pragma: no cover — image install is the contract
@@ -61,31 +100,57 @@ def _load_model(model_arch: str, model_path: str | None) -> None:
             "useful-moonshine-onnx not installed; this image is broken"
         ) from exc
 
-    # useful-moonshine-onnx's MoonshineOnnxModel takes a model_name like
-    # "moonshine/tiny" or a local directory path. If we got a local
-    # model_path that exists, prefer that; else fall back to the canonical
-    # HF name keyed off arch.
-    canonical = {
-        "tiny": "moonshine/tiny",
-        "tiny_streaming": "moonshine/tiny",
-        "base": "moonshine/base",
-        "small": "moonshine/base",
-        "small_streaming": "moonshine/base",
-    }
-    if model_arch not in canonical:
-        raise ValueError(f"unknown model_arch={model_arch!r}; expected one of {list(canonical)}")
-    model_name = canonical[model_arch]
+    if model_arch not in _ARCH_TO_HF_NAME:
+        raise ValueError(
+            f"unknown model_arch={model_arch!r}; "
+            f"expected one of {list(_ARCH_TO_HF_NAME)}"
+        )
 
-    load_target = model_name
-    if model_path and Path(model_path).is_dir():
-        load_target = model_path
+    local_dir: Path | None = None
+    local_format: str | None = None
+    if model_path:
+        candidate = Path(model_path)
+        if candidate.is_dir():
+            local_format = _detect_local_format(candidate)
+            if local_format:
+                local_dir = candidate
+            else:
+                log.warning(
+                    "model_path=%s is a dir but has no encoder_model.{ort,onnx}; "
+                    "falling back to HF download",
+                    model_path,
+                )
 
-    log.info("loading moonshine arch=%s target=%s", model_arch, load_target)
-    model = moonshine_onnx.MoonshineOnnxModel(model_name=load_target)
+    hf_name = _ARCH_TO_HF_NAME[model_arch]
+    if local_dir is not None:
+        # The library accepts both kwargs: `models_dir` is used for the
+        # encoder/decoder file paths, while `model_name` is still
+        # consulted later for arch-specific knobs (num_layers, head_dim,
+        # …) — passing only `models_dir` raises
+        # ``TypeError: argument of type 'NoneType' is not iterable``
+        # when the constructor hits ``if "tiny" in model_name``.
+        log.info(
+            "loading moonshine arch=%s from local dir=%s (format=%s, name=%s)",
+            model_arch,
+            local_dir,
+            local_format,
+            hf_name,
+        )
+        model = moonshine_onnx.MoonshineOnnxModel(
+            models_dir=str(local_dir),
+            model_name=hf_name,
+            model_format=local_format,
+        )
+        resolved_path = str(local_dir)
+    else:
+        log.info("loading moonshine arch=%s from HF name=%s", model_arch, hf_name)
+        model = moonshine_onnx.MoonshineOnnxModel(model_name=hf_name)
+        resolved_path = hf_name
+
     _state["model"] = model
     _state["model_arch"] = model_arch
     _state["model_id"] = f"moonshine-{model_arch}-en"
-    _state["model_path"] = model_path or load_target
+    _state["model_path"] = resolved_path
     _state["loaded"] = True
     log.info("moonshine loaded: model_id=%s", _state["model_id"])
 

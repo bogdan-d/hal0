@@ -18,6 +18,7 @@ Port target: new hal0 provider wrapping haloai lib/voice/moonshine_server.py.
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -38,6 +39,47 @@ _MOONSHINE_BIN = "/usr/local/bin/moonshine-server"
 # Default Moonshine model archs ranked by quality. "small_streaming" is
 # haloai's default and the recommended starting point.
 _DEFAULT_MODEL_ARCH = "small_streaming"
+
+# moonshine_server.py only accepts these arch tokens.
+_VALID_ARCHS = {"tiny", "tiny_streaming", "base", "small", "small_streaming"}
+
+
+def _derive_arch_from_variant(variant: str) -> str:
+    """Map a registry ``metadata.variant`` to a moonshine_server arch.
+
+    Variants look like ``base-en`` / ``small-streaming-en``. The arch
+    enum drops the ``-en`` suffix and uses underscores for the streaming
+    flag (``small-streaming-en`` → ``small_streaming``). Returns "" when
+    the variant doesn't map cleanly so callers fall back to the default.
+    """
+    if not variant:
+        return ""
+    norm = variant.strip().lower().removesuffix("-en").replace("-", "_")
+    return norm if norm in _VALID_ARCHS else ""
+
+
+def _resolve_model_leaf(model_path: str, variant: str) -> str:
+    """Pick the directory the moonshine ONNX loader actually wants.
+
+    The haloai layout stores weights under
+    ``<root>/quantized/<variant>/`` (decoder/encoder/tokenizer .ort
+    files). The registry path often points at ``<root>`` rather than the
+    leaf, which makes ``moonshine_onnx.MoonshineOnnxModel(model_name=…)``
+    fall back to downloading from HF. Prefer the leaf when it exists.
+    """
+    if not model_path:
+        return ""
+    candidate = Path(model_path)
+    if not candidate.is_dir():
+        return model_path
+    # Already a leaf? (has at least one .ort file)
+    if any(candidate.glob("*.ort")):
+        return str(candidate)
+    if variant:
+        leaf = candidate / "quantized" / variant
+        if leaf.is_dir() and any(leaf.glob("*.ort")):
+            return str(leaf)
+    return model_path
 
 # ── Timeouts ───────────────────────────────────────────────────────────────────
 _HEALTH_TIMEOUT = httpx.Timeout(5.0)
@@ -83,11 +125,20 @@ class MoonshineProvider(Provider):
     ) -> dict[str, str]:
         """Build HAL0_* env vars for a Moonshine slot."""
         port = slot_cfg.get("port") or slot_cfg.get("slot", {}).get("port", 8089)
-        model_path = model_info.get("path", "")
-        # model_arch can come from the registry (model_info.model_arch) or
-        # be set per-slot (slot_cfg.model_arch). Slot wins; default small.
+        raw_path = model_info.get("path", "")
+        # Variant lives under model_info["metadata"]["variant"] for the
+        # haloai-seeded entries (e.g. "base-en", "small-streaming-en").
+        metadata = model_info.get("metadata") or {}
+        variant = str(metadata.get("variant", ""))
+        model_path = _resolve_model_leaf(str(raw_path), variant)
+        # model_arch can come from the registry (model_info.model_arch),
+        # be set per-slot (slot_cfg.model_arch), or be derived from the
+        # registry variant tag. Slot wins; default small_streaming.
         model_arch = (
-            slot_cfg.get("model_arch") or model_info.get("model_arch") or _DEFAULT_MODEL_ARCH
+            slot_cfg.get("model_arch")
+            or model_info.get("model_arch")
+            or _derive_arch_from_variant(variant)
+            or _DEFAULT_MODEL_ARCH
         )
 
         return {
@@ -167,6 +218,34 @@ class MoonshineProvider(Provider):
         paths = slot_cfg.get("_paths", {}) or {}
         models_base = paths.get("models_base", "/var/lib/hal0/models")
         mounts: list[tuple[str, str]] = [(models_base, models_base)]
+
+        def _mount_dir(d: str) -> None:
+            """Add (d, d) unless an ancestor is already mounted.
+
+            Skips empty strings and relative paths — without the relative
+            guard, a leaf like ``""`` resolves to ``.`` and docker rejects
+            it with ``invalid mount path``.
+            """
+            if not d or not d.startswith("/"):
+                return
+            for host, _ in mounts:
+                if d == host or d.startswith(host.rstrip("/") + "/"):
+                    return
+            mounts.append((d, d))
+
+        # The registry may point at a shared store (e.g. /mnt/ai-models)
+        # outside models_base. Mount the model dir (and the realpath
+        # parent for symlinks into a separate blobs/ tree) so the
+        # in-container --model_path resolves.
+        model_path = env["HAL0_MOONSHINE_MODEL_PATH"]
+        if model_path:
+            _mount_dir(model_path)
+            try:
+                real_model_path = os.path.realpath(model_path)
+            except OSError:
+                real_model_path = model_path
+            if real_model_path != model_path:
+                _mount_dir(real_model_path)
 
         return ContainerSpec(
             image=self.image_ref(slot_cfg),
