@@ -101,15 +101,52 @@ def test_container_spec_passes_through_accel_device(
     assert spec.port == 8086
 
 
-def test_container_spec_bind_mounts_flm_tree_at_same_path(
+def test_container_spec_does_not_bind_mount_host_flm_tree(
     provider: FLMProvider, slot_cfg: dict[str, Any], model_info: dict[str, Any]
 ) -> None:
-    """The bin/xclbins absolute symlink only resolves when host = container path."""
+    """The image bundles FLM; do not host-mount a binary tree on top of it.
+
+    Earlier provider versions bind-mounted /opt/hal0/flm-ubuntu on top of
+    the same path inside the container, so internal absolute symlinks
+    (bin/xclbins → share/flm/xclbins) resolved against the host tree.
+    The toolbox image now bundles FLM at /opt/fastflowlm with the same
+    internal layout, so the host mount is unnecessary — and the host
+    directory is empty in production, which masked the redundancy.
+    """
     spec = provider.container_spec(slot_cfg, model_info)
     mount_pairs = list(spec.mounts)
-    assert any(host == container for host, container in mount_pairs), (
-        "FLM tree must be bind-mounted at the SAME path inside the container "
-        "so its internal absolute symlinks resolve."
+    host_dirs = [host for host, _ in mount_pairs]
+    assert "/opt/hal0/flm-ubuntu" not in host_dirs, (
+        "host /opt/hal0/flm-ubuntu must NOT be bind-mounted — the image "
+        f"is self-contained. Mounts: {mount_pairs!r}"
+    )
+
+
+def test_container_spec_command_does_not_prefix_binary_path(
+    provider: FLMProvider, slot_cfg: dict[str, Any], model_info: dict[str, Any]
+) -> None:
+    """First command arg must be the flm subcommand, not a binary path.
+
+    Regression: the image's ENTRYPOINT is ``tini -- /usr/local/bin/flm``,
+    so whatever we pass becomes flm's argv. Prepending an absolute path
+    (the old behaviour) makes flm reject the args with::
+
+        Error parsing arguments: too many positional options have been
+        specified on the command line
+
+    Diagnosed live on hal0 on 2026-05-20 once the LD_LIBRARY_PATH fix
+    let flm reach main(). First command arg must be 'serve' (or another
+    flm subcommand), never a path.
+    """
+    spec = provider.container_spec(slot_cfg, model_info)
+    assert spec.command, "container_spec returned an empty command"
+    first = spec.command[0]
+    assert not first.startswith("/"), (
+        f"first command arg must be an flm subcommand, not an absolute "
+        f"path; got {first!r}. Full command: {spec.command!r}"
+    )
+    assert first == "serve", (
+        f"expected first arg to be 'serve' subcommand; got {first!r}"
     )
 
 

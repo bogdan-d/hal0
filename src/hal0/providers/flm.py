@@ -45,9 +45,15 @@ from hal0.providers.base import ContainerSpec, Provider
 _DEFAULT_FLM_IMAGE = "ghcr.io/hal0ai/hal0-toolbox-flm:v1"
 
 # ── On-disk layout ────────────────────────────────────────────────────────────
-# The FLM binary tree lives at this path on the *host*. The same path is
-# mirrored into the container via a read-only bind so internal absolute
-# symlinks (notably bin/xclbins → share/flm/xclbins) keep resolving.
+# The toolbox image is self-contained: it bundles FLM at /opt/fastflowlm/
+# (binary, libs, xclbins, share assets) and symlinks /usr/local/bin/flm
+# at the binary. ENTRYPOINT runs the in-image flm via tini, so the
+# container_spec only supplies the subcommand + args.
+#
+# _DEFAULT_FLM_ROOT below is retained ONLY for the non-container fallback
+# path used by start_cmd() (native systemd runs, tests, debug shells).
+# Container runs no longer reference it.
+_IMAGE_FLM_ROOT = "/opt/fastflowlm"
 _DEFAULT_FLM_ROOT = "/opt/hal0/flm-ubuntu"
 # FLM's per-user model cache. Bind-mounted writable so `flm pull` downloads
 # survive container restarts.
@@ -177,15 +183,14 @@ class FLMProvider(Provider):
     ) -> ContainerSpec:
         """Build a ContainerSpec for FLM in the toolbox image.
 
-        Layout:
-          - Image carries Ubuntu base + libxrt-npu2 + ffmpeg.
-          - Host bind-mount of the FLM binary tree at the SAME absolute
-            path inside the container (default ``/opt/hal0/flm-ubuntu``)
-            so its internal absolute symlinks (notably bin/xclbins →
-            share/flm/xclbins) keep resolving.
-          - Host bind-mount of the FLM model cache to a hal0-managed
-            directory so ``flm pull`` downloads survive container
-            restarts.
+        The toolbox image is self-contained: FLM is built in and lives at
+        /opt/fastflowlm/ (binary, libs, xclbins, share assets). The image
+        ENTRYPOINT is ``tini -- /usr/local/bin/flm``, so the command we
+        pass becomes the flm subcommand + args — no host bind-mount of
+        the binary tree is needed.
+
+        Only the model cache is bind-mounted, so ``flm pull`` downloads
+        survive container restarts.
 
         FLM needs ``/dev/accel/accel0`` for the AMD XDNA2 NPU. ``/dev/dri``
         is included because some FLM model loaders hit iGPU helpers
@@ -195,27 +200,25 @@ class FLMProvider(Provider):
         port = int(env["HAL0_PORT"])
 
         paths = slot_cfg.get("_paths", {}) or {}
-        flm_root = paths.get("flm_root") or os.environ.get("HAL0_FLM_ROOT") or _DEFAULT_FLM_ROOT
         flm_models = (
             paths.get("flm_models")
             or os.environ.get("HAL0_FLM_MODELS_DIR")
             or _DEFAULT_FLM_MODELS_DIR
         )
 
-        # Mount the binary tree at the same path inside the container so the
-        # bin/xclbins absolute symlink resolves. The model cache is mounted
-        # at FLM's default location (~/.config/flm/models) since FLM hardcodes
-        # that path internally.
+        # Only the model cache is bind-mounted. FLM hardcodes
+        # ~/.config/flm/models internally; map our hal0-managed cache
+        # to that path.
         mounts: list[tuple[str, str]] = [
-            (flm_root, flm_root),
             (flm_models, "/root/.config/flm/models"),
         ]
 
-        # Build the argv the container's entrypoint receives. The image's
-        # ENTRYPOINT points at <flm_root>/bin/flm via PATH, but we pass the
-        # absolute path so an image-side PATH change can't break us.
+        # Build the argv passed to the image's ENTRYPOINT. The image runs
+        # /usr/local/bin/flm via tini, so what we provide here is the
+        # subcommand + flags — NOT a binary path. Passing an absolute
+        # binary path here would be treated by flm as a stray positional
+        # argument and rejected with "too many positional options".
         command: list[str] = [
-            f"{flm_root}/bin/flm",
             "serve",
             env["HAL0_FLM_TAG"],
             "--host",
@@ -238,14 +241,17 @@ class FLMProvider(Provider):
             image=self.image_ref(slot_cfg),
             command=command,
             env={
-                "FLM_CONFIG_PATH": f"{flm_root}/share/flm/model_list.json",
+                # Image-internal paths (the Dockerfile installs FLM at
+                # /opt/fastflowlm and XRT at /opt/xilinx/xrt).
+                "FLM_CONFIG_PATH": f"{_IMAGE_FLM_ROOT}/share/flm/model_list.json",
                 # Docker `--env LD_LIBRARY_PATH=...` REPLACES the image ENV
-                # set by the Dockerfile, so /opt/xilinx/xrt/lib (baked in
-                # by the image) is invisible to flm at startup unless we
-                # repeat it here. libxrt_coreutil.so.2 is a direct link-
-                # time dep — without this path, /usr/local/bin/flm exits
-                # with ENOENT before reaching main().
-                "LD_LIBRARY_PATH": f"{flm_root}/lib:/opt/xilinx/xrt/lib:/usr/lib/x86_64-linux-gnu",
+                # set by the Dockerfile rather than augmenting it, so we
+                # must spell out every path here even though the image's
+                # own ENV would be correct on its own. libxrt_coreutil.so.2
+                # (XRT runtime) and the FLM libs (libllama_npu.so &c, dlopen'd
+                # when models load) both need to be findable; missing either
+                # crashes /usr/local/bin/flm at startup before main().
+                "LD_LIBRARY_PATH": f"{_IMAGE_FLM_ROOT}/lib:/opt/xilinx/xrt/lib:/usr/lib/x86_64-linux-gnu",
             },
             mounts=mounts,
             # /dev/accel/accel0: XDNA2 NPU. /dev/dri/renderD128: iGPU companion.
