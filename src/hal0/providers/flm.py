@@ -239,7 +239,13 @@ class FLMProvider(Provider):
             command=command,
             env={
                 "FLM_CONFIG_PATH": f"{flm_root}/share/flm/model_list.json",
-                "LD_LIBRARY_PATH": f"{flm_root}/lib:/usr/lib/x86_64-linux-gnu",
+                # Docker `--env LD_LIBRARY_PATH=...` REPLACES the image ENV
+                # set by the Dockerfile, so /opt/xilinx/xrt/lib (baked in
+                # by the image) is invisible to flm at startup unless we
+                # repeat it here. libxrt_coreutil.so.2 is a direct link-
+                # time dep — without this path, /usr/local/bin/flm exits
+                # with ENOENT before reaching main().
+                "LD_LIBRARY_PATH": f"{flm_root}/lib:/opt/xilinx/xrt/lib:/usr/lib/x86_64-linux-gnu",
             },
             mounts=mounts,
             # /dev/accel/accel0: XDNA2 NPU. /dev/dri/renderD128: iGPU companion.

@@ -127,6 +127,25 @@ def test_container_spec_passes_multiplex_flags_in_command(
     assert "--asr" in cmd
 
 
+def test_container_spec_ld_library_path_includes_xrt(
+    provider: FLMProvider, slot_cfg: dict[str, Any], model_info: dict[str, Any]
+) -> None:
+    """LD_LIBRARY_PATH must include /opt/xilinx/xrt/lib.
+
+    Regression: docker `--env LD_LIBRARY_PATH=...` overwrites the image's
+    own ENV from the Dockerfile. If this spec omits /opt/xilinx/xrt/lib,
+    /usr/local/bin/flm fails to load libxrt_coreutil.so.2 at startup
+    (status 127, "error while loading shared libraries") before main()
+    runs. Diagnosed live on hal0 on 2026-05-20 — the FLM toolbox image
+    was correct, the env override broke it.
+    """
+    spec = provider.container_spec(slot_cfg, model_info)
+    ld = spec.env.get("LD_LIBRARY_PATH", "")
+    assert "/opt/xilinx/xrt/lib" in ld, (
+        f"LD_LIBRARY_PATH missing XRT runtime path: {ld!r}"
+    )
+
+
 # ─── health (TIER1 inference round-trip) ──────────────────────────────────────
 
 
