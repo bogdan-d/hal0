@@ -65,9 +65,7 @@ class FakeSlotManager:
         self.calls.append(("create", slot_name, {"cfg": cfg}))
         return _StubSlot("offline")
 
-    async def update_config(
-        self, slot_name: str, updates: dict[str, Any]
-    ) -> _StubSlot:
+    async def update_config(self, slot_name: str, updates: dict[str, Any]) -> _StubSlot:
         self.calls.append(("update_config", slot_name, {"updates": updates}))
         return _StubSlot("ready")
 
@@ -218,6 +216,4 @@ async def test_apply_no_rewrite_on_pure_disable(
     await orch.apply("embed", "embed", {"enabled": False})
 
     update_calls = [c for c in fake.calls if c[0] == "update_config"]
-    assert update_calls == [], (
-        f"unexpected update_config on disable transition: {update_calls}"
-    )
+    assert update_calls == [], f"unexpected update_config on disable transition: {update_calls}"

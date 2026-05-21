@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import logging
 import shlex
-from typing import Iterable
+from collections.abc import Iterable
 
 log = logging.getLogger(__name__)
 
@@ -112,9 +112,7 @@ def merge_flags(model_defaults: str | None, slot_extra: str | None) -> str:
         any non-conflicting model defaults.  Empty inputs collapse to
         ``""``.
     """
-    if not (model_defaults and model_defaults.strip()) and not (
-        slot_extra and slot_extra.strip()
-    ):
+    if not (model_defaults and model_defaults.strip()) and not (slot_extra and slot_extra.strip()):
         return ""
 
     if not (slot_extra and slot_extra.strip()):
@@ -171,16 +169,10 @@ def merge_flags(model_defaults: str | None, slot_extra: str | None) -> str:
 
     # Build the dedup set: every flag the slot uses *except* append-list
     # flags.  Empty-string "flags" (stray positionals) are never deduped.
-    slot_flag_names = {
-        flag
-        for flag, _ in slot_pairs
-        if flag and flag not in _APPEND_LIST_FLAGS
-    }
+    slot_flag_names = {flag for flag, _ in slot_pairs if flag and flag not in _APPEND_LIST_FLAGS}
 
     cleaned_model_pairs = [
-        (flag, values)
-        for flag, values in model_pairs
-        if flag not in slot_flag_names
+        (flag, values) for flag, values in model_pairs if flag not in slot_flag_names
     ]
 
     cleaned_model_tokens = _flatten_pairs(cleaned_model_pairs)

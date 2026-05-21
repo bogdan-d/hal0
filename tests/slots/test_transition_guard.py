@@ -32,9 +32,7 @@ async def test_transition_blocks_modelless_ready_for_llama_server(
         extra={"backend": "vulkan", "provider": "llama-server"},
         force=True,
     )
-    state_file = (
-        Path(tmp_hal0_home) / "var-lib" / "hal0" / "slots" / "primary" / "state.json"
-    )
+    state_file = Path(tmp_hal0_home) / "var-lib" / "hal0" / "slots" / "primary" / "state.json"
     record = json.loads(state_file.read_text(encoding="utf-8"))
     assert record["state"] == "idle", (
         f"transition guard must coerce modelless READY to IDLE, got {record['state']}"
@@ -76,9 +74,7 @@ async def test_transition_allows_ready_with_model_id(
         extra={"backend": "vulkan", "provider": "llama-server"},
         force=True,
     )
-    state_file = (
-        Path(tmp_hal0_home) / "var-lib" / "hal0" / "slots" / "primary" / "state.json"
-    )
+    state_file = Path(tmp_hal0_home) / "var-lib" / "hal0" / "slots" / "primary" / "state.json"
     record = json.loads(state_file.read_text(encoding="utf-8"))
     assert record["state"] == "ready"
     assert record["model_id"] == "qwen3-4b-q4_k_m"

@@ -107,9 +107,7 @@ def migrate(
             capability = _CHILD_TO_CAPABILITY.get((slot, child))
             if capability is None:
                 continue
-            verdict, legal = _classify_pair(
-                capability, sel.model, sel.backend, registry
-            )
+            verdict, legal = _classify_pair(capability, sel.model, sel.backend, registry)
             if verdict in {"empty", "ok"}:
                 continue
             if verdict == "illegal_backend":
@@ -189,6 +187,5 @@ def migrate(
 
     save_capabilities_config(cfg)
     console.print(
-        f"\n[green]migrated[/green] {len(changes)} selection(s) "
-        f"in {capabilities_toml_path()}."
+        f"\n[green]migrated[/green] {len(changes)} selection(s) in {capabilities_toml_path()}."
     )

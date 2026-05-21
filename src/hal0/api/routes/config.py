@@ -47,6 +47,7 @@ def _validation_error_details(exc: ValidationError) -> dict[str, str]:
         out[loc or "<root>"] = err.get("msg", "invalid")
     return out
 
+
 # Default ports — these match what `hal0-api.service` and
 # `hal0-openwebui.service` bind to.  The API port can be overridden via
 # the HAL0_PORT env var that ``hal0-api.service`` sources from

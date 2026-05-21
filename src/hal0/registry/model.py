@@ -121,8 +121,7 @@ class Model(BaseModel):
     defaults: ModelDefaults | None = Field(
         default=None,
         description=(
-            "Optional per-model launcher defaults. "
-            "None means the slot config is used as-is."
+            "Optional per-model launcher defaults. None means the slot config is used as-is."
         ),
     )
 

@@ -219,10 +219,7 @@ class SlotConfig(BaseModel):
             cleaned = {k: v for k, v in server.items() if v is not None}
             if cleaned:
                 extra = data.get("extra")
-                if not isinstance(extra, dict):
-                    extra = {}
-                else:
-                    extra = dict(extra)
+                extra = dict(extra) if isinstance(extra, dict) else {}
                 extra["server"] = cleaned
                 data["extra"] = extra
         return data
@@ -614,9 +611,7 @@ class ModelsConfig(BaseModel):
             if not s:
                 raise ValueError("models.roots entries must not be empty")
             if not Path(s).is_absolute():
-                raise ValueError(
-                    f"models.roots entry {s!r} must be an absolute path"
-                )
+                raise ValueError(f"models.roots entry {s!r} must be an absolute path")
             out.append(s)
         return out
 

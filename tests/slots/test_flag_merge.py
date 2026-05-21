@@ -18,7 +18,6 @@ import pytest
 
 from hal0.slots.flag_merge import merge_flags
 
-
 # ─── Empty inputs ─────────────────────────────────────────────────────────────
 
 

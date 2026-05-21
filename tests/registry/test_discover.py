@@ -158,9 +158,7 @@ def test_scan_and_register_idempotent(model_root: Path, registry: ModelRegistry)
     assert second["added"] == []
 
 
-def test_scan_and_register_missing_root_is_silent(
-    tmp_path: Path, registry: ModelRegistry
-) -> None:
+def test_scan_and_register_missing_root_is_silent(tmp_path: Path, registry: ModelRegistry) -> None:
     cfg = ModelsConfig(roots=[str(tmp_path / "does-not-exist")])
     result = scan_and_register(registry, cfg)
     assert result["added"] == []

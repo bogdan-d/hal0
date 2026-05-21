@@ -197,7 +197,11 @@ def detect(path: str | Path) -> DetectionResult:
         caps = ["embed"] if is_embed else ["chat"]
 
         name_candidate = header.get("general.name") or header.get("general.basename")
-        suggested_name = str(name_candidate).strip() if isinstance(name_candidate, str) and name_candidate.strip() else None
+        suggested_name = (
+            str(name_candidate).strip()
+            if isinstance(name_candidate, str) and name_candidate.strip()
+            else None
+        )
         if not suggested_name:
             suggested_name = _hf_repo_name_from_path(p)
 

@@ -16,9 +16,9 @@ from typing import Any
 
 from fastapi import APIRouter, Request
 
-from hal0.api.deps import CapabilityOrchestratorDep, SlotManagerDep
+from hal0.api.deps import SlotManagerDep
 from hal0.capabilities.catalog import available_backends, get_backend
-from hal0.capabilities.orchestrator import _CHILD_TO_SLOT, _SLOT_TO_CHILD
+from hal0.capabilities.orchestrator import _CHILD_TO_SLOT
 from hal0.config.loader import load_hardware_info
 from hal0.errors import NotFound
 
@@ -121,7 +121,7 @@ async def _loaded_children_for_backend(
       1. Walk every (capability slot, child) pair in ``_CHILD_TO_SLOT``
          and surface the ones whose backend matches. These rows carry
          ``source="capability"`` so the UI knows they're managed via the
-         capability picker (no × control).
+         capability picker (no per-row remove control).
 
       2. Walk every other slot (e.g. ``primary``, ad-hoc NPU loads from
          the backend card) and surface the ones whose backend matches.
@@ -226,9 +226,7 @@ async def _build_backend_payload(
 
 
 @router.get("")
-async def list_backends(
-    request: Request, slot_manager: SlotManagerDep
-) -> list[dict[str, Any]]:
+async def list_backends(request: Request, slot_manager: SlotManagerDep) -> list[dict[str, Any]]:
     """Return one row per available backend with live status."""
     out: list[dict[str, Any]] = []
     for backend in available_backends():

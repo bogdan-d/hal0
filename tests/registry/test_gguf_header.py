@@ -161,9 +161,7 @@ class TestMalformed:
 
     def test_truncated_mid_kv_returns_partial(self, tmp_path: Path) -> None:
         """First KV parses, second is truncated."""
-        good_kv = _enc_kv(
-            "general.architecture", _GGUF_TYPE_STRING, _enc_str("llama")
-        )
+        good_kv = _enc_kv("general.architecture", _GGUF_TYPE_STRING, _enc_str("llama"))
         # Start a key but cut off the length bytes mid-stream.
         bad_partial = struct.pack("<Q", 99999)[:4]
         header = (

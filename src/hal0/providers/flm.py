@@ -430,17 +430,20 @@ def _probe_flm_catalog() -> list[dict[str, Any]] | None:
 
     image = os.environ.get("HAL0_TOOLBOX_IMAGE_FLM", _DEFAULT_FLM_IMAGE)
     cmd = [
-        "docker", "run", "--rm",
-        "--security-opt", "apparmor=unconfined",
+        "docker",
+        "run",
+        "--rm",
+        "--security-opt",
+        "apparmor=unconfined",
         image,
-        "list", "-j",
+        "list",
+        "-j",
     ]
     try:
         proc = subprocess.run(
             cmd,
             stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             timeout=30.0,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):

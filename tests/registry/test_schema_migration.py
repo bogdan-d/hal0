@@ -108,15 +108,15 @@ class TestLegacyMigration:
         rdir.mkdir()
         # Pre-Phase-1 shape: only the fields that already existed.
         (rdir / "registry.toml").write_text(
-            '[models.legacy]\n'
+            "[models.legacy]\n"
             'path = "/m/legacy.gguf"\n'
             'name = "Legacy 7B"\n'
-            'size_bytes = 4000000000\n'
+            "size_bytes = 4000000000\n"
             'license = "Apache-2.0"\n'
             'capabilities = ["chat"]\n'
-            'tags = []\n'
-            '[models.legacy.metadata]\n'
-            'discovered = true\n'
+            "tags = []\n"
+            "[models.legacy.metadata]\n"
+            "discovered = true\n"
         )
         reg = ModelRegistry(registry_dir=rdir)
         m = reg.get("legacy")
@@ -130,10 +130,7 @@ class TestLegacyMigration:
         rdir = tmp_path / "registry"
         rdir.mkdir()
         (rdir / "registry.toml").write_text(
-            '[models.legacy]\n'
-            'path = "/m/legacy.gguf"\n'
-            'name = "Legacy"\n'
-            'capabilities = ["chat"]\n'
+            '[models.legacy]\npath = "/m/legacy.gguf"\nname = "Legacy"\ncapabilities = ["chat"]\n'
         )
         reg = ModelRegistry(registry_dir=rdir)
         updated = reg.update(
@@ -164,19 +161,19 @@ class TestLegacyMigration:
         rdir.mkdir()
         (rdir / "registry.toml").write_text(
             # Legacy entry — no backends/defaults.
-            '[models.old]\n'
+            "[models.old]\n"
             'path = "/m/o.gguf"\n'
             'capabilities = ["chat"]\n'
             # New-style entry — full schema.
-            '[models.new]\n'
+            "[models.new]\n"
             'path = "/m/n.gguf"\n'
             'capabilities = ["embed"]\n'
             'backends = ["vulkan", "rocm"]\n'
-            '[models.new.defaults]\n'
-            'context_size = 4096\n'
-            'n_gpu_layers = -1\n'
-            '[models.new.metadata]\n'
-            'context_length = 4096\n'
+            "[models.new.defaults]\n"
+            "context_size = 4096\n"
+            "n_gpu_layers = -1\n"
+            "[models.new.metadata]\n"
+            "context_length = 4096\n"
         )
         reg = ModelRegistry(registry_dir=rdir)
         old = reg.get("old")
