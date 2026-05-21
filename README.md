@@ -15,6 +15,11 @@ command on any modern Linux box.
 - **Slots** — each inference workload (chat, embed, STT, TTS) runs in
   its own systemd-managed container with a known port, lifecycle, and
   health
+- **Capability slots layer** — thin UX overlay grouping flat slots into
+  user-facing capabilities (Embed / Voice / Image / NPU backend
+  rollup). Selections persist in `/etc/hal0/capabilities.toml`;
+  `CapabilityOrchestrator` reconciles selections against
+  `slots/*.toml` on every apply
 - **Dispatcher** — registry-aware routing between slots, with cold-cache
   prefetch and external upstream fallback (OpenRouter, Anthropic, etc.)
 - **Dashboard** — Vue 3 + Tailwind 4 UI for slot/model management,
@@ -23,6 +28,7 @@ command on any modern Linux box.
 - **Image generation** — bundled ComfyUI provider with curated SDXL /
   SD 1.5 / Flux models; OpenAI-compatible `/v1/images/generations`
 - **One-line install** — `curl -fsSL hal0.dev/install | bash`
+  (`--models-dir=PATH` redirects HuggingFace pulls off `/var/lib/hal0`)
 
 ## Backends (v1)
 

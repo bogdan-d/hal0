@@ -510,6 +510,10 @@ def _mount_dashboard(app: FastAPI) -> None:
     index = dist / "index.html"
     app.mount("/assets", StaticFiles(directory=dist / "assets"), name="assets")
 
+    brand_dir = dist / "brand"
+    if brand_dir.is_dir():
+        app.mount("/brand", StaticFiles(directory=brand_dir), name="brand")
+
     @app.get("/favicon.svg", include_in_schema=False)
     async def _favicon() -> Response:
         return FileResponse(dist / "favicon.svg")

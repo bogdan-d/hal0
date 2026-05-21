@@ -175,7 +175,7 @@ html, body {
   font-feature-settings: 'cv11' 1, 'ss01' 1;
 }
 
-code, pre, kbd, .tabular, .mono, .wordmark {
+code, pre, kbd, .tabular, .mono {
   font-feature-settings: 'zero' 1, 'ss02' 1;
 }
 
@@ -186,13 +186,12 @@ code, pre, kbd, .tabular, .mono, .wordmark {
   overflow: hidden;
 }
 
-/* The wordmark — JetBrains Mono with slashed zero, slightly tightened.
- * Used by <Wordmark /> + as a fallback for direct .wordmark class use. */
+/* The wordmark is rendered by <Wordmark /> as inline SVG (brand mark:
+ * Monomaniac One "hal" + JetBrains Mono "0"). The class only carries
+ * layout-affecting defaults now; the SVG glyph geometry comes from the
+ * component itself. */
 .wordmark {
-  font-family: var(--hal0-font-display);
-  font-weight: 700;
-  letter-spacing: -0.02em;
-  font-feature-settings: 'zero' 1;
+  letter-spacing: 0;
 }
 
 /* ─── Scrollbar ────────────────────────────────────────────────── */

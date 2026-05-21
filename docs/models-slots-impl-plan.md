@@ -7,10 +7,11 @@ Spec for multi-agent execution. Each phase has defined file ownership and a hard
 - Repo root: `/home/halo/dev/hal0/`
 - Backend: `src/hal0/` (FastAPI routes live in `src/hal0/api/routes/`)
 - Frontend: `ui/src/` (Vue 3 + Pinia + plain CSS)
-- Builtin slot names: `primary`, `embed`, `stt`, `tts` — mirror at `src/hal0/slots/__init__.py:BUILTIN_SLOTS`
-- Backends enum (`_VALID_BACKENDS`): `vulkan, rocm, flm, moonshine, kokoro, cpu`
-- Providers enum (`_VALID_PROVIDERS`): `llama-server, flm, moonshine, kokoro`
-- Footer events plan landing in parallel — emit lifecycle events on the shared ring (`app.state.events_ring`, `events_subscribers`)
+- Builtin slot names: `primary`, `embed`, `stt`, `tts`, `img` — mirror at `src/hal0/slots/__init__.py:BUILTIN_SLOTS`
+- Non-builtin slot lazily auto-created by the capabilities layer: `embed-rerank` (port 8086 by default; `CapabilityOrchestrator._ensure_slot_exists()` allocates from `8081..8099`).
+- Backends enum (`_VALID_BACKENDS` in `src/hal0/config/schema.py`): `vulkan, rocm, flm, moonshine, kokoro, cpu`
+- Providers enum (`_VALID_PROVIDERS` in `src/hal0/config/schema.py`): `llama-server, flm, moonshine, kokoro` — the ComfyUI provider exists in code (`src/hal0/providers/comfyui.py`) but is invoked via the dedicated `img` slot path, not through a `provider=` slot config.
+- Footer events plan landed — `app.state.events` (`EventBus`) is the canonical emitter; see `src/hal0/events/`.
 
 ## Schema changes
 
@@ -155,6 +156,147 @@ File ownership locked, no overlap:
 - Owns: `tests/playwright/models-slots.spec.ts` (new), runs against dev server.
 - Tasks: smoke flows — add model (local file), edit slot Advanced, swap via inline dropdown, cascade-delete model. A11y check on new modals (labelledby, focus trap, escape). Web-design-guidelines pass.
 - Hard gate: tests pass against the dev stack.
+
+## Landed surfaces — beyond the original spec
+
+The phases above shipped, and three follow-on changes have layered on
+top. Document them here so the plan continues to reflect what the code
+actually does.
+
+### Capabilities overlay (`src/hal0/capabilities/`)
+
+Thin operator-facing overlay that groups slots into three dashboard
+cards — Embed, Voice, Img — plus an NPU backend rollup. Children map
+1:1 onto underlying slots via a hard-coded bridge in
+`orchestrator.py`:
+
+| Capability child | Underlying slot |
+|---|---|
+| `embed.embed`   | `embed`        |
+| `embed.rerank`  | `embed-rerank` |
+| `voice.stt`     | `stt`          |
+| `voice.tts`     | `tts`          |
+| `img.img`       | `img`          |
+
+Persistence is a single TOML at `/etc/hal0/capabilities.toml`, written
+atomically via `write_toml_atomic`. The schema is one
+`CapabilitySelection` (`backend, provider, model, enabled`) per
+`[selections.<slot>.<child>]` table. Operators may hand-edit the file;
+the orchestrator reconciles on next apply (see "drift invariant"
+below). The full design call is captured in
+[ADR-0002](./adr/0002-capabilities-overlay.md).
+
+HTTP surface lives at `src/hal0/api/routes/capabilities.py` (mounted
+under `/api/capabilities`, admin-gated):
+
+- `GET  /api/capabilities` → `{backends, catalogs, selections}`. The
+  `catalogs` block carries one picker row per model grouped by id with
+  a `backends` array for legal backend choices (model-first reshape,
+  b90a569). `chat.chat` is included so the NPU backend card can list
+  chat-on-NPU models even though chat itself lives on the dedicated
+  `primary` slot.
+- `POST /api/capabilities/{slot}/{child}` → accepts a subset of
+  `{backend, provider, model, enabled}`. Unknown keys 400 with
+  `capability.unknown_fields`. Error envelopes documented in
+  [api-errors.md](./api-errors.md#capability-slots-envelope-apicapabilities).
+
+CLI:
+
+- `hal0 capabilities migrate [--dry-run]` (`src/hal0/cli/capabilities_commands.py`)
+  rewrites persisted selections whose `(model, backend)` pair is
+  illegal against the live catalog. Cross-referenced in
+  [migration.md](./migration.md#cleaning-stale-capability-selections-hal0-capabilities-migrate).
+
+### Drift invariant (`CapabilityOrchestrator.apply()`, commit 39adaf7)
+
+`capabilities.toml` and the underlying `slots/*.toml` can drift
+independently — a previous `apply()` that failed mid-flight, a manual
+TOML edit, or an install-time seed can leave the two disagreeing.
+
+The invariant `apply()` now enforces: **whenever the merged selection
+is enabled, the underlying slot TOML is rewritten unconditionally** —
+not just when the new selection differs from the previously-persisted
+one. Diffing against the prior selection misses drift introduced
+outside the orchestrator and lets `load()` / `swap()` spawn against a
+stale slot TOML while the API reports the new selection as live.
+
+The rewrite routes through `SlotManager.update_config()` so the
+override drop-in + env file get regenerated alongside the TOML. If the
+slot file doesn't exist yet, `_ensure_slot_exists()` synthesises it
+from the selection before the lifecycle call.
+
+### Scan preview overhaul (`POST /api/models/scan/preview`)
+
+`src/hal0/api/routes/models.py:148` returns `DetectionResult` rows
+without mutating the registry. The overhaul shipped in commits
+7f64987, 8232989, cf5b791:
+
+- **GGUF magic-byte detect** — `src/hal0/registry/gguf_header.py`
+  reads the `b"GGUF"` magic + arch + pooling-type keys; runs on every
+  candidate regardless of file extension so HF-cache `blobs/<hex>`
+  files are still classified.
+- **`general.name` → `suggested_name`** — when present in the GGUF
+  header, surfaced as the row's suggested model name; falls back to
+  `general.basename` and then to the filename.
+- **`kind`-driven gating** — `DetectionResult.kind` is one of
+  `gguf_chat / gguf_embed / gguf_rerank / asr / tts / image / ...`
+  and the preview-row signature is `(suggested_name, size_bytes, kind)`
+  so reblobbed HF snapshots dedup across `snapshots/<rev>/` directories.
+- **Skip rules shared with discover** — `is_skippable()` from
+  `registry/discover.py` keeps mmproj sidecars, multi-file shards, hex
+  blobs without GGUF magic, and ComfyUI/voice accessory dirs out of
+  the preview list.
+- **Resolved-path dedup** — symlinks are resolved before
+  signature-dedup; preserves the user-facing filename for display
+  while collapsing the snapshot/blob duplicates.
+
+`POST /api/models/scan` consumes the (possibly user-edited) preview
+rows; each commit fires a `model.registered` event with
+`source="scan"`.
+
+### Rerank slot
+
+- Slot name: `embed-rerank` (auto-created on first
+  `embed.rerank.enabled = true` apply via `_ensure_slot_exists`).
+- Default port: `8086` — picked by `_next_free_slot_port()` once
+  `8081..8085` are taken; explicit setting recommended in the slot
+  TOML.
+- Model: `bge-reranker-v2-m3-q4_k_m` (seeded as `bge-reranker` in
+  `src/hal0/registry/seeds/haloai_models.json`).
+- Required server flag: `[server].extra_args = "--reranking"`.
+  llama-server only registers the `/rerank` route when this flag is
+  present; without it the slot will appear `ready` but `/v1/rerankings`
+  dispatch returns the upstream's 404.
+- Route: `POST /v1/rerankings` — plain dispatch passthrough
+  (`src/hal0/api/routes/v1.py:260`).
+
+### FLM provider live (NPU, `src/hal0/providers/flm.py`)
+
+AMD XDNA NPU backend. The toolbox image
+`ghcr.io/hal0ai/hal0-toolbox-flm:v1` is self-contained: FLM ships
+under `/opt/fastflowlm/` inside the image (no host bind-mount path
+needed since commit c998106).
+
+Catalog surface (`src/hal0/capabilities/catalog.py`):
+
+- `available_backends()` only surfaces `npu` when XDNA is present
+  **and** `docker image inspect ghcr.io/hal0ai/hal0-toolbox-flm:v1`
+  returns 0 — avoids the "no credentials → docker pull loop" failure
+  mode for users without ghcr auth.
+- `flm_served_models()` runs `flm list -j` inside the toolbox image
+  and caches the parsed model list. FLM has its **own model tag
+  namespace** (driven by the in-image `model_list.json`) — arbitrary
+  GGUFs cannot be loaded onto the NPU. The picker only fan-outs `npu`
+  rows for the `chat` and `embed` capabilities (whisper / asr on FLM
+  is a deferred slice).
+- Per-`(backend, model)` validation in `_validate_model_in_catalog()`
+  rejects `backend=npu` + a llama.cpp-only model at apply time with
+  `capability.illegal_backend_model_pair`.
+
+### Capability error envelopes
+
+All `capability.*` codes are catalogued in
+[api-errors.md → Capability slots envelope](./api-errors.md#capability-slots-envelope-apicapabilities).
 
 ## Risk + safety
 

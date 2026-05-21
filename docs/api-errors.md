@@ -38,7 +38,7 @@ So in practice:
 }
 ```
 
-- `code` — dotted namespace (`auth.*`, `slot.*`, `model.*`, `dispatch.*`, `image.*`, `config.*`, `system.*`).  Stable across releases — safe to pattern-match.
+- `code` — dotted namespace (`auth.*`, `slot.*`, `model.*`, `dispatch.*`, `image.*`, `config.*`, `system.*`, `capability.*`, `request.*`).  Stable across releases — safe to pattern-match.
 - `message` — human-readable.  Not stable; do not pattern-match.
 - `details` — open object with structured context (slot name, model id, etc.).  May be `{}`.
 
@@ -181,6 +181,45 @@ envelope on a `/v1` URL:
   }
 }
 ```
+
+## Capability slots envelope (`/api/capabilities/*`)
+
+`/api/capabilities` is the dashboard overlay that maps embed / voice /
+img children onto underlying slots
+([ADR-0002](./adr/0002-capabilities-overlay.md)). All errors on this
+prefix use the hal0 envelope. The codes are:
+
+| Code | Status | Raised when |
+|---|---|---|
+| `capability.unknown_slot` | 400 | `slot` path segment not in `("embed", "voice", "img")`. `details` carries the legal list. |
+| `capability.unknown_child` | 400 | `child` segment not valid for that slot (`embed/embed`, `embed/rerank`, `voice/stt`, `voice/tts`, `img/img`). |
+| `capability.unknown_fields` | 400 | Request body has keys outside `{backend, provider, model, enabled}`. `details.unexpected` lists them. |
+| `capability.invalid_selection` | 400 | Merged selection failed `CapabilitySelection` pydantic validation. |
+| `capability.unknown_model` | 404 | Selected `model` is not advertised for this capability and isn't in the registry either. |
+| `capability.illegal_backend_model_pair` | 400 | Model exists but the requested `backend` cannot serve it. `details.legal_backends` lists what can. This is the guard the model-first picker reshape was built to enforce — prevents `backend=npu` + a llama.cpp GGUF combinations that would crash the slot at start-up. |
+| `capability.apply_failed` | 503 | Underlying `SlotManager.load/swap/unload/create` raised. `details.error` carries the original message. The user's selection IS persisted before the envelope is returned so a retry doesn't lose intent. |
+| `request.invalid_json` | 400 | Body did not parse as JSON. |
+| `request.not_an_object` | 400 | Body parsed but isn't a JSON object. |
+
+Source: `src/hal0/api/routes/capabilities.py` + `src/hal0/capabilities/orchestrator.py`.
+
+## Rerank — `/v1/rerankings`
+
+`/v1/rerankings` is a llama-server-only OpenAI-compat extension served
+by the `embed-rerank` slot (port 8086 by default, model
+`bge-reranker-v2-m3-q4_k_m`). The route is a plain dispatch passthrough
+(`src/hal0/api/routes/v1.py:260`), so error shapes follow the same
+hal0-vs-upstream split as `/v1/chat/completions`:
+
+- hal0-raised pre-dispatch errors (no route, slot not ready, auth) →
+  hal0 envelope.
+- llama-server's own 4xx/5xx response (e.g. the slot binary was started
+  without `--reranking`, which makes `/rerank` return 404) → forwarded
+  verbatim as the upstream's body.
+
+If the upstream 404 is the symptom, the fix is on the slot side —
+`[server].extra_args = "--reranking"` in `/etc/hal0/slots/embed-rerank.toml`
+(see [models-slots-impl-plan.md](./models-slots-impl-plan.md#rerank-slot)).
 
 ## Guidance for clients
 
