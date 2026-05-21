@@ -32,6 +32,7 @@ import { useSystemStore } from '../stores/system.js'
 import { resetFirstRunGuard } from '../router.js'
 import { useFirstRun } from '../components/firstrun/useFirstRun.js'
 import CapabilityToggle from '../components/capabilities/CapabilityToggle.vue'
+import Wordmark from '../components/Wordmark.vue'
 
 const router = useRouter()
 const toasts = useToastsStore()
@@ -221,7 +222,7 @@ const canAdvance = computed(() => {
           <span class="wizard-eyebrow-dot" aria-hidden="true"></span>
           First run · v1 pre-alpha
         </span>
-        <div class="wizard-logo wordmark" aria-hidden="true">h0</div>
+        <Wordmark size="text-5xl" class="wizard-mark" aria-hidden="true" />
         <h1 class="wizard-title">Welcome to hal0</h1>
         <p class="wizard-sub">Local AI for your home. Eight quick steps to your first model.</p>
       </div>
@@ -702,14 +703,9 @@ const canAdvance = computed(() => {
   background: var(--hal0-accent);
   box-shadow: 0 0 8px var(--hal0-accent);
 }
-.wizard-logo {
-  width: 56px; height: 56px; border-radius: 14px;
-  background: var(--hal0-accent);
-  color: #000;
-  font-family: var(--hal0-font-display); font-size: 22px; font-weight: 700;
-  display: grid; place-items: center; margin: 0 auto 18px;
-  letter-spacing: -0.04em;
-  box-shadow: 0 0 32px color-mix(in srgb, var(--hal0-accent) 30%, transparent);
+.wizard-mark {
+  display: flex; justify-content: center; margin: 0 auto 18px;
+  filter: drop-shadow(0 0 24px color-mix(in srgb, var(--hal0-accent) 30%, transparent));
 }
 .wizard-title { font-size: 28px; font-weight: 600; color: var(--hal0-fg); margin: 0 0 8px; letter-spacing: -0.02em; }
 .wizard-sub   { font-size: 14px; color: var(--hal0-fg-muted); margin: 0; line-height: 1.5; }
