@@ -76,7 +76,9 @@ The API lives at `http://127.0.0.1:8080`, the dashboard at the Vite dev
 server URL (usually `http://127.0.0.1:5173`).
 
 Run `hal0 doctor` any time to re-check pre-flight (systemd / python /
-docker / disk / ports).
+docker / disk / ports). `hal0 model pull <ref>` streams models from
+Hugging Face into the registry, and `hal0 uninstall [--keep-data]` tears
+down a running install (thin wrapper over `installer/uninstall.sh`).
 
 ### Auth posture
 

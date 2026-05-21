@@ -639,7 +639,7 @@ hal0 config show
 hal0 config edit                     # $EDITOR
 hal0 config migrate
 hal0 config validate
-hal0 uninstall [--keep-data]
+hal0 uninstall [--keep-data] [--force] [--dev]
 ```
 
 Implementation: Typer (typed click). Each command hits the local API on

@@ -8,6 +8,9 @@ Entry point declared in pyproject.toml:
 from __future__ import annotations
 
 import json as jsonlib
+import os
+import sys
+from pathlib import Path
 
 import typer
 import uvicorn
@@ -18,7 +21,6 @@ from rich.table import Table
 
 import hal0
 from hal0.cli._shared import (
-    NOT_IMPLEMENTED,
     CliApiError,
     _api_base,
     _api_unreachable,
@@ -189,7 +191,53 @@ def uninstall(
         "--keep-data",
         help="Preserve /var/lib/hal0/ (model cache, openwebui state, slot data).",
     ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        "-f",
+        help="Skip the DELETE confirmation prompt (also honours HAL0_FORCE=1).",
+    ),
+    dev: bool = typer.Option(
+        False,
+        "--dev",
+        help="Tear down a dev-mode install rooted at $PWD/.hal0ai (or $HAL0_PREFIX).",
+    ),
 ) -> None:
-    """Uninstall hal0 from this system."""
-    # Phase 5: orchestrate systemctl stop/disable + dir removal
-    console.print(NOT_IMPLEMENTED)
+    """Uninstall hal0 from this system.
+
+    Thin wrapper around ``installer/uninstall.sh`` — the shell script is the
+    source of truth and mirrors install.sh's path layout. We exec it so the
+    script inherits the live TTY for its DELETE confirmation prompt.
+    """
+    import shutil
+
+    # Editable install: src/hal0/__init__.py -> repo root is parents[2].
+    repo_root = Path(hal0.__file__).resolve().parents[2]
+    script = repo_root / "installer" / "uninstall.sh"
+    if not script.is_file():
+        die(
+            f"uninstall.sh not found at {script}. "
+            "This hal0 install looks packaged differently — run the script directly."
+        )
+
+    if not shutil.which("bash"):
+        die("bash is required to run the uninstaller.")
+
+    # The script's DELETE prompt needs an interactive stdin. Refuse early in
+    # non-interactive contexts unless the caller has opted out of the prompt.
+    force_env = os.environ.get("HAL0_FORCE") == "1"
+    if not (keep_data or force or force_env) and not sys.stdin.isatty():
+        die(
+            "Refusing to uninstall non-interactively without --force or "
+            "--keep-data — the shell script's DELETE prompt would hang."
+        )
+
+    argv = ["bash", str(script)]
+    if keep_data:
+        argv.append("--keep-data")
+    if force:
+        argv.append("--force")
+    if dev:
+        argv.append("--dev")
+
+    os.execvp("bash", argv)

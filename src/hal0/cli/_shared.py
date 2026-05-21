@@ -11,7 +11,7 @@ from rich.console import Console
 
 _console = Console(stderr=True)
 
-NOT_IMPLEMENTED = "[not implemented yet — Phase N: see PLAN.md §13]"
+NOT_IMPLEMENTED = "not implemented yet — see PLAN.md §13"
 
 
 def _api_base() -> str:
