@@ -206,6 +206,23 @@ const hasData = computed(() => !!(embedSel.value || voiceSel.value || imgSel.val
 .cap-select:focus { outline: none; border-color: var(--color-border-hi); }
 .cap-select:disabled { opacity: 0.5; cursor: not-allowed; }
 
+/* Two-dropdown picker — model (75%) on the left, backend (25%) on the
+ * right. Explicit grid columns avoid the flex-basis ambiguity that
+ * width:100% on .cap-select otherwise causes (a flex item with
+ * flex:0 0 auto picks up width:100% as its basis and steals the row).
+ * Stacks below 480px so the cards remain usable in narrow layouts. */
+.cap-pickers {
+  display: grid;
+  grid-template-columns: 3fr 1fr;
+  gap: 8px;
+  align-items: stretch;
+}
+.cap-select-model,
+.cap-select-backend { min-width: 0; }
+@media (max-width: 480px) {
+  .cap-pickers { grid-template-columns: 1fr; }
+}
+
 /* Meta line: chip + supplementary mono-font fragments */
 .cap-meta {
   display: flex; flex-wrap: wrap; align-items: center; gap: 8px;

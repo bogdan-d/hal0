@@ -299,7 +299,6 @@ const headerPill = computed(() => {
   color: var(--color-danger);
 }
 
-.cap-pickers { display: flex; gap: 8px; align-items: stretch; }
-.cap-select-model    { flex: 1; min-width: 0; }
-.cap-select-backend  { flex: 0 0 auto; min-width: 110px; }
+/* Picker layout lives in the shared non-scoped block in
+ * CapabilitiesSection.vue so all three cards stay aligned. */
 </style>
