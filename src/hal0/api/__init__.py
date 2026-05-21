@@ -33,9 +33,6 @@ from hal0.api.routes import (
     events as events_routes,
 )
 from hal0.api.routes import (
-    proxmox as proxmox_routes,
-)
-from hal0.api.routes import (
     hardware,
     health,
     images,
@@ -47,6 +44,9 @@ from hal0.api.routes import (
     slots,
     updater,
     v1,
+)
+from hal0.api.routes import (
+    proxmox as proxmox_routes,
 )
 from hal0.capabilities.orchestrator import CapabilityOrchestrator
 from hal0.config.loader import ConfigParseError, load_hal0_config, load_upstreams_config
