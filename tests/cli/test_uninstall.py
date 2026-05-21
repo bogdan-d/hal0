@@ -132,9 +132,7 @@ def test_uninstall_non_tty_with_hal0_force_env(monkeypatch: pytest.MonkeyPatch) 
     assert captured["argv"][1].endswith("/installer/uninstall.sh")
 
 
-def test_uninstall_missing_script_dies(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_uninstall_missing_script_dies(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """If uninstall.sh isn't where we expect, fail loudly instead of running."""
     import hal0
 

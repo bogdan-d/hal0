@@ -230,8 +230,7 @@ def test_create_emits_registered_with_source(
     assert r.status_code == 201, r.text
     events = _events_since(crud_client, pre, "model.registered")
     assert any(
-        ev["data"].get("id") == "hand-1" and ev["data"].get("source") == "manual"
-        for ev in events
+        ev["data"].get("id") == "hand-1" and ev["data"].get("source") == "manual" for ev in events
     ), events
 
 
@@ -245,8 +244,7 @@ def test_create_defaults_source_to_manual(
     crud_client.post("/api/models", json={"id": "h2", "path": str(fpath)})
     events = _events_since(crud_client, pre, "model.registered")
     assert any(
-        ev["data"].get("id") == "h2" and ev["data"].get("source") == "manual"
-        for ev in events
+        ev["data"].get("id") == "h2" and ev["data"].get("source") == "manual" for ev in events
     ), events
 
 
@@ -300,8 +298,7 @@ def test_update_changed_fields_only_lists_actual_changes(
     crud_client.put("/api/models/noop", json={"name": "Same"})
     events = _events_since(crud_client, pre, "model.updated")
     assert any(
-        ev["data"].get("id") == "noop" and ev["data"]["changed_fields"] == []
-        for ev in events
+        ev["data"].get("id") == "noop" and ev["data"]["changed_fields"] == [] for ev in events
     )
 
 
@@ -400,8 +397,7 @@ def test_delete_cascade_clears_slot_default_and_emits_model_deleted_last(
     assert len(deleted) == 1, f"expected exactly one model.deleted, got {new_events}"
     deleted_id = deleted[0]["id"]
     slot_states = [
-        ev for ev in new_events
-        if ev["type"] == "slot.state" and ev["source"] == "slot:primary"
+        ev for ev in new_events if ev["type"] == "slot.state" and ev["source"] == "slot:primary"
     ]
     assert slot_states, "expected slot.state events from the unload cascade"
     for ev in slot_states:
@@ -431,8 +427,7 @@ def test_delete_unreferenced_model_emits_with_empty_affected_slots(
 
     events = _events_since(crud_client, pre, "model.deleted")
     assert any(
-        ev["data"].get("id") == "lonely" and ev["data"]["affected_slots"] == []
-        for ev in events
+        ev["data"].get("id") == "lonely" and ev["data"]["affected_slots"] == [] for ev in events
     )
 
 
@@ -478,6 +473,5 @@ async def test_model_registered_reaches_live_subscriber(
         await asyncio.wait_for(task, timeout=2.0)
 
     assert any(
-        ev["type"] == "model.registered" and ev["data"].get("id") == "sub-1"
-        for ev in received
+        ev["type"] == "model.registered" and ev["data"].get("id") == "sub-1" for ev in received
     )

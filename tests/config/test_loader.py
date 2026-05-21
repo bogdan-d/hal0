@@ -244,9 +244,7 @@ class TestSlotConfigRoundTrip:
 
     # ── Phase 1 A3: [server].extra_args ──────────────────────────────────
 
-    def test_server_extra_args_missing_defaults_to_none(
-        self, tmp_hal0_home: str
-    ) -> None:
+    def test_server_extra_args_missing_defaults_to_none(self, tmp_hal0_home: str) -> None:
         """A slot TOML without a [server] table loads with server.extra_args = None."""
         paths.slots_config_dir().mkdir(parents=True, exist_ok=True)
         (paths.slots_config_dir() / "primary.toml").write_text(
@@ -282,9 +280,7 @@ class TestSlotConfigRoundTrip:
             data = tomllib.load(f)
         assert data["server"]["extra_args"] == "--rope-freq-base 500000"
 
-    def test_unset_server_extra_args_does_not_write_empty_table(
-        self, tmp_hal0_home: str
-    ) -> None:
+    def test_unset_server_extra_args_does_not_write_empty_table(self, tmp_hal0_home: str) -> None:
         """A default ServerConfig (all None) elides the [server] table on disk."""
         cfg = SlotConfig(name="primary", port=8081)
         save_slot_config(cfg)

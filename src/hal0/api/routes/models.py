@@ -24,8 +24,7 @@ from hal0.api.middleware.error_codes import BadRequest, Hal0Error
 from hal0.config.loader import load_hal0_config
 from hal0.registry.curated import CURATED, CuratedModel, HaloaiModel, get_curated
 from hal0.registry.detect import DetectionResult, detect
-from hal0.registry.discover import is_skippable
-from hal0.registry.discover import scan_and_register
+from hal0.registry.discover import is_skippable, scan_and_register
 from hal0.registry.pull import (
     PullInvalidSource,
     PullJob,
@@ -373,9 +372,7 @@ async def _commit_scan_rows(
             try:
                 defaults_obj = ModelDefaults.model_validate(defaults_payload)
             except Exception as exc:
-                skipped.append(
-                    {"path": str(resolved), "reason": f"invalid_defaults:{exc}"}
-                )
+                skipped.append({"path": str(resolved), "reason": f"invalid_defaults:{exc}"})
                 continue
 
         size_bytes = 0
@@ -542,7 +539,7 @@ async def update_model(model_id: str, request: Request) -> dict[str, Any]:
 
     after = model.model_dump(mode="python")
     changed: list[str] = []
-    for key in body.keys():
+    for key in body:
         if key == "id":
             continue
         if before.get(key) != after.get(key):
@@ -616,11 +613,10 @@ def _clear_slot_default(slot_path: Path, slot_cfg: dict[str, Any]) -> None:
         new_model = dict(model_sect)
         new_model["default"] = ""
         new_cfg["model"] = new_model
-    try:
+    # Cascade continues if the write fails; the dangling reference is
+    # surfaced later.
+    with contextlib.suppress(OSError):
         slot_path.write_bytes(tomli_w.dumps(new_cfg).encode("utf-8"))
-    except OSError:
-        # Cascade continues; the dangling reference is surfaced later.
-        pass
 
 
 async def _unload_slot_if_running(request: Request, slot_name: str) -> None:
@@ -769,9 +765,7 @@ async def _run_pull_with_events(
     signal SSE listens to so the byte counts stay authoritative.
     """
     if event_bus is None:
-        await run_pull(
-            job, hf_repo=hf_repo, hf_file=hf_file, registry=registry, hf_token=hf_token
-        )
+        await run_pull(job, hf_repo=hf_repo, hf_file=hf_file, registry=registry, hf_token=hf_token)
         return
 
     async def _emit_progress() -> None:
@@ -807,9 +801,7 @@ async def _run_pull_with_events(
 
     progress_task = asyncio.create_task(_emit_progress())
     try:
-        await run_pull(
-            job, hf_repo=hf_repo, hf_file=hf_file, registry=registry, hf_token=hf_token
-        )
+        await run_pull(job, hf_repo=hf_repo, hf_file=hf_file, registry=registry, hf_token=hf_token)
     finally:
         progress_task.cancel()
         with contextlib.suppress(asyncio.CancelledError, Exception):

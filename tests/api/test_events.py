@@ -331,5 +331,3 @@ async def test_stream_since_skips_backfill() -> None:
         assert collected, "expected at least one event past the cursor"
         assert all(ev["id"] > cursor for ev in collected)
         assert any(ev["message"] == "new" for ev in collected)
-
-

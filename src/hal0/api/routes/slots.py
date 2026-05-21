@@ -259,7 +259,7 @@ async def _systemd_show(unit: str, *props: str) -> dict[str, str]:
             stderr=asyncio.subprocess.DEVNULL,
         )
         out, _ = await asyncio.wait_for(proc.communicate(), timeout=2.0)
-    except (FileNotFoundError, asyncio.TimeoutError, OSError):
+    except (TimeoutError, FileNotFoundError, OSError):
         return {}
     if proc.returncode != 0:
         return {}
@@ -347,7 +347,7 @@ async def _docker_container_mem_bytes(container_name: str) -> int:
             stderr=asyncio.subprocess.DEVNULL,
         )
         out, _ = await asyncio.wait_for(proc.communicate(), timeout=1.5)
-    except (FileNotFoundError, asyncio.TimeoutError, OSError):
+    except (TimeoutError, FileNotFoundError, OSError):
         return 0
     if proc.returncode != 0:
         return 0
@@ -358,7 +358,7 @@ async def _docker_container_mem_bytes(container_name: str) -> int:
     if pid <= 0:
         return 0
     try:
-        with open(f"/proc/{pid}/cgroup", "r", encoding="utf-8") as f:
+        with open(f"/proc/{pid}/cgroup", encoding="utf-8") as f:
             cg_line = f.readline().strip()
     except OSError:
         return 0
@@ -367,7 +367,7 @@ async def _docker_container_mem_bytes(container_name: str) -> int:
         return 0
     cg_rel = cg_line.split("::", 1)[1].lstrip("/")
     try:
-        with open(f"/sys/fs/cgroup/{cg_rel}/memory.current", "r", encoding="utf-8") as f:
+        with open(f"/sys/fs/cgroup/{cg_rel}/memory.current", encoding="utf-8") as f:
             return int(f.read().strip() or 0)
     except (OSError, ValueError):
         return 0
@@ -412,9 +412,7 @@ async def _local_slot_metrics(request: Request) -> dict[str, dict[str, Any]]:
                 "ActiveState",
             )
         )
-        mem_task = asyncio.create_task(
-            _docker_container_mem_bytes(f"hal0-slot-{slot.name}")
-        )
+        mem_task = asyncio.create_task(_docker_container_mem_bytes(f"hal0-slot-{slot.name}"))
         metrics_task = asyncio.create_task(_scrape_llama_metrics(slot.port))
         props, mem_bytes, llm_metrics = await asyncio.gather(
             props_task, mem_task, metrics_task, return_exceptions=False
@@ -640,8 +638,7 @@ async def load_slot(name: str, request: Request) -> dict[str, object]:
             from hal0.registry.store import ModelNotFound
 
             raise ModelNotFound(
-                f"model {model_id!r} is not in the registry "
-                f"(slot {name!r} not touched)",
+                f"model {model_id!r} is not in the registry (slot {name!r} not touched)",
                 details={"model_id": model_id, "slot": name},
             )
     snap = await sm.load(name, model_id=model_id)
@@ -689,8 +686,7 @@ async def swap_slot(name: str, request: Request) -> dict[str, object]:
         from hal0.registry.store import ModelNotFound
 
         raise ModelNotFound(
-            f"model {model_id!r} is not in the registry "
-            f"(slot {name!r} not touched)",
+            f"model {model_id!r} is not in the registry (slot {name!r} not touched)",
             details={"model_id": model_id, "slot": name},
         )
     snap = await sm.swap(name, model_id)

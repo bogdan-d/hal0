@@ -27,7 +27,6 @@ from hal0.config.loader import load_hardware_info
 from hal0.registry.curated import CURATED, CuratedModel, HaloaiModel
 from hal0.registry.store import ModelRegistry
 
-
 # ── Capability → child mappings ───────────────────────────────────────────────
 
 # Capability strings that may appear on a Model / CuratedModel mapped to
@@ -296,9 +295,7 @@ def _backend_variants(entry: Any) -> list[str]:
     return out
 
 
-def _provider_for_backend(
-    entry_backend: str, backend_id: str, *, entry: Any = None
-) -> str:
+def _provider_for_backend(entry_backend: str, backend_id: str, *, entry: Any = None) -> str:
     """Pick the provider that pairs with this backend / entry combo.
 
     Resolution order:
@@ -389,10 +386,9 @@ def _is_pullable(entry: Any, *, registry: ModelRegistry | None) -> bool:
     intentionally not pullable.
     """
     repo = (getattr(entry, "hf_repo", "") or "").strip()
-    filename = (
-        (getattr(entry, "hf_file", "") or "").strip()
-        or (getattr(entry, "hf_filename", "") or "").strip()
-    )
+    filename = (getattr(entry, "hf_file", "") or "").strip() or (
+        getattr(entry, "hf_filename", "") or ""
+    ).strip()
     if repo and filename:
         return True
     if registry is None:

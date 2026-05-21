@@ -751,11 +751,7 @@ class SlotManager:
                 adopted = await self._maybe_adopt_running_slot(slot_name, cfg)
                 if adopted is not None:
                     return adopted
-        elif (
-            observed in (SlotState.READY, SlotState.SERVING)
-            and active
-            and not rec.model_id
-        ):
+        elif observed in (SlotState.READY, SlotState.SERVING) and active and not rec.model_id:
             # Migration / self-healing: a stale state.json from before the
             # adoption guard could have READY/SERVING with model_id="".
             # Re-run adoption when the provider actually needs a model so
@@ -1576,11 +1572,7 @@ class SlotManager:
         # with model_id=None.  For providers that need an explicit model
         # we either sniff one from /v1/models or demote to IDLE.
         detected_model: str | None = None
-        if (
-            resolved == SlotState.READY
-            and model_id is None
-            and provider_requires_model(provider)
-        ):
+        if resolved == SlotState.READY and model_id is None and provider_requires_model(provider):
             detected_model = await _fetch_first_concrete_model(port)
             if detected_model:
                 model_id = detected_model

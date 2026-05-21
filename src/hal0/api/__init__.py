@@ -19,16 +19,16 @@ from hal0.api.routes import (
     auth as auth_routes,
 )
 from hal0.api.routes import (
-    config as config_routes,
-)
-from hal0.api.routes import (
-    events as events_routes,
-)
-from hal0.api.routes import (
     backends as backends_routes,
 )
 from hal0.api.routes import (
     capabilities as capabilities_routes,
+)
+from hal0.api.routes import (
+    config as config_routes,
+)
+from hal0.api.routes import (
+    events as events_routes,
 )
 from hal0.api.routes import (
     hardware,

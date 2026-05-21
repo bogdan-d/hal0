@@ -372,7 +372,9 @@ class HaloaiModel(BaseModel):
         default="llamacpp",
         description="Backend runtime: flm | llamacpp | kokoro | moonshine | vibevoice | minimax.",
     )
-    size_bytes: int | None = Field(default=None, description="On-disk size if reported by upstream.")
+    size_bytes: int | None = Field(
+        default=None, description="On-disk size if reported by upstream."
+    )
     params: int | None = Field(default=None, description="Parameter count if reported by upstream.")
     context_size: int | None = Field(default=None, description="Native context window if known.")
 

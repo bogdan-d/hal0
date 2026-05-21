@@ -313,9 +313,9 @@ def is_skippable(p: Path) -> bool:
 
 
 __all__ = [
-    "is_skippable",
     "CandidateModel",
     "find_candidates",
+    "is_skippable",
     "register_candidate",
     "scan_and_register",
 ]

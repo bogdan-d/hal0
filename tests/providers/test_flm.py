@@ -145,9 +145,7 @@ def test_container_spec_command_does_not_prefix_binary_path(
         f"first command arg must be an flm subcommand, not an absolute "
         f"path; got {first!r}. Full command: {spec.command!r}"
     )
-    assert first == "serve", (
-        f"expected first arg to be 'serve' subcommand; got {first!r}"
-    )
+    assert first == "serve", f"expected first arg to be 'serve' subcommand; got {first!r}"
 
 
 def test_container_spec_passes_multiplex_flags_in_command(
@@ -178,9 +176,7 @@ def test_container_spec_ld_library_path_includes_xrt(
     """
     spec = provider.container_spec(slot_cfg, model_info)
     ld = spec.env.get("LD_LIBRARY_PATH", "")
-    assert "/opt/xilinx/xrt/lib" in ld, (
-        f"LD_LIBRARY_PATH missing XRT runtime path: {ld!r}"
-    )
+    assert "/opt/xilinx/xrt/lib" in ld, f"LD_LIBRARY_PATH missing XRT runtime path: {ld!r}"
 
 
 # ─── health (TIER1 inference round-trip) ──────────────────────────────────────

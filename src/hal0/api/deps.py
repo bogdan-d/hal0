@@ -60,9 +60,7 @@ def get_hardware(request: Request) -> HardwareProbe:
 def get_capability_orchestrator(request: Request) -> CapabilityOrchestrator:
     obj = _state(request, "capability_orchestrator")
     if obj is None:
-        raise RuntimeError(
-            "capability orchestrator not initialized (lifespan did not run)"
-        )
+        raise RuntimeError("capability orchestrator not initialized (lifespan did not run)")
     return cast("CapabilityOrchestrator", obj)
 
 

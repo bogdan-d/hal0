@@ -297,7 +297,6 @@ class CapabilityOrchestrator:
         before_enabled = existing.enabled
         before_model = existing.model
         before_backend = existing.backend
-        before_provider = existing.provider
 
         # Shallow-merge the partial into the existing selection.
         merged_data: dict[str, Any] = existing.model_dump()
@@ -317,9 +316,7 @@ class CapabilityOrchestrator:
         # caller didn't explicitly clear it. We don't fail when the model
         # is empty — that's the "unset" state.
         if merged.model:
-            self._validate_model_in_catalog(
-                slot, child, merged.model, merged.backend
-            )
+            self._validate_model_in_catalog(slot, child, merged.model, merged.backend)
 
         cfg.selections[slot][child] = merged
 
@@ -327,7 +324,9 @@ class CapabilityOrchestrator:
         enabled_changed = merged.enabled != before_enabled
         model_changed = merged.model != before_model
         backend_changed = merged.backend != before_backend
-        provider_changed = merged.provider != before_provider
+        # provider change does not gate any branch today — the slot TOML
+        # rewrite below covers it. Reintroduce if the swap path grows a
+        # provider-aware case.
 
         try:
             # Reconcile the slot TOML against the merged selection whenever
@@ -431,8 +430,7 @@ class CapabilityOrchestrator:
         legal_backends = [b["id"] for b in match.get("backends", [])]
         if backend_id not in legal_backends:
             raise BadRequest(
-                f"backend {backend_id!r} cannot serve model {model_id!r} "
-                f"for {slot}.{child}",
+                f"backend {backend_id!r} cannot serve model {model_id!r} for {slot}.{child}",
                 code="capability.illegal_backend_model_pair",
                 details={
                     "slot": slot,
@@ -443,9 +441,7 @@ class CapabilityOrchestrator:
                 },
             )
 
-    async def _ensure_slot_exists(
-        self, slot_name: str, selection: CapabilitySelection
-    ) -> None:
+    async def _ensure_slot_exists(self, slot_name: str, selection: CapabilitySelection) -> None:
         """Auto-create the slot TOML on first use of a non-builtin child.
 
         ``embed-rerank`` is the canonical example: it isn't a builtin
@@ -539,9 +535,9 @@ class CapabilityOrchestrator:
 
 
 __all__ = [
+    "LEGAL_SLOTS",
     "CapabilityApplyFailed",
     "CapabilityOrchestrator",
-    "LEGAL_SLOTS",
     "child_to_slot",
     "legal_children",
 ]

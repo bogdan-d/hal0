@@ -81,6 +81,7 @@ def _resolve_model_leaf(model_path: str, variant: str) -> str:
             return str(leaf)
     return model_path
 
+
 # ── Timeouts ───────────────────────────────────────────────────────────────────
 _HEALTH_TIMEOUT = httpx.Timeout(5.0)
 _INFER_TIMEOUT = httpx.Timeout(connect=5.0, read=120.0, write=10.0, pool=10.0)

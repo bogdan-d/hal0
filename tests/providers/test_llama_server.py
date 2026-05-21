@@ -270,9 +270,7 @@ def test_container_spec_returns_frozen_dataclass(
 ) -> None:
     # Pretend /dev/kfd + /dev/dri exist so the host-aware device filter
     # in container_spec keeps them in the rendered spec.
-    monkeypatch.setattr(
-        "hal0.providers.llama_server.Path.exists", lambda self: True
-    )
+    monkeypatch.setattr("hal0.providers.llama_server.Path.exists", lambda self: True)
     spec = provider.container_spec(slot_cfg, model_info)
     assert spec.image == _HAL0_TOOLBOX_IMAGES["vulkan"]
     assert spec.port == 8081
@@ -291,9 +289,7 @@ def test_container_spec_filters_missing_devices(
     model_info: dict[str, Any],
 ) -> None:
     """A CPU-only / virtio-gpu host without /dev/kfd gets an empty devices list."""
-    monkeypatch.setattr(
-        "hal0.providers.llama_server.Path.exists", lambda self: False
-    )
+    monkeypatch.setattr("hal0.providers.llama_server.Path.exists", lambda self: False)
     spec = provider.container_spec(slot_cfg, model_info)
     assert spec.devices == []
 
@@ -342,6 +338,7 @@ def test_render_systemd_override_emits_full_docker_line(
     # Pretend /dev/kfd + /dev/dri exist on the host so the device filter
     # in container_spec keeps them in the rendered docker line.
     import hal0.providers.llama_server as ls_mod
+
     monkeypatch.setattr(ls_mod.Path, "exists", lambda self: True)
     out = provider.render_systemd_override(
         "primary",
