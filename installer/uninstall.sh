@@ -182,10 +182,15 @@ if [[ "${KEEP_DATA}" -eq 1 ]]; then
 else
     # Confirmation unless forced
     if [[ "${HAL0_FORCE}" -ne 1 ]]; then
-        printf '\n%s%sWARNING:%s This will delete:\n' "${RED}" "${BOLD}" "${RESET}"
+        # %b interprets backslash escapes in the substituted strings —
+        # the BOLD/RED/RESET helpers are stored as literal `\033[...m`
+        # sequences (line 23), so %s would print them verbatim instead of
+        # invoking the terminal's SGR. Same gotcha bit the WARNING + the
+        # "Type DELETE" prompt; both now use %b.
+        printf '\n%b%bWARNING:%b This will delete:\n' "${RED}" "${BOLD}" "${RESET}"
         printf '  %s      (config + slot definitions)\n' "${ETC_DIR}"
         printf '  %s  (models, registry, openwebui state)\n\n' "${VAR_DIR}"
-        printf 'Type %sDELETE%s to confirm, or Ctrl-C to cancel: ' "${BOLD}" "${RESET}"
+        printf 'Type %bDELETE%b to confirm, or Ctrl-C to cancel: ' "${BOLD}" "${RESET}"
         read -r CONFIRM
         if [[ "${CONFIRM}" != "DELETE" ]]; then
             warn "Aborted — data preserved."
