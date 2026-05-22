@@ -29,6 +29,7 @@ import { useCapabilities } from '../../composables/useCapabilities.js'
 import { useSlotMetrics } from '../../composables/useStats.js'
 import { useToastsStore } from '../../stores/toasts.js'
 import { usePullJob, fmtBytes } from '../../composables/usePullJob.js'
+import { useSystemStore } from '../../stores/system.js'
 import CapabilityToggle from './CapabilityToggle.vue'
 
 const props = defineProps({
@@ -38,6 +39,7 @@ const props = defineProps({
 
 const cap = useCapabilities()
 const toasts = useToastsStore()
+const system = useSystemStore()
 const { metrics } = useSlotMetrics()
 
 // Map { capability → upstream slot name }. Mirrors the backend's slot
@@ -46,13 +48,33 @@ const { metrics } = useSlotMetrics()
 const SLOT_NAME = { embed: 'embed', rerank: 'embed-rerank' }
 const ENDPOINTS  = { embed: '/v1/embeddings', rerank: '/v1/rerankings' }
 
+// Port of the upstream slot, surfaced alongside the endpoint so
+// operators can curl the slot directly without cross-referencing
+// /api/slots.
+function portFor(capability) {
+  const name = SLOT_NAME[capability]
+  return system.slots.find((s) => s.name === name)?.port ?? null
+}
+
 // Per-child loading flag for the toggle spinner. Keyed by capability so
 // flipping one pill doesn't lock the other.
 const togglePending = ref({ embed: false, rerank: false })
 
 function fmtMem(mb) {
   if (mb == null) return '—'
-  return mb >= 1024 ? `${(mb / 1024).toFixed(1)} GB` : `${mb} MB`
+  return mb >= 1024 ? `${(mb / 1024).toFixed(2)} GB` : `${mb.toFixed(2)} MB`
+}
+
+// Compact uptime — "1h23m" / "12m" / "45s". Drops the smaller unit once
+// we're over an hour so the cell stays narrow.
+function fmtUptime(sec) {
+  if (sec == null) return '—'
+  const s = Math.floor(sec)
+  if (s < 60) return `${s}s`
+  if (s < 3600) return `${Math.floor(s / 60)}m`
+  const h = Math.floor(s / 3600)
+  const m = Math.floor((s % 3600) / 60)
+  return m ? `${h}h ${m}m` : `${h}h`
 }
 
 // Grouped per-model catalog entries for this child capability.
@@ -190,30 +212,37 @@ function backendFor(capability) {
 
 // ── Live metrics ───────────────────────────────────────────────────────
 // Read directly from useSlotMetrics() keyed by the upstream slot name.
-// We synthesise a small per-capability row from real numbers: headline =
-// requests-per-sec (rough proxy for "embedding throughput"), latency
-// comes from the metrics blob if present, mem from `mem_rss_mb`.
-// Cells that aren't available render `—` rather than fake data.
+// Per-capability row pulls from real backend fields: active reqs from
+// `requests_processing`, tok/s from `tokens_per_sec`, memory from
+// `mem_rss_mb`, uptime from `uptime_seconds`. Cells without data render
+// `—` rather than fake numbers.
 function metricsFor(capability) {
   const slotName = SLOT_NAME[capability]
   return slotName ? (metrics.value?.[slotName] ?? null) : null
 }
 
-function reqRate(m) {
+// Concurrent in-flight requests — integer, no rate computation. Backend
+// emits `requests_processing` from the slot's queue depth.
+function activeReqs(m) {
   if (!m) return null
-  if (m.requests_per_sec != null) return m.requests_per_sec
-  if (m.tokens_per_sec   != null) return m.tokens_per_sec
-  return null
+  return m.requests_processing ?? null
 }
 
-function latency(m) {
+// Throughput — only meaningful for token-streaming slots (chat). The
+// embed/rerank/voice/img slots don't report it; the cell renders "—".
+function tokRate(m) {
   if (!m) return null
-  return m.latency_ms_p50 ?? m.p50_latency_ms ?? m.latency_p50 ?? null
+  return m.tokens_per_sec ?? m.tps ?? null
 }
 
 function mem(m) {
   if (!m) return null
   return m.mem_rss_mb ?? m.vram_mb ?? m.gtt_mb ?? null
+}
+
+function uptime(m) {
+  if (!m) return null
+  return m.uptime_seconds ?? null
 }
 
 const embedActive = computed(() => {
@@ -257,7 +286,10 @@ const headerPill = computed(() => {
             {{ selection?.embed?.status || 'offline' }}
           </span>
           <span class="cap-section-label">Embed</span>
-          <span class="cap-section-sub">{{ ENDPOINTS.embed }}</span>
+          <span class="cap-section-sub">
+            {{ ENDPOINTS.embed }}
+            <span v-if="portFor('embed')" class="cap-section-port">· :{{ portFor('embed') }}</span>
+          </span>
         </span>
         <CapabilityToggle
           :model-value="!!selection?.embed?.enabled"
@@ -307,17 +339,21 @@ const headerPill = computed(() => {
         <span class="cap-meta-item" v-if="backendFor('embed')?.multiplex">⚡ shared {{ backendFor('embed').label }} process</span>
       </div>
       <div v-if="embedActive" class="cap-metrics">
-        <div class="cap-metric cap-metric-headline" :class="{ 'cap-metric-na': reqRate(metricsFor('embed')) == null }">
-          <span class="cap-metric-v">{{ reqRate(metricsFor('embed')) != null ? Number(reqRate(metricsFor('embed'))).toFixed(1) : '—' }}</span>
-          <span class="cap-metric-u">req/s</span>
+        <div class="cap-metric cap-metric-headline" :class="{ 'cap-metric-na': activeReqs(metricsFor('embed')) == null }">
+          <span class="cap-metric-v">{{ activeReqs(metricsFor('embed')) ?? '—' }}</span>
+          <span class="cap-metric-u">active reqs</span>
         </div>
-        <div class="cap-metric" :class="{ 'cap-metric-na': latency(metricsFor('embed')) == null }">
-          <span class="cap-metric-v">{{ latency(metricsFor('embed')) ?? '—' }}</span>
-          <span class="cap-metric-u">ms p50</span>
+        <div class="cap-metric" :class="{ 'cap-metric-na': tokRate(metricsFor('embed')) == null }">
+          <span class="cap-metric-v">{{ tokRate(metricsFor('embed')) != null ? Number(tokRate(metricsFor('embed'))).toFixed(1) : '—' }}</span>
+          <span class="cap-metric-u">tok/s</span>
         </div>
         <div class="cap-metric cap-metric-mem">
           <span class="cap-metric-v">{{ fmtMem(mem(metricsFor('embed'))) }}</span>
-          <span class="cap-metric-u">resident</span>
+          <span class="cap-metric-u">memory</span>
+        </div>
+        <div class="cap-metric" :class="{ 'cap-metric-na': uptime(metricsFor('embed')) == null }">
+          <span class="cap-metric-v">{{ fmtUptime(uptime(metricsFor('embed'))) }}</span>
+          <span class="cap-metric-u">uptime</span>
         </div>
       </div>
     </section>
@@ -331,7 +367,10 @@ const headerPill = computed(() => {
             {{ selection?.rerank?.status || 'offline' }}
           </span>
           <span class="cap-section-label">Rerank</span>
-          <span class="cap-section-sub">{{ ENDPOINTS.rerank }}</span>
+          <span class="cap-section-sub">
+            {{ ENDPOINTS.rerank }}
+            <span v-if="portFor('rerank')" class="cap-section-port">· :{{ portFor('rerank') }}</span>
+          </span>
         </span>
         <CapabilityToggle
           :model-value="!!selection?.rerank?.enabled"
@@ -381,17 +420,21 @@ const headerPill = computed(() => {
         <span class="cap-meta-item" v-if="backendFor('rerank')?.multiplex">⚡ shared {{ backendFor('rerank').label }} process</span>
       </div>
       <div v-if="rerankActive" class="cap-metrics">
-        <div class="cap-metric cap-metric-headline" :class="{ 'cap-metric-na': reqRate(metricsFor('rerank')) == null }">
-          <span class="cap-metric-v">{{ reqRate(metricsFor('rerank')) != null ? Number(reqRate(metricsFor('rerank'))).toFixed(1) : '—' }}</span>
-          <span class="cap-metric-u">req/s</span>
+        <div class="cap-metric cap-metric-headline" :class="{ 'cap-metric-na': activeReqs(metricsFor('rerank')) == null }">
+          <span class="cap-metric-v">{{ activeReqs(metricsFor('rerank')) ?? '—' }}</span>
+          <span class="cap-metric-u">active reqs</span>
         </div>
-        <div class="cap-metric" :class="{ 'cap-metric-na': latency(metricsFor('rerank')) == null }">
-          <span class="cap-metric-v">{{ latency(metricsFor('rerank')) ?? '—' }}</span>
-          <span class="cap-metric-u">ms p50</span>
+        <div class="cap-metric" :class="{ 'cap-metric-na': tokRate(metricsFor('rerank')) == null }">
+          <span class="cap-metric-v">{{ tokRate(metricsFor('rerank')) != null ? Number(tokRate(metricsFor('rerank'))).toFixed(1) : '—' }}</span>
+          <span class="cap-metric-u">tok/s</span>
         </div>
         <div class="cap-metric cap-metric-mem">
           <span class="cap-metric-v">{{ fmtMem(mem(metricsFor('rerank'))) }}</span>
-          <span class="cap-metric-u">resident</span>
+          <span class="cap-metric-u">memory</span>
+        </div>
+        <div class="cap-metric" :class="{ 'cap-metric-na': uptime(metricsFor('rerank')) == null }">
+          <span class="cap-metric-v">{{ fmtUptime(uptime(metricsFor('rerank'))) }}</span>
+          <span class="cap-metric-u">uptime</span>
         </div>
       </div>
     </section>
