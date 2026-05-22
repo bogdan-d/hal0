@@ -18,6 +18,12 @@ from hal0.api.auth import rate_limit as auth_rate_limit
 from hal0.api.middleware import error_codes, request_id
 from hal0.api.middleware.auth import require_token
 from hal0.api.routes import (
+    agents as agents_routes,
+)
+from hal0.api.routes import (
+    approvals as approvals_routes,
+)
+from hal0.api.routes import (
     auth as auth_routes,
 )
 from hal0.api.routes import (
@@ -373,8 +379,22 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         names=[u.name for u in upstreams.list()],
     )
 
+    # Each mounted FastMCP server has a ``StreamableHTTPSessionManager``
+    # whose anyio task group must be started inside an async-context
+    # before any request can be dispatched. Mounted sub-apps don't get
+    # their own lifespans run automatically, so we enter each manager's
+    # ``run()`` ctxmgr from the parent lifespan via an AsyncExitStack.
+    # Without this every /mcp/* request fails with
+    # ``Task group is not initialized``.
+    from contextlib import AsyncExitStack
+
+    managers = getattr(app.state, "mcp_session_managers", []) or []
+
     try:
-        yield
+        async with AsyncExitStack() as stack:
+            for mgr in managers:
+                await stack.enter_async_context(mgr.run())
+            yield
     finally:
         await slot_manager.stop_idle_monitor()
         await dispatcher.aclose()
@@ -514,6 +534,56 @@ def create_app() -> FastAPI:
     app.include_router(
         images.router, prefix="/api/images", tags=["images"], dependencies=_admin_auth
     )
+
+    # Bundled-agent lifecycle (ADR-0004 §2). Install / uninstall / list /
+    # status. Single-pick + atomic switch enforced inside AgentManager.
+    app.include_router(
+        agents_routes.router,
+        prefix="/api/agents",
+        tags=["agents"],
+        dependencies=_admin_auth,
+    )
+
+    # Approval inbox (ADR-0004 §5). The dashboard bell, the MCP admin
+    # server's gated-tool enqueue, and the ``hal0 agent approvals``
+    # CLI all read from the same lifespan-scoped ApprovalQueue. GETs
+    # require any token; POST approve/deny require admin (writer)
+    # scope — declared inside the route module.
+    app.include_router(
+        approvals_routes.router,
+        prefix="/api/agent/approvals",
+        tags=["approvals"],
+        dependencies=_admin_auth,
+    )
+
+    # ── MCP servers (ADR-0004 §4 + ADR-0005 §2) ─────────────────────
+    # Mounted BEFORE _mount_dashboard so the dashboard's SPA fallback
+    # doesn't shadow /mcp/* paths. ApprovalQueue + CogneeWrapper are
+    # constructed eagerly here (no async setup needed for either) so
+    # the mount can wire them in immediately.
+    from hal0.mcp import ApprovalQueue
+
+    app.state.approval_queue = ApprovalQueue()
+
+    memory_wrapper = None
+    try:
+        from hal0.memory import CogneeWrapper
+
+        memory_wrapper = CogneeWrapper()
+    except Exception as exc:  # pragma: no cover — defensive
+        log.warning("hal0.memory.init_failed", error=str(exc))
+    app.state.memory_wrapper = memory_wrapper
+
+    try:
+        from hal0.api.mcp_mount import mount_mcp_servers
+
+        mount_mcp_servers(
+            app,
+            approval_queue=app.state.approval_queue,
+            memory_wrapper=memory_wrapper,
+        )
+    except Exception as exc:  # pragma: no cover — defensive
+        log.warning("hal0.mcp.mount_failed", error=str(exc))
 
     _mount_dashboard(app)
 
