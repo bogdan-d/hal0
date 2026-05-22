@@ -45,11 +45,11 @@ the kernel speaks systemd and Docker. Three shapes worth naming:
   NPU passthrough via `dev0`–`dev3` + cgroup allows. The Strix Halo
   iGPU + XDNA recipe is privileged + AppArmor unconfined; AMD discrete
   + ROCm needs `/dev/kfd` and `/dev/dri/*` passed through. CPU-only is
-  the one shape that's happy unprivileged. The unified-memory bar in
+  the one shape that runs fine unprivileged. The unified-memory bar in
   the dashboard surfaces the LXC's cgroup slice and, when you wire in
-  a `PVEAuditor` token, the physical host total plus other tenants.
-  That's the homelab payoff: hal0 knows it isn't the only thing on
-  the box.
+  a `PVEAuditor` token via `/etc/hal0/proxmox.json`, the physical host
+  total plus other tenants. hal0 knows it isn't the only thing on the
+  box.
 
 ## What you'll see after install
 
@@ -137,19 +137,20 @@ template unit).
 <img
   src="/screenshots/memory-bar.png"
   srcset="/screenshots/memory-bar.png 1x, /screenshots/memory-bar@2x.png 2x"
-  alt="Unified-memory bar with segments labelled GTT · inference, System RAM, Proxmox host, and Free."
+  alt="Unified-memory bar with segments labelled System RAM, GTT (iGPU inference), Proxmox host pressure, and Free."
   width="1172"
   height="114"
 />
 
 The memory bar reads physical-host totals when it can, instead of
 the LXC's cgroup slice in isolation. On a Proxmox LXC, hand the
-dashboard a read-only `PVEAuditor`
-API token in Settings → Proxmox integration and the bar adds a muted
-"Proxmox host" segment for other tenants, ZFS ARC, and kernel
-pressure. Token lives 0600 at `/etc/hal0/proxmox.json` and the API
-redacts the value on read. Bare-metal installs leave the panel off and
-the bar stays scoped to the local box.
+dashboard a read-only `PVEAuditor` API token plus endpoint in Settings
+→ Proxmox integration and the bar adds a muted "Proxmox host" segment
+for other tenants, ZFS ARC, and kernel pressure. Token and endpoint
+live 0600 at `/etc/hal0/proxmox.json` and the API redacts the value
+on read and in logs. Bare-metal installs leave the panel off and the
+bar stays scoped to the local box. Segment order is **System RAM |
+GTT (iGPU inference) | Proxmox host pressure | Free**.
 
 ## Overrides
 

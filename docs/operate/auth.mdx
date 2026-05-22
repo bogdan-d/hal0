@@ -208,7 +208,7 @@ sudo sed -i '/tls internal/d' /etc/hal0/Caddyfile
 sudo systemctl reload hal0-caddy
 ```
 
-That's it. Caddy will request, install, and renew the certificate;
+Caddy will then request, install, and renew the certificate;
 OCSP-staple it; and reload itself before each renewal. Requirements:
 
 - The hostname must resolve from the public internet to your hal0 box.
@@ -371,10 +371,10 @@ configuration and TLS state remain on disk so you can re-enable with
 
 ## What's deferred
 
-These are intentionally **not** in the v0.2 POC:
+These are intentionally **not** in v0.1.0-alpha:
 
-- OIDC / OAuth / SAML / magic-link auth (planned for v0.3 via
-  caddy-security or Authelia).
+- OIDC / OAuth / SAML / magic-link auth (likely via caddy-security or
+  Authelia once the basic-auth + bearer surface settles).
 - Per-user audit log of token use (only `last_used_at` timestamp
   today).
 - Token expiry / TTL.

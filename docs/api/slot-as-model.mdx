@@ -68,13 +68,16 @@ either route:
     {"id": "embed", "object": "model", "owned_by": "hal0"},
     {"id": "stt", "object": "model", "owned_by": "hal0"},
     {"id": "tts", "object": "model", "owned_by": "hal0"},
+    {"id": "img", "object": "model", "owned_by": "hal0"},
     {"id": "qwen2.5-0.5b-instruct-q4_k_m", "object": "model", "owned_by": "hal0"}
   ]
 }
 ```
 
-OpenWebUI and most clients pick the first registry-ref-looking entry.
-That's why we list slot aliases first; they're stable.
+Slot aliases (`primary`, `embed`, `stt`, `tts`, `img`) are listed
+first because they're stable across model swaps. The slot-scoped form
+`primary:qwen2.5-0.5b-instruct-q4_k_m` is also accepted and resolves
+the registry ref through the named slot.
 
 ## Mapping rules
 
@@ -84,7 +87,9 @@ That's why we list slot aliases first; they're stable.
 | `"embed"`                | The model currently in the `embed` slot.                  |
 | `"stt"`                  | The model currently in the `stt` slot.                    |
 | `"tts"`                  | The model currently in the `tts` slot.                    |
+| `"img"`                  | The model currently in the `img` slot.                    |
 | A custom slot name       | That slot's current model.                                |
+| `"<slot>:<ref>"`         | The named slot, resolving the registry ref through it.    |
 | A registry ref           | The slot that currently owns that ref.                    |
 | An external upstream ref | The upstream provider (OpenRouter, Anthropic, OpenAI, …). |
 | Anything else            | `{"error": {"code": "model.not_found", ...}}`            |

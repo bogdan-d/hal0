@@ -7,46 +7,66 @@ sidebar:
 
 import { Aside } from '@astrojs/starlight/components';
 
-When you assign a model to a slot that isn't already in the registry,
-hal0 pulls it from Hugging Face. The pull surfaces as a slot-level
-state transition (`offline → pulling`) and a byte-level SSE stream so
-the dashboard and CLI can render a live progress bar.
+hal0 pulls model weights through `POST /api/models/{id}/pull`. What's
+wired up today:
 
-## Pulling a model
+- **FLM tags** (the Ollama-style `family:size` ids served by the FLM
+  toolbox) pull through the same route. `is_flm_tag()` detects them
+  and shells `flm pull <tag>` inside the toolbox image; NPU-capable
+  registry rows propagate `pullable=True` so the dashboard exposes
+  the pull control.
+- **Arbitrary Hugging Face repo refs** still return 501 from the
+  dashboard's streaming pull path. The plumbing exists (SHA-256
+  atomic install, polled progress), but the HF-side fetch for
+  arbitrary repos isn't enabled yet. Pre-stage weights manually
+  into `/mnt/ai-models/local/` and register the entry in
+  `/var/lib/hal0/registry/registry.toml` in the meantime; see
+  [Model registry](/docs/slots/model-registry/).
 
-Three ways:
+The pull surfaces as a slot-level state transition
+(`offline → pulling`) when triggered by a swap, and the dashboard /
+CLI poll `GET /api/models/{id}/pull/status` for byte-level progress.
 
-- **Dashboard.** The Models view has a **Pull** button. Paste a
-  Hugging Face repo ref (e.g.
-  `bartowski/Qwen2.5-Coder-7B-Instruct-GGUF`) and pick the quant
-  file.
+## Pulling an FLM tag
+
+Three ways once the FLM toolbox image and host cache are present:
+
+- **Dashboard.** The Models view shows FLM rows (e.g. `qwen3:4b`)
+  with a **Pull** button.
 - **CLI.**
   ```sh
-  hal0 model pull bartowski/Qwen2.5-Coder-7B-Instruct-GGUF \
-    --file Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf
+  hal0 model pull qwen3:4b
   ```
 - **Slot swap.**
   ```sh
-  hal0 slot swap primary --model qwen2.5-coder-7b-instruct-q4_k_m
+  hal0 slot swap primary --model qwen3:4b
   ```
-  If the registry doesn't have it, the slot transitions through
+  If the FLM cache doesn't have it, the slot transitions through
   `pulling` before `warming`.
+
+The FLM toolbox container bind-mounts the host FLM cache to
+`/var/lib/hal0/.config/flm/models` (the HOME of the non-root `hal0`
+user inside the image). Probe and pull both depend on that mount;
+without it `flm list -j` returns empty and `flm pull` writes to a
+throwaway layer.
+
+FLM has its own model tag namespace (`model_list.json`) — you can't
+run arbitrary GGUFs through it. Per-(backend, model) validation
+runs at registry probe time.
 
 ## Where the bytes land
 
-Models are written to `/var/lib/hal0/models/<safe-ref>/<file>` with a
-checksum sidecar. On a successful pull the registry entry is created
-atomically; a failed pull leaves no partial entry.
+The model root is `/mnt/ai-models` (rw ZFS on the hal0 LXC). Pulled
+weights go to `/mnt/ai-models/local/<file>`; FLM tags land in the
+FLM cache directory mounted from the host. The on-disk index is
+`/var/lib/hal0/registry/registry.toml`, which survives `hal0 update`
+(only `/usr/lib/hal0/current/` gets swapped). Successful pulls are
+verified by SHA-256 and written atomically; a failed pull leaves no
+partial registry entry.
 
-`/var/lib/hal0/` survives `hal0 update` (only `/usr/lib/hal0/current/`
-gets swapped), so pulled models persist across version upgrades. If
-you're mounting the model store from an NFS export on your NAS, the
-path stays stable through upgrades too.
+## Progress polling
 
-## Progress streaming
-
-The dashboard and CLI subscribe to an SSE stream that emits one event
-per progress tick:
+The dashboard and CLI poll `GET /api/models/{id}/pull/status` for:
 
 - Total bytes
 - Bytes received
@@ -54,30 +74,21 @@ per progress tick:
 - Elapsed time
 - ETA
 
-The slot itself stays in `pulling` until the file is fully verified;
-only then does it transition to `warming`.
-
-<Aside type="note">
-  Verified Phi-3 Mini Q4 download on Strix Halo: **2.39 GB in ~10s**.
-  Real numbers vary by network; the size is fixed.
-</Aside>
+`POST .../pull/cancel` aborts an in-flight job. The slot stays in
+`pulling` until the file is fully verified; only then does it
+transition to `warming`.
 
 ## Status today
 
-`POST /api/models/{id}/pull` is live. It queues a background pull
-job, streams the file from Hugging Face, verifies sha256, and stages
-atomically into the registry. Poll `GET /api/models/{id}/pull/status`
-for progress, or `POST .../pull/cancel` to abort. The CLI
-(`hal0 model pull`) and the FirstRun wizard both drive this same code
-path.
-
-FLM tags (the Ollama-style `family:size` ids served by the FLM
-toolbox) also go through `POST /api/models/{id}/pull`. The route
-detects them via `is_flm_tag()` and shells `flm pull <tag>` inside
-the toolbox image instead of hitting Hugging Face.
+| Source                             | Pull route                              | State          |
+|------------------------------------|-----------------------------------------|----------------|
+| FLM tag (`family:size`)            | `POST /api/models/{id}/pull` → `flm pull` in toolbox | Live |
+| Arbitrary Hugging Face repo ref    | `POST /api/models/{id}/pull` (HF path)  | Returns 501    |
+| Pre-staged file in `/mnt/ai-models/local/` | direct registry edit            | Live (manual)  |
 
 ## Coming soon — outline
 
+- Streaming HF pulls for arbitrary repo refs (the 501 path).
 - Repo authentication for gated models (`HF_TOKEN` plumbing).
 - Multi-file pulls (sharded GGUFs).
 - Resume on interrupt.

@@ -8,7 +8,7 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 hal0 ships **OpenWebUI** as the chat surface. The installer wires it
-to the local hal0 API automatically — zero config, just open
+to the local hal0 API automatically — zero config, open
 `http://localhost:3001` after install.
 
 ## Why bundled
@@ -77,9 +77,12 @@ overwritten on `hal0 update`.
 
 If your homelab already runs Traefik or Caddy in front of `*.lan` or
 `*.thinmint.dev` services, point it at OpenWebUI directly instead of
-using hal0's bundled Caddy. OpenWebUI emits root-absolute asset URLs
-and has no base-path config, so give it its own hostname (or port).
-A `PathPrefix` under your dashboard won't work; the assets will 404.
+using hal0's bundled Caddy. **Always give OpenWebUI its own hostname
+(e.g. `hal0-chat.lan`, `hal0-chat.thinmint.dev`) or its own port.**
+OpenWebUI emits root-absolute asset URLs and has no base-path config,
+so a `PathPrefix` rule under your dashboard's hostname will 404 every
+asset. There is no workaround in OWUI today — this is a hard
+constraint, not a misconfiguration.
 
 A typical Traefik dynamic config snippet:
 

@@ -42,10 +42,12 @@ templates. The bridge is fixed in
 - `img` → `img`
 
 On first enable of the rerank child, the capability orchestrator
-synthesises an `embed-rerank` slot TOML, picks a free port in
-8081–8099, and sets `defaults.extra_args = "--reranking"` so
+synthesises an `embed-rerank` slot TOML, picks a free port in the
+slot range (avoiding `8081` which `primary` owns — the deployed
+default is `8086`), and sets `defaults.extra_args = "--reranking"` so
 `llama-server` exposes `/v1/rerankings` instead of the chat surface.
-You don't have to author it.
+You don't have to author it. The reranker default is
+`bge-reranker-v2-m3-q4_k_m`.
 
 <img
   src="/screenshots/capability-card-embed.png"
@@ -96,6 +98,11 @@ hal0 slot swap primary --model qwen3-30b-a3b-instruct-2507-q4_k_m
 The slot transitions through `unloading → warming → ready` without
 dropping the API socket. In-flight requests on other slots keep
 flowing.
+
+The `[model] default` entry in `primary.toml` is the install-time
+*seed* only — it is not consulted at runtime. Swap writes an env
+override; the TOML stays stale by design. Don't try to change the
+live model by editing the TOML.
 
 <Aside type="note">
   See [Recommended loadouts](/docs/slots/loadouts/) for curated

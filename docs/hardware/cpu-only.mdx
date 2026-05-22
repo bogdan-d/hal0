@@ -36,12 +36,13 @@ llama.cpp compiled with the Vulkan backend running against
 software Vulkan implementation). This is the same path hal0's CI uses
 to smoke-test the slot lifecycle with the Qwen 0.5B model.
 
-All four built-in slots can theoretically run:
+All five built-in slots can theoretically run:
 
 - `primary`: small Q4 chat (4B and under)
 - `embed`: embeddings and rerank
 - `stt`: Moonshine (CPU-capable but latency-sensitive)
 - `tts`: Kokoro (CPU-capable but latency-sensitive)
+- `img`: ComfyUI (CPU-only image generation is glacial; not realistic)
 
 The OpenAI-compatible `/v1/*` API, the slot lifecycle state machine,
 the dispatcher, and OpenWebUI all behave identically to a GPU box.

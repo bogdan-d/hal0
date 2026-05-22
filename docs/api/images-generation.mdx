@@ -151,8 +151,9 @@ to the `img` slot.
   is sizeable. Expect a long first `docker pull` on a fresh box;
   subsequent restarts hit the local layer cache.
 - **No perf claims yet.** No verified seconds-per-image numbers are
-  in the repo for ComfyUI on Strix Halo iGPU. Marked `[TODO: verify]`
-  in `hal0-web/CONTENT_BRIEF.md` until a real measurement lands.
+  in the repo for ComfyUI on Strix Halo iGPU. Treat the curated
+  models' VRAM hints as the only published sizing data until a real
+  measurement lands.
 - **Flux workflow.** As above: `flux-schnell` is catalogued but the
   default workflow can't drive it. A Flux workflow is the gating
   item before Flux is fully picker-grade.

@@ -70,7 +70,7 @@ LPDDR5X memory controller on a single package. The headline target SKU
 is the **Ryzen AI Max+ 395**, paired with **128 GB of LPDDR5X-8000
 unified system memory**. Lower-tier 385 and 390 parts ship in **64 GB
 configurations** and stay first-class for hal0. Most loadouts on this
-page work on a 64 GB box, just with tighter context budgets.
+page work on a 64 GB box with tighter context budgets.
 
 What makes Strix Halo interesting for inference isn't any single
 component. It's the combination:
@@ -111,18 +111,17 @@ were all designed with Strix Halo's behaviour in mind:
   at `/etc/hal0/hardware.json` knows about UMA. It doesn't pretend the
   iGPU has 8 GB "dedicated" VRAM and 120 GB of disqualified system
   RAM.
-- **The memory bar accounts for other PVE tenants.** If you point hal0
-  at your Proxmox cluster (optional OIDC token), the dashboard adds a
-  `Proxmox host` segment showing what the rest of the node is eating.
-  No other local inference platform draws this picture, because no
-  other local inference platform expects to share a node.
-- **Vulkan llama.cpp is the default.** The Strix Halo Vulkan path is
-  the most reliable AMD inference target today. hal0's `llama.cpp`
-  provider boots its Vulkan toolbox without ROCm headers. ROCm is
-  opt-in for users who need it for other reasons.
-- **FLM provider for the NPU.** The XDNA NPU is served via FLM, with
-  multiplexed slot fan-out for small models. NPU, iGPU, and CPU can
-  each own different slots in the same hal0 instance.
+- **The memory bar accounts for other PVE tenants.** Drop a read-only
+  `PVEAuditor` token plus endpoint into `/etc/hal0/proxmox.json` and
+  the dashboard adds a `Proxmox host` segment showing what the rest of
+  the node is eating. No other local inference platform draws this
+  picture, because no other local inference platform expects to share
+  a node. The API redacts the token on read and in logs.
+- **Three slot-providing backends on Strix Halo.** llama.cpp Vulkan
+  (the default for the iGPU, no ROCm headers required), llama.cpp ROCm
+  (opt-in via the `rocm` toolbox), and FastFlowLM on the XDNA NPU
+  (via the `flm` toolbox). NPU, iGPU, and CPU can each own different
+  slots in the same hal0 instance.
 - **`primary` and `embed` are co-resident by default.** On a discrete
   GPU you fight for VRAM. On Strix Halo, the embed slot's ~600 MB
   `bge-m3` lives alongside a 19 GB Q4 30B-A3B coder and a 330 MB
@@ -131,12 +130,12 @@ were all designed with Strix Halo's behaviour in mind:
 <img
   src="/screenshots/memory-bar.png"
   srcset="/screenshots/memory-bar.png 1x, /screenshots/memory-bar@2x.png 2x"
-  alt="hal0 unified-memory bar: GTT inference, system RAM, Proxmox host tenants, and free, all in one pool."
+  alt="hal0 unified-memory bar: System RAM, GTT (iGPU inference), Proxmox host pressure, and free, all in one pool."
   width="1172"
   height="114" />
 
-The unified pool, in one bar: GTT slice in use by hal0's slots, system
-RAM in the LXC, the rest of the Proxmox host's tenants, and free.
+The unified pool, in one bar: System RAM in the LXC, GTT slice in use
+by hal0's slots, Proxmox host pressure from other tenants, and free.
 
 ## Measured performance
 
@@ -290,24 +289,32 @@ things to check if you're tuning:
 ### Running in an LXC on Proxmox
 
 If your Strix Halo box is a Proxmox node and hal0 is one tenant among
-several (the canonical homelab layout), passthrough is a privileged
-LXC with AppArmor unconfined plus the `dev0`–`dev3` and cgroup allow
-entries for `/dev/kfd`, `/dev/dri/*`, and `/dev/accel/*`. The hal0
-service user goes into the `render` and `video` groups inside the
-container. From there the installer behaves identically to a bare-metal
-run.
+several (the canonical homelab layout), passthrough is a **privileged
+LXC with AppArmor unconfined**, plus `dev0`–`dev3` and cgroup allow
+entries for `/dev/dri/*`, `/dev/kfd`, and `/dev/accel/accel0` (the
+NPU). The hal0 service user goes into the `render` and `video` groups
+inside the container. From there the installer behaves identically to
+a bare-metal run.
 
-Optional: drop an OIDC token for your PVE cluster into hal0's config
-and the dashboard's memory bar adds the `Proxmox host` segment so you
-can see what other tenants are doing to the unified pool. Skip it and
-the bar collapses to the LXC view.
+Unprivileged LXC won't work for iGPU or NPU passthrough on Strix Halo
+— that shape is CPU-only territory.
+
+Optional: drop a read-only `PVEAuditor` token plus endpoint into
+`/etc/hal0/proxmox.json` and the dashboard's memory bar adds the
+`Proxmox host` segment so you can see what other tenants are doing
+to the unified pool. The token is redacted on read and in logs. Skip
+the file and the bar collapses to the LXC view.
 
 ### The XDNA NPU
 
 The probe detects the XDNA NPU and writes it to
-`/etc/hal0/hardware.json`, but it is **not** wired as a slot backend
-by default in v1 because the FLM toolbox image isn't published yet.
-Track the [roadmap](/roadmap/) for the cutover.
+`/etc/hal0/hardware.json`. The `flm` toolbox is published at
+`ghcr.io/hal0ai/hal0-toolbox-flm` with pinned digests, so the NPU is a
+live slot backend via the FastFlowLM provider. FLM has its own model
+tag namespace (see `flm list -j` for what's available); arbitrary GGUFs
+don't apply here. The dashboard's model picker groups FLM-eligible
+models behind the FLM provider so the mismatch is hard to hit by
+accident.
 
 ## Troubleshooting
 
@@ -331,11 +338,14 @@ Verify a Vulkan device shows up. If `vulkaninfo` is empty:
 
 ### NPU not picked up by FLM
 
-FLM toolbox images aren't published to `ghcr.io/hal0ai/` yet in v1.
-The probe still detects the NPU and writes it to
-`/etc/hal0/hardware.json`; you just can't run a slot through it yet.
-Once `ghcr.io/hal0ai/hal0-toolbox-flm` ships, an `hal0 slot swap` will
-opt that slot into FLM.
+Confirm the probe sees the NPU in `/etc/hal0/hardware.json` (a `npu`
+block with an `accel/accel0` device). If it's missing on a privileged
+LXC, double-check the AppArmor profile is `unconfined` and the
+container's `dev0`–`dev3` lines cover `/dev/accel/accel0` with cgroup
+allows. FLM's own runtime probe (`flm list -j` inside the toolbox)
+will fail with a clear error if `libxrt_coreutil.so.2` is missing from
+the image — pull the latest `ghcr.io/hal0ai/hal0-toolbox-flm` digest
+if you've been pinned to a stale tag.
 
 ### Memory fragmentation under heavy multi-slot use
 

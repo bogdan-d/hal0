@@ -11,17 +11,19 @@ hal0 updates itself in one atomic symlink swap, backed by
 cosign-verified release tarballs. If an update goes wrong, one
 command rolls back to the previous version.
 
+The current release (as of 2026-05-22) is `v0.1.0-alpha.1`.
+
 ## The layout
 
 The filesystem layout (PLAN §2) is FHS-aligned and deliberately
 separates the code from the data:
 
 ```
-/usr/lib/hal0/current/        # symlink → /usr/lib/hal0-<version>/
-/usr/lib/hal0-0.9.7/          # versioned install
-/usr/lib/hal0-0.9.8/          # versioned install (next)
-/etc/hal0/                    # config, preserved across updates
-/var/lib/hal0/                # models, registry, OpenWebUI state
+/usr/lib/hal0/current/                 # symlink → /usr/lib/hal0-<version>/
+/usr/lib/hal0-0.1.0-alpha.1/           # versioned install
+/usr/lib/hal0-0.1.0-alpha.2/           # versioned install (next)
+/etc/hal0/                             # config, preserved across updates
+/var/lib/hal0/                         # models, registry, OpenWebUI state
 ```
 
 `hal0 update` unpacks the new version next to the current one, then
@@ -35,21 +37,22 @@ picks up the new version atomically. No partial state on disk, ever.
 hal0 update --check
 ```
 
-Returns the latest version on the configured channel without
-applying it.
+Hits `https://releases.hal0.dev/stable.json` and prints the latest
+version on the channel without applying it. Same manifest the
+`curl hal0.dev/install.sh | bash` bootstrap consumes.
 
 ## Apply an update
 
 ```sh
 hal0 update                       # stable channel
 hal0 update --channel stable      # explicit
-hal0 update --channel nightly     # bleeding edge
 ```
 
 The flow:
 
-1. Fetch the release manifest from `hal0.dev`.
-2. Verify the manifest signature.
+1. Fetch the release manifest from `https://releases.hal0.dev/stable.json`.
+2. Verify the manifest signature (cosign keyless against the
+   `cert_url` from the manifest; cosign 3.x requires `--certificate`).
 3. Download the version tarball.
 4. Verify the tarball against `signer_identity` + `signer_issuer`
    (GitHub OIDC, cosign).
@@ -58,6 +61,11 @@ The flow:
 7. Restart `hal0-api.service`.
 8. Slot units survive the restart — they keep serving traffic
    throughout.
+
+`releases.hal0.dev/stable.json` is a Cloudflare Pages middleware proxy
+that auto-syncs from the GitHub release: cut a `v*` tag on the hal0
+repo, `release.yml` publishes the GH release, and the manifest URL
+reflects it within ~60s. No hal0-web deploy needed.
 
 ## Rollback
 
@@ -71,17 +79,23 @@ so your config, models, and registry are preserved.
 
 ## Channels
 
-| Channel  | What you get                                    |
-|----------|--------------------------------------------------|
-| `stable` | Cut releases. The default; recommended.          |
-| `nightly`| Every green main build. For testing only.        |
+| Channel  | What you get                                                              |
+|----------|---------------------------------------------------------------------------|
+| `stable` | Cut releases. The default and the only channel with a live publish pipeline today. |
+| `nightly`| Schema-reserved for every green main build. No publishing workflow yet.   |
+| `dev`    | Schema-reserved for ad-hoc dev cuts. No publishing workflow yet.          |
 
 Channels are configured in `hal0.toml`. Switch with
-`hal0 config edit` or via the dashboard's Settings view.
+`hal0 config edit` or via the dashboard's Settings view. Selecting
+anything other than `stable` will currently fall back to `stable` —
+the schema is in place, the cron-scheduled workflow that would
+populate `nightly.json` / `dev.json` is not.
 
 <Aside type="note">
   The release manifest schema is `hal0.releases.v1` (see
-  `docs/release-manifest.md` in the hal0 repo). Cosign verification
+  `docs/release-manifest.md` in the hal0 repo). The schema's required
+  `cert_url` field is what the updater hands to `cosign verify-blob
+  --certificate` — don't drop it from manifests. Cosign verification
   is non-negotiable; an unverified tarball fails the update before
   any unpack happens.
 </Aside>
@@ -96,7 +110,7 @@ mechanics are boring on purpose:
 - `hal0-slot@*.service` instances survive the API restart; they keep
   serving traffic throughout.
 - `hal0-openwebui.service` restarts alongside the API.
-- All four log into journald under their unit names, so a failed
+- Every unit logs into journald under its unit name, so a failed
   update shows up in `journalctl -u hal0-api -n 100` without
   ceremony.
 

@@ -20,8 +20,9 @@ head:
 import { Aside, LinkCard, CardGrid } from '@astrojs/starlight/components';
 
 hal0 supports AMD discrete GPUs through two paths: **Vulkan** (the
-default, working in v1) and **ROCm** (opt-in via a separate toolbox
-image).
+default) and **ROCm** (opt-in via the `rocm` toolbox). Both toolbox
+images live at `ghcr.io/hal0ai/hal0-toolbox-vulkan` and
+`ghcr.io/hal0ai/hal0-toolbox-rocm` with pinned digests.
 
 ## Where this fits
 
@@ -62,21 +63,15 @@ you'll want ROCm.
 
 ## ROCm path (opt-in)
 
-<Aside type="caution" title="ROCm toolbox image not yet published">
-`ghcr.io/hal0ai/hal0-toolbox-rocm` is on the v1 build list but isn't
-published yet. Until it ships, ROCm users have two options: stay on
-the Vulkan toolbox (works today), or build the ROCm toolbox locally
-from the hal0 repo. Watch the [roadmap](/roadmap/) for the cutover.
-</Aside>
-
-When the ROCm toolbox lands, opting in is one slot config change:
+The `rocm` toolbox is published. Opting in is one slot config change:
 
 ```sh frame="terminal"
 hal0 slot swap primary --provider llama-cpp-rocm
 ```
 
 The slot lifecycle handles the toolbox swap atomically: `unloading →
-starting → warming → ready`.
+starting → warming → ready`. ROCm needs `/dev/kfd` present in the
+container; without it the provider falls back to CPU.
 
 ## Recommended loadouts
 

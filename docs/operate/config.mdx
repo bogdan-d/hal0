@@ -7,29 +7,39 @@ sidebar:
 
 import { Aside } from '@astrojs/starlight/components';
 
-hal0's runtime configuration lives in a single **TOML file** at
-`/etc/hal0/hal0.toml`. Every write is atomic; every field is
-schema-validated; a bad edit can never produce a half-written file.
+hal0's runtime configuration is split across a few TOML files under
+`/etc/hal0/`. Every write is atomic; every field is schema-validated;
+a bad edit can never produce a half-written file.
 
 ## Paths
 
-| Path                          | What it holds                                       |
-|-------------------------------|------------------------------------------------------|
-| `/etc/hal0/hal0.toml`         | The main configuration file.                         |
-| `/etc/hal0/hardware.json`     | Output of the hardware probe (see below).            |
-| `/etc/hal0/openwebui.env`     | OpenWebUI env, written by the installer.             |
-| `/etc/hal0/slots/<name>.env`  | Per-slot env file consumed by the systemd unit.      |
-| `/etc/hal0/proxmox.json`      | Optional PVE API token for the host-pressure segment in the memory bar. `0600`, redacted on read. |
+| Path                              | What it holds                                       |
+|-----------------------------------|------------------------------------------------------|
+| `/etc/hal0/hal0.toml`             | The main daemon configuration file.                  |
+| `/etc/hal0/capabilities.toml`     | User-facing capability config (embed / voice / img / NPU rollups). |
+| `/etc/hal0/slots/<name>.toml`     | Per-slot lower-layer config (provider, model, port, options). |
+| `/etc/hal0/slots/<name>.env`      | Per-slot env file consumed by the systemd unit.      |
+| `/etc/hal0/hardware.json`         | Output of the hardware probe (see below).            |
+| `/etc/hal0/openwebui.env`         | OpenWebUI env, written by the installer.             |
+| `/etc/hal0/proxmox.json`          | Optional PVE API token + endpoint for the host-pressure segment in the memory bar. `0600`, redacted on read. |
+| `/etc/hal0/api.env`               | API env (auth toggles, secrets). Written by the installer. |
 
 `/etc/hal0/` is preserved across `hal0 update`. The installer never
 overwrites a user-modified config file; it skips with a warning if
 the file already exists.
 
 If hal0 is running in an LXC on a Proxmox node, dropping a read-only
-`PVEAuditor` token into `/etc/hal0/proxmox.json` (Settings → Proxmox
-integration writes this for you) lights up the "Proxmox host" segment
-in the dashboard's unified-memory bar. Without it, the panel stays
-quiet and the memory bar shows the LXC's cgroup slice only.
+`PVEAuditor` token + endpoint into `/etc/hal0/proxmox.json` (Settings
+→ Proxmox integration writes this for you) lights up the "Proxmox
+host" segment in the dashboard's unified-memory bar. Without it, the
+panel stays quiet and the memory bar shows the LXC's cgroup slice
+only. The file is mode `0600`; tokens are redacted in logs and on the
+config-read API.
+
+`capabilities.toml` is the user-facing config layer — embed / voice
+/ img cards and the NPU backend rollup. It sits on top of the per-slot
+`slots/*.toml` files; the capability orchestrator reconciles drift
+between the two on every apply.
 
 ## Editing the config
 
@@ -44,9 +54,9 @@ Three supported workflows:
   hal0 config show       # print merged view
   hal0 config migrate    # apply schema migrations to an older config
   ```
-- **Direct edit.** Just open the file. On the next `hal0-api`
-  restart (or a `hal0 config validate` run), the schema enforces
-  shape — a typo fails loudly, not silently.
+- **Direct edit.** Open the file in any editor. On the next
+  `hal0-api` restart (or a `hal0 config validate` run), the schema
+  enforces shape — a typo fails loudly, not silently.
 
 ## Atomic writes
 
@@ -102,6 +112,16 @@ provider availability flags.
   need to override a value for testing, use the relevant
   `HAL0_NO_PROBE` env var (see [Install](/install/)).
 </Aside>
+
+## Gotcha: `[model] default` in slot TOMLs is a seed
+
+In each `/etc/hal0/slots/<name>.toml`, the `[model] default` field is
+the **install-time seed** — the model the installer picks the first
+time. It is NOT a live default. Once a slot is provisioned, model
+swaps write the active selection to env + a runtime override; the TOML
+file deliberately stays stale. If you edit `default` on a running box
+and nothing changes, this is why. Use `hal0 slot swap <name> --model
+<ref>` (or the dashboard's model picker) to swap.
 
 ## Coming soon — outline
 

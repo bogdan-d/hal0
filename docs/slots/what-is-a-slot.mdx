@@ -107,14 +107,15 @@ to that slot's local port.
   units, not Docker Compose or Kubernetes. Containerised backends
   (toolbox images for FLM, ROCm, ComfyUI, etc.) are an implementation
   detail of each provider.
-- **Not a model cache.** Models live in the
-  [model registry](/docs/slots/model-registry/) under
-  `/var/lib/hal0/models/`; slots only reference registry entries.
+- **Not a model cache.** Weights live under `/mnt/ai-models/local`
+  with the index at `/var/lib/hal0/registry/registry.toml` (see the
+  [model registry](/docs/slots/model-registry/)); slots only reference
+  registry entries.
 - **Not multi-tenant inside hal0.** Slot names are global to the
-  install. There's no per-user partitioning in v1. (See the roadmap
-  for v0.2 plans.) Multi-tenancy *between* hal0 and other Proxmox
-  guests on the same node is handled by the unified memory pool,
-  which the dashboard surfaces.
+  install. There's no per-user partitioning in the v0.1 alpha line;
+  agent / multi-tenant work is on the v0.2 roadmap. Multi-tenancy
+  *between* hal0 and other Proxmox guests on the same node is handled
+  by the unified memory pool, which the dashboard surfaces.
 
 <Aside type="tip">
   Coming from raw `llama-server`: a slot is everything you'd normally

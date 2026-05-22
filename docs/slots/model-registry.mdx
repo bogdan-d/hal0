@@ -8,10 +8,12 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 The **model registry** is hal0's on-disk index of every model it knows
-about: pulled, verified, and ready to be assigned to a slot. It lives
-under `/var/lib/hal0/models/` and survives `hal0 update`. Mount that
-directory from an NFS export on your NAS and one registry is shared
-across reinstalls.
+about: pulled, verified, and ready to be assigned to a slot. The
+index file is `/var/lib/hal0/registry/registry.toml` and survives
+`hal0 update`. The actual weights live under `/mnt/ai-models/`
+(`pull_root` is `/mnt/ai-models/local/`). On a stock hal0 LXC that
+path is rw ZFS on the host, so the registry persists across
+reinstalls without any NFS gymnastics.
 
 <img
   src="/screenshots/models-registry.png"
@@ -37,15 +39,26 @@ what `/v1/models` reflects to OpenAI-shaped clients.
 
 ## Shape of a registry entry
 
-Each entry is one directory under `/var/lib/hal0/models/` with:
+Each entry is a row in `/var/lib/hal0/registry/registry.toml` plus
+the model file(s) on disk under `/mnt/ai-models/`. A row carries:
 
-- The model file(s), usually one `.gguf`.
-- A sidecar JSON describing the source repo, file name, size, and
-  checksum.
 - The registry ref (a slug, e.g. `qwen2.5-0.5b-instruct-q4_k_m`).
+- The on-disk path to the weights, usually one `.gguf` under
+  `/mnt/ai-models/local/`.
+- Source coords (Hugging Face repo + file name when applicable).
+- SHA-256 of the weights.
+- Backend tags (which providers can serve it).
 
 Entries are written atomically; a failed pull leaves no partial
 entry, so the registry never lies about what's on disk.
+
+<Aside type="caution">
+  Editing `registry.toml` directly is supported and is the only way
+  to round-trip a row that has Hugging Face coordinates and a
+  pre-computed SHA-256 — the `hal0 model register` CLI drops both
+  fields. If you're pre-staging weights manually (e.g. while the HF
+  streaming pull path is still 501), edit the TOML.
+</Aside>
 
 ## Listing the registry
 
@@ -89,7 +102,7 @@ A small **curated catalogue** ships with the installer
 a starting model for each slot on a fresh install. The catalogue is
 not the registry; it's a list of *suggestions* the FirstRun wizard
 draws from. Pulled models land in the registry; the curated list is
-just a starting menu.
+a starting menu.
 
 <Aside type="tip">
   The dashboard's Models view distinguishes **registry models** (on
