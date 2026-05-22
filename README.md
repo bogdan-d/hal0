@@ -27,21 +27,30 @@ the dashboard is for operating the box — not for chatting with it.
 curl -fsSL https://hal0.dev/install.sh | bash
 ```
 
-> **Status:** **v0.1.0-alpha**, shipping. The cosign-keyless-OIDC
-> release pipeline is wired end-to-end (signed tarball + `.crt` +
-> manifest, self-verified before publish); the install command actually
-> installs. Expect rough edges: APIs may shift, slot lifecycle bugs are
-> still being shaken out, and we don't promise upgrade compatibility
-> across `0.1.x` alpha tags. See [`PLAN.md`](./PLAN.md) §1 for what
-> ships now and the path to v1.0.
+> **Status:** **v0.1.1**, shipping. v0.1.0-alpha was the
+> cosign-keyless-OIDC release-pipeline cut; v0.1.1 is the first install
+> that completes end-to-end on every supported host (WSL 2, Proxmox VMs,
+> bare-metal Linux), not just Strix Halo. The probe is portable, the
+> wizard's writer calls authenticate cleanly, and chat-model selection
+> is optional for boxes that want a capabilities-only install. Expect
+> rough edges: APIs may shift, slot lifecycle bugs are still being
+> shaken out, and we don't promise upgrade compatibility across `0.1.x`
+> tags. See [`PLAN.md`](./PLAN.md) §1 for what ships now and the path
+> to v1.0.
 
 ## Why hal0
 
-**Strix Halo native.** The probe is UMA-aware. The slot-fit warnings
-size against the real unified pool, not a BAR carve-out. The XDNA NPU
-has a first-class provider (FLM) that's only surfaced in the picker
-when the hardware *and* the toolbox image are both present. 128 GB
-Ryzen AI Max+ 395 is the reference deployment — not a hopeful port.
+**Strix Halo native, but not Strix-Halo-only.** The probe is UMA-aware
+on Strix Halo and falls back to portable parsers (`/proc/cpuinfo`,
+`/proc/meminfo`, `lspci`) on every other host. As of v0.1.1 the
+`platform` field on `/api/hardware` resolves to one of `strix-halo`,
+`wsl2`, `lxc`, `proxmox-kvm`, `kvm`, `bare-metal-{nvidia,amd,intel}-gpu`,
+or `bare-metal-cpu-only`, and the dashboard only labels memory as
+"unified" when it actually is. The slot-fit warnings size against the
+real unified pool, not a BAR carve-out. The XDNA NPU has a first-class
+provider (FLM) that's only surfaced in the picker when the hardware
+*and* the toolbox image are both present. 128 GB Ryzen AI Max+ 395 is
+the reference deployment — not a hopeful port.
 
 **Concurrent chat + embed + voice + image.** Five built-in slot
 classes (`primary`, `embed`, `stt`, `tts`, `img`), each a real
@@ -220,18 +229,27 @@ VM installs leave the panel off and the dashboard stays quiet.
 No dates — items are direction. The closer to the left, the closer to
 running on your box. Full version at [hal0.dev/roadmap](https://hal0.dev/roadmap).
 
-### Shipped (v0.1.0-alpha)
+### Shipped (v0.1.1)
 
 - OpenAI-compatible `/v1/*` API (chat / completions / embeddings /
   rerank / transcriptions / speech / images / models)
 - Slot lifecycle state machine — atomic transitions, persisted +
   SSE-streamed
 - Five-provider stack: llama.cpp, FLM (NPU), Moonshine, Kokoro, ComfyUI
-- Hardware-aware probe with UMA awareness for Strix Halo
+- **Portable hardware probe with platform detection** (v0.1.1) —
+  real CPU/RAM/GPU on WSL 2, Proxmox VMs, bare-metal Linux, plus a
+  `platform` field that drives UI labels ("unified memory" only when
+  it actually is). UMA path for Strix Halo stays the happy path
 - Capability slots overlay + orchestrator drift reconcile
+- **Curated capability picks in the wizard** (v0.1.1) — 3 embed picks
+  (nomic, bge-base, embed-gemma) + 2 rerank picks (bge-reranker-base,
+  bge-reranker-v2-m3) seed the dropdowns on a standalone install
 - Dispatcher with single-flight + cold-cache prefetch + upstream fallback
 - Bundled OpenWebUI on `:3001`, zero config
-- First-run wizard (8 linear steps; conditional HF-token step)
+- **First-run wizard (v0.1.1)** — 8 linear steps; chat-model selection
+  optional (capabilities-only installs are a legitimate shape);
+  conditional HF-token step; session cookie issued on first password
+  set so subsequent writer calls authenticate cleanly
 - Image generation via ComfyUI — curated SDXL Turbo / SD 1.5 / Flux Schnell
 - FLM NPU provider live with self-contained toolbox image
 - Caddy + basic auth + HTTPS, one flag (`--auth=basic`)

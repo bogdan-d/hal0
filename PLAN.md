@@ -7,16 +7,23 @@ one-line install) and re-architected around the things that make hal0
 different from "a wrapper around llama-server": hardware-aware slots,
 clean lifecycle, and a real reliability bar.
 
-**Status (2026-05-21):** shipping as **v0.1.0-alpha** — Strix Halo +
-AMD GPU + NVIDIA GPU Linux home installs, OpenAI-compatible inference,
-bundled OpenWebUI chat. Everything in §1 "v0.1.0-alpha ships" is in
-the box; v1.0 is the eventual stability/perf bar (see §1 "Path to v1.0").
+**Status (2026-05-22):** shipping as **v0.1.1** — Strix Halo, AMD GPU,
+NVIDIA GPU, and now WSL 2 + Proxmox VM + bare-metal-CPU-only Linux
+home installs. OpenAI-compatible inference, bundled OpenWebUI chat.
+v0.1.0-alpha was the cosign-keyless release-pipeline cut (2026-05-21);
+v0.1.1 (2026-05-22) is the first install that completes end-to-end on
+non-Strix-Halo hosts — the first-run wizard's writer calls authenticate
+cleanly, the chat model is optional (capabilities-only installs are a
+shape), the hardware probe is portable + platform-aware, and the
+capability dropdowns are seeded with real picks. Everything in §1
+"v0.1.1 ships" is in the box; v1.0 is the eventual stability/perf bar
+(see §1 "Path to v1.0").
 
 ---
 
 ## 1. Scope
 
-### v0.1.0-alpha ships
+### v0.1.1 ships
 
 - **Core inference platform**
   - OpenAI-compatible API (`/v1/chat/completions`, `/v1/embeddings`,
@@ -85,7 +92,22 @@ the box; v1.0 is the eventual stability/perf bar (see §1 "Path to v1.0").
   - Sensible defaults, non-interactive (`curl -fsSL hal0.dev/install.sh | bash`)
   - Pre-flight checks, hardware probe, lay down `/etc/hal0/slots/{primary,embed,stt,tts}.toml`
   - Pulls toolbox images in background
-  - First-run wizard in dashboard for default-model pick
+  - First-run wizard in dashboard for default-model pick.
+    **As of v0.1.1**: writer calls authenticate via a session cookie
+    minted on first password set; the claim allowlist covers the wizard's
+    writer routes (`PUT /api/config/models`, `POST /api/models/{id}/pull`,
+    `POST /api/capabilities/{slot}/{child}`); chat-model selection is
+    optional; image models filtered out of the chat picker; capability
+    dropdowns seeded with 3 embed + 2 rerank picks.
+- **Portable hardware probe + platform detection (v0.1.1)**
+  - `/proc/cpuinfo` + `/proc/meminfo` fallbacks so CPU/RAM populate on
+    WSL 2, Proxmox VMs, and bare-metal hosts (not just Strix Halo).
+  - `lspci` parser recognises `Display controller` rows (WSL vGPU) and
+    keeps virtio GPUs in the result set; UI shows real model strings.
+  - New `platform` field: `strix-halo`, `wsl2`, `lxc`, `proxmox-kvm`,
+    `kvm`, `bare-metal-{nvidia,amd,intel}-gpu`, `bare-metal-cpu-only`,
+    `unknown`. Memory row labels itself "unified" only when it actually
+    is — non-UMA hosts no longer claim a unified pool they don't have.
 - **Self-update**
   - `hal0 update` — atomic version swap with rollback
   - Stable + nightly channels
@@ -104,7 +126,7 @@ the box; v1.0 is the eventual stability/perf bar (see §1 "Path to v1.0").
 
 ### Path to v1.0
 
-v0.1.0-alpha is the shipping cut. v1.0 isn't a feature milestone — it's
+v0.1.1 is the shipping cut. v1.0 isn't a feature milestone — it's
 a quality bar:
 
 - **Stability** — alpha → beta when the slot lifecycle state machine
@@ -118,9 +140,11 @@ a quality bar:
   documented URL; the `hal0.dev/docs/` page-count matches the CLI's
   `--help` coverage.
 
-Tags between now and v1.0: `v0.1.0-alpha.N` → `v0.1.0-beta.N` →
-`v0.1.0-rc.N` → `v0.1.0`, then v0.2 deferred features as separate
-minor bumps.
+Tags between now and v1.0: `v0.1.N` patches → `v0.1.0-beta.N` →
+`v0.1.0-rc.N` → `v0.1.0` (the quality-bar cut, not the version
+sequence), then v0.2 deferred features as separate minor bumps.
+v0.1.1 is the latest patch in the `v0.1.x` line — bug fixes and
+non-Strix-Halo install completeness, no API shifts.
 
 ### v0.2 (deferred)
 
