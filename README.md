@@ -127,8 +127,10 @@ servers (`/mcp/admin` for slot / model / capability / config / hardware
 / log admin and `/mcp/memory` for Cognee-backed long-term memory) are
 reachable by any MCP-speaking client — Claude Code, future RAG
 services, external scripts. The bundled agent is single-pick at install:
-`pi-coder` (CLI shape, `badlogic/pi-mono`) or `Hermes-Agent` (service
-shape). Pick one via the first-run wizard or `hal0 agent install
+`pi-coder` (CLI shape, installed from `Hal0ai/pi-mono` fork via
+`@earendil-works/pi-coding-agent` on npm) or `Hermes-Agent` (service
+shape, installed via the hal0-owned `hal0-hermes` wrapper around
+upstream `hermes`). Pick one via the first-run wizard or `hal0 agent install
 <name>`; swap atomically with `--switch`. Capital-D destructive MCP
 calls (`model_pull`, `slot_delete`, `config_write`, etc.) gate through
 a header bell + inbox modal in the dashboard, with CLI parity via
