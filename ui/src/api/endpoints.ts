@@ -53,6 +53,11 @@ export const ENDPOINTS = {
   // ── Hardware ─────────────────────────────────────────────────────
   hardware: '/api/hardware',
 
+  // ── Agents — MCP-client allow-list (ADR-0013) ────────────────────
+  agentMcpClients: '/api/agents/mcp/clients',
+  agentMcpClient: (name: string) =>
+    `/api/agents/mcp/clients/${encodeURIComponent(name)}`,
+
   // ── Memory (ADR-0014 graph-extraction gate) ──────────────────────
   memoryGraphStatus: '/api/memory/graph/status',
   memoryGraph: '/api/memory/graph',
