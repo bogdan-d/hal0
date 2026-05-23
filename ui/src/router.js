@@ -46,10 +46,16 @@ const routes = [
     meta: { title: 'Logs' },
   },
   {
+    // v2 IA: /providers renamed → /backends. Old route kept as a
+    // redirect so external bookmarks + tests don't 404 mid-rebase.
     path: '/providers',
-    name: 'providers',
-    component: () => import('./views/Providers.vue'),
-    meta: { title: 'Providers' },
+    redirect: { name: 'backends' },
+  },
+  {
+    path: '/backends',
+    name: 'backends',
+    component: () => import('./views/Backends.vue'),
+    meta: { title: 'Backends' },
   },
   {
     path: '/settings',
@@ -77,6 +83,28 @@ const routes = [
     meta: { title: 'Agent' },
   },
   {
+    // Slice #14 / issue #180 — v0.3 MCP Servers surface. KPI strip +
+    // clients ribbon + live oscilloscope + Install / Config / Logs /
+    // Connect modals. Replaces the slice #168 ComingSoon placeholder.
+    path: '/agents/mcp',
+    name: 'agents-mcp',
+    component: () => import('./views/McpView.vue'),
+    meta: { title: 'MCP Servers' },
+  },
+  {
+    // Slice #168 placeholder for the v0.3 Agents · Memory row.
+    // Phase 9 owns the real surface; until then the link surfaces
+    // a clean "v0.3" placeholder rather than dropping the user on
+    // the NotFound view.
+    path: '/agents/memory',
+    name: 'agents-memory',
+    component: () => import('./views/ComingSoon.vue'),
+    meta: {
+      title: 'Memory',
+      detail: 'Coming soon — Phase 9 / v0.3 ships this surface.',
+    },
+  },
+  {
     path: '/welcome',
     name: 'welcome',
     component: () => import('./views/FirstRun.vue'),
@@ -96,6 +124,19 @@ const routes = [
       skipFirstRunGuard: true,
       skipBundlePickerGuard: true,
     },
+  },
+  {
+    // Slice #167 — primitives test sandbox. Mounts each v2 primitive
+    // in isolation so Playwright can exercise their behaviour without
+    // any view-level dependencies. The route is registered in all
+    // builds (saves a Vite env-flag branch) but is invisible from the
+    // sidebar / TopBar. ``skipFirstRunGuard`` keeps the page reachable
+    // even on a fresh install where the FirstRun guard would otherwise
+    // redirect to /firstrun.
+    path: '/_primitives_test',
+    name: 'primitives-sandbox',
+    component: () => import('./components/primitives/_sandbox/PrimitivesSandbox.vue'),
+    meta: { title: 'Primitives sandbox', skipFirstRunGuard: true },
   },
   {
     path: '/:catchAll(.*)',

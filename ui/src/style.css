@@ -45,6 +45,79 @@
   --hal0-ease: cubic-bezier(0.22, 1, 0.36, 1);
 }
 
+/* ─── Dashboard v2 token vocabulary ──────────────────────────────
+ * Additive layer for the v0.2.1 dashboard rewrite (#148, #164).
+ * Mirrors the design bundle (project/dashboard.css) verbatim while
+ * aliasing the existing --hal0-* tokens where they overlap so brand
+ * tokens remain the single source of truth.
+ *
+ * Existing components continue to read --hal0-* / --color-* and are
+ * untouched; new v2 components opt into these short names. Both
+ * resolve to the same colours. */
+:root {
+  /* Surface ramp — raised surface steps above --hal0-bg. */
+  --bg-1:         var(--hal0-bg-elevated);  /* #141414 */
+  --bg-2:         #161616;                  /* design step */
+  --bg-3:         var(--hal0-bg-raised);    /* #1c1c1c */
+  --bg-4:         #232323;                  /* design step */
+
+  /* Foreground ramp — text dimming steps. */
+  --fg-2:         var(--hal0-fg-muted);     /* #c8c2bd */
+  --fg-3:         #8a8a85;
+  --fg-4:         #5c5c58;
+  --fg-5:         #3d3d3a;
+
+  /* Border ramp. */
+  --line:         var(--hal0-border);          /* #262626 */
+  --line-soft:    #1c1c1c;
+  --line-strong:  var(--hal0-border-strong);   /* #3a3a3a */
+
+  /* Accent shorthands — alias --hal0-accent variants. */
+  --accent:       var(--hal0-accent);
+  --accent-soft:  rgba(255, 176, 0, 0.10);
+  --accent-line:  rgba(255, 176, 0, 0.34);
+  --accent-bg:    #2a1d00;
+  --accent-glow:  var(--hal0-accent-glow);
+
+  /* Device chip colours. */
+  --dev-rocm:     #d76b6b;
+  --dev-vulkan:   #7fb8ff;
+  --dev-cpu:      #9c9c95;
+  --dev-npu:      #c896ff;
+
+  /* Status semantic — solid + soft (~10% alpha) + line (~30% alpha). */
+  --ok:           #6fcf97;
+  --ok-soft:      rgba(111, 207, 151, 0.10);
+  --ok-line:      rgba(111, 207, 151, 0.30);
+  --warn:         #e8b94e;
+  --warn-soft:    rgba(232, 185, 78, 0.10);
+  --warn-line:    rgba(232, 185, 78, 0.30);
+  --err:          #ef6b6b;
+  --err-soft:     rgba(239, 107, 107, 0.10);
+  --err-line:     rgba(239, 107, 107, 0.30);
+  --info:         #7fb8ff;
+  --info-soft:    rgba(127, 184, 255, 0.10);
+  --info-line:    rgba(127, 184, 255, 0.30);
+
+  /* Radii (short names; --radius-* aliases below stay for legacy). */
+  --rad-sm: 4px;
+  --rad:    6px;
+  --rad-lg: 10px;
+  --rad-xl: 14px;
+
+  /* Motion vocabulary — single shared curve, three durations.
+   * Curve matches --hal0-ease (cubic-bezier(0.22, 1, 0.36, 1)).
+   * The *-dur tokens are the canonical durations; the bare names
+   * are pre-composed transition shorthands for the common case. */
+  --ease-curve:    cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-fast-dur:    120ms;
+  --ease-medium-dur:  240ms;
+  --ease-slow-dur:    500ms;
+  --ease-fast:    var(--ease-fast-dur)   var(--ease-curve);
+  --ease-medium:  var(--ease-medium-dur) var(--ease-curve);
+  --ease-slow:    var(--ease-slow-dur)   var(--ease-curve);
+}
+
 /* ─── Size-adjusted fallback fonts ───────────────────────────────
  * Without these, the swap from system fallback → real webfont reflows
  * headings and inflates CLS. See hal0-web/src/styles/fonts.css for the
@@ -201,10 +274,69 @@ code, pre, kbd, .tabular, .mono {
 ::-webkit-scrollbar-thumb:hover { background: var(--hal0-border-strong); }
 
 /* ─── Focus ring — amber, matches hal0-web ─────────────────────── */
+/*
+ * `--focus-ring` is the canonical shadow recipe components can opt into
+ * (mirrors the design source's `:focus-visible { outline: 2px solid var(--accent) }`
+ * but as a box-shadow so it can compose with rounded corners). The
+ * global `:focus-visible` rule keeps outline-based focus for non-opt-in
+ * elements so keyboard nav has a visible ring everywhere.
+ */
+:root {
+  --focus-ring: 0 0 0 2px var(--hal0-accent);
+}
 :focus-visible {
   outline: 2px solid var(--hal0-accent);
   outline-offset: 3px;
   border-radius: 2px;
+}
+
+/* ─── Skip-link — visible only on focus, jumps to <main id> ────── */
+.skip-link {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  z-index: 100;
+  padding: 8px 12px;
+  background: var(--hal0-bg-elevated);
+  color: var(--hal0-accent);
+  border: 1px solid var(--hal0-accent);
+  border-radius: 4px;
+  font-family: var(--hal0-font-mono);
+  font-size: 12px;
+  text-decoration: none;
+  transform: translateY(-200%);
+  transition: transform 0.12s ease;
+}
+.skip-link:focus,
+.skip-link:focus-visible {
+  transform: translateY(0);
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+/* ─── Skeleton loaders — shared shimmer for v2 skeleton variants ── */
+.skel {
+  background: linear-gradient(
+    90deg,
+    var(--bg-1, var(--hal0-bg-elevated)) 0%,
+    var(--bg-2, #161616) 50%,
+    var(--bg-1, var(--hal0-bg-elevated)) 100%
+  );
+  background-size: 200% 100%;
+  animation: skel-shimmer 1.4s ease-in-out infinite;
+  border-radius: 4px;
+}
+.skel-line { height: 10px; width: 100%; }
+.skel-line.short { width: 40%; }
+.skel-line.med   { width: 60%; }
+.skel-chip { display: inline-block; height: 18px; width: 60px; border-radius: 4px; vertical-align: middle; }
+.skel-dot  { display: inline-block; width: 8px;  height: 8px;  border-radius: 50%; vertical-align: middle; }
+@keyframes skel-shimmer {
+  0%   { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .skel { animation: none; }
 }
 
 /* Selection in accent — small touch, big personality. */
