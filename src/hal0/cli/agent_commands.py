@@ -79,11 +79,26 @@ def agent_install(
 @app.command("uninstall")
 def agent_uninstall(
     name: str = typer.Argument(..., help="Bundled agent name."),
+    keep_memory: bool = typer.Option(
+        False,
+        "--keep-memory",
+        help=(
+            "Preserve the agent's private:<agent_id> Cognee namespace + "
+            "its identity card. Default: full teardown including memory."
+        ),
+    ),
 ) -> None:
     """Uninstall a bundled agent."""
     url = _api_base()
     if _api_unreachable(url):
         raise typer.Exit(1)
+
+    # Memory cleanup BEFORE we tear down the agent surface so a failed
+    # memory call doesn't leave half-state. Skipped on --keep-memory
+    # (per #246 + ADR-0011 §6 — re-install reuses the existing card).
+    if name == "hermes" and not keep_memory:
+        _uninstall_hermes_memory()
+
     try:
         result = api_delete(f"/api/agents/{name}")
     except CliApiError as exc:
@@ -94,6 +109,76 @@ def agent_uninstall(
         console.print(f"[dim]{name} was not installed.[/dim]")
     else:
         console.print(f"[bold]Uninstalled[/bold] {name}.")
+        if keep_memory:
+            console.print("[dim](memory preserved — re-install will reuse it)[/dim]")
+
+
+def _uninstall_hermes_memory() -> None:
+    """Best-effort: delete the hermes identity card from the `agents` dataset.
+
+    Failure is silent — the agent surface tear-down proceeds regardless
+    (memory unreachable shouldn't strand the operator with a half-uninstalled
+    agent).
+    """
+    import json as _json
+    import urllib.error
+    import urllib.request
+
+    url = _api_base()
+    search_body = _json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "memory_search",
+                "arguments": {
+                    "query": "hermes-agent",
+                    "tags": ["agent-identity"],
+                    "dataset": "agents",
+                    "limit": 50,
+                },
+            },
+        }
+    ).encode("utf-8")
+    headers = {"Content-Type": "application/json", "X-hal0-Agent": "hermes-agent"}
+    req = urllib.request.Request(
+        f"{url}/mcp/memory", data=search_body, headers=headers, method="POST"
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=5.0) as resp:
+            data = _json.loads(resp.read().decode("utf-8"))
+    except (urllib.error.URLError, OSError, _json.JSONDecodeError):
+        return
+    result = data.get("result") if isinstance(data, dict) else None
+    if not isinstance(result, dict):
+        return
+    items = result.get("items") or result.get("results") or []
+    ids: list[str] = []
+    for it in items if isinstance(items, list) else []:
+        if not isinstance(it, dict):
+            continue
+        md = it.get("metadata") or {}
+        if md.get("agent_id") == "hermes-agent" and it.get("id"):
+            ids.append(it["id"])
+    if not ids:
+        return
+    del_body = _json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {"name": "memory_delete", "arguments": {"ids": ids}},
+        }
+    ).encode("utf-8")
+    req2 = urllib.request.Request(
+        f"{url}/mcp/memory", data=del_body, headers=headers, method="POST"
+    )
+    try:
+        with urllib.request.urlopen(req2, timeout=5.0):
+            pass
+    except (urllib.error.URLError, OSError):
+        return
 
 
 @app.command("list")
@@ -351,13 +436,22 @@ def bootstrap_hermes(
         "--skip-phase",
         help="Skip the named phase (may be repeated).",
     ),
+    offline: bool = typer.Option(
+        False,
+        "--offline",
+        help="Assume hermes-agent wheel is pre-staged; preflight skips PyPI check.",
+    ),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose phase log."),
 ) -> None:
     """Run the Hermes-Agent bootstrap state machine."""
     # Late import keeps the CLI startup snappy on hosts where the
     # hermes_provision module's downstream slices grow heavier deps.
+    import os as _os
+
     from hal0.agents.hermes_provision import bootstrap_cli
 
+    if offline:
+        _os.environ["HAL0_HERMES_OFFLINE"] = "1"
     rc = bootstrap_cli(
         repair=repair,
         dry_run=dry_run,
@@ -365,3 +459,82 @@ def bootstrap_hermes(
         verbose=verbose,
     )
     raise typer.Exit(rc)
+
+
+# ── Bootstrap status / log / upgrade / uninstall (Phase 10, #246) ───────────
+
+
+@app.command("status")
+def agent_status(
+    name: str = typer.Argument("hermes", help="Bundled agent name (default: hermes)."),
+) -> None:
+    """Pretty-print the agent's provision.json checkpoint."""
+    import json as _json
+    from pathlib import Path
+
+    state_file = Path(f"/var/lib/hal0/state/agents/{name}/provision.json")
+    if not state_file.exists():
+        console.print(f"[dim]{name}: no provision.json yet (run bootstrap first).[/dim]")
+        raise typer.Exit(0)
+    data = _json.loads(state_file.read_text())
+    table = Table(title=f"{name} bootstrap status")
+    table.add_column("Phase", style="bold")
+    table.add_column("Status")
+    table.add_column("At")
+    table.add_column("Detail")
+    for phase, entry in (data.get("phases") or {}).items():
+        detail = entry.get("reason") or _json.dumps(entry.get("details") or {})[:60]
+        table.add_row(phase, entry.get("status", "—"), entry.get("at", "—"), detail)
+    console.print(table)
+    console.print(
+        f"[dim]hal0={data.get('hal0_version', '?')} "
+        f"hermes={data.get('hermes_version', '?')} "
+        f"completed_at={data.get('completed_at', '—')}[/dim]"
+    )
+
+
+@app.command("log")
+def agent_log(
+    name: str = typer.Argument("hermes", help="Bundled agent name."),
+    phase: str | None = typer.Option(None, "--phase", help="Dump the named phase's log only."),
+) -> None:
+    """Show per-phase logs from /var/lib/hal0/state/agents/<name>/provision-logs/."""
+    from pathlib import Path
+
+    log_dir = Path(f"/var/lib/hal0/state/agents/{name}/provision-logs")
+    if not log_dir.exists():
+        console.print(f"[dim]{name}: no logs dir at {log_dir}[/dim]")
+        raise typer.Exit(0)
+    pattern = f"{phase}.log" if phase else "*.log"
+    for log_file in sorted(log_dir.glob(pattern)):
+        console.print(f"[bold]== {log_file.name} ==[/bold]")
+        console.print(log_file.read_text())
+
+
+@app.command("upgrade")
+def agent_upgrade(
+    name: str = typer.Argument("hermes", help="Bundled agent name."),
+    to: str | None = typer.Option(
+        None, "--to", help="Pin to a specific version (power-user / compat-testing flag)."
+    ),
+) -> None:
+    """Bump the agent's version pin and re-run bootstrap with --repair."""
+    if name != "hermes":
+        die(f"upgrade currently only supports `hermes`; got {name!r}.")
+        return
+    import os as _os
+    import subprocess as _subprocess  # nosec B404 — known argv
+
+    if to:
+        _os.environ["HAL0_HERMES_VERSION_PIN"] = to
+    rc = _subprocess.run(  # nosec B603 — known argv
+        ["hal0", "agent", "bootstrap", "hermes", "--repair"],
+        check=False,
+    ).returncode
+    raise typer.Exit(rc)
+
+
+# Note: post-ADR-0012 there is no `rotate-token` subcommand. The hal0
+# daemon has no auth; agent identity flows via the X-hal0-Agent header
+# the wrapper exports from $HAL0_AGENT_ID. See #246 sharpening's second
+# correction comment for the supersede.
