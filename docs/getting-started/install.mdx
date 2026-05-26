@@ -32,6 +32,31 @@ idempotent. Re-runs touch nothing in `/etc/hal0/`.
 curl -fsSL https://hal0.dev/install.sh | bash
 ```
 
+## On Proxmox VE (one line)
+
+If you run Proxmox, you don't have to create the container by hand.
+From the pve host shell as root:
+
+```sh frame="terminal"
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/Hal0ai/hal0/main/scripts/proxmox-ve/hal0.sh)"
+```
+
+That spins up an unprivileged Debian 13 LXC (next free CTID, 4 cores,
+8 GB RAM, 20 GB disk, DHCP on the first `vmbr*`), installs `cosign`,
+then runs the standard hal0 bootstrap inside it. Pass `--advanced` for
+whiptail prompts on every parameter; or override via env vars (`CTID`,
+`HOSTNAME`, `RAM_MB`, `DISK_GB`, `STORAGE`, `NET_CONFIG`, …). The
+script lives at
+[`scripts/proxmox-ve/hal0.sh`](https://github.com/Hal0ai/hal0/blob/main/scripts/proxmox-ve/hal0.sh).
+
+<Aside type="note" title="Generic LXC, no GPU passthrough">
+This wrapper targets the homelab Proxmox case — vanilla unprivileged
+LXC for CPU / Vulkan inference. For the Strix Halo iGPU + XDNA NPU
+performance story you still need the privileged-LXC + AppArmor
+unconfined + `dev0`–`dev3` recipe (see the "Deployment shapes" section
+below).
+</Aside>
+
 ## Deployment shapes
 
 hal0 doesn't care which slice of your homelab it runs on, as long as
