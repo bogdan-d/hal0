@@ -526,6 +526,10 @@ function InlineSwapPopover({ slot, open, onClose, onPick }) {
         const isCur = slot.model_id === m.id;
         const fits = HAL0_DATA.host.ram.free > parseSizeGB(m.size);
         return (
+          // The whole row is a mouse-click target (convenience) but the
+          // nested chevron button is the single keyboard/AT-accessible
+          // affordance — making the row also a role=button creates a
+          // double-announce for screen readers (a11y review 2026-05-27).
           <div
             key={m.id}
             className={"swap-pop-item" + (isCur ? " cur" : "")}
@@ -537,7 +541,12 @@ function InlineSwapPopover({ slot, open, onClose, onPick }) {
             </div>
             <div className="sz num">{m.size}</div>
             <div className={"fit" + (fits ? "" : " no")}>{m.installed ? (fits ? "fits ✓" : "tight") : "will pull"}</div>
-            <span className="swap-arrow" aria-hidden="true">{Icons.chevR}</span>
+            <button
+              type="button"
+              className="swap-arrow"
+              aria-label={`Load ${m.longName || m.id}`}
+              onClick={e => { e.stopPropagation(); onPick(m); onClose(); }}
+            >{Icons.chevR}</button>
           </div>
         );
       })}
