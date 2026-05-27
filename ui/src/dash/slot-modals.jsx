@@ -11,9 +11,60 @@ import {
   useSlotDelete,
 } from '@/api/hooks/useSlots'
 import { useHardware } from '@/api/hooks/useHardware'
+import { useModels } from '@/api/hooks/useModels'
 import { ENDPOINTS } from '@/api/endpoints'
 
 const { useState: useStateSM, useEffect: useEffectSM, useRef: useRefSM } = React;
+
+// Map /api/models registry rows → the shape this file's swap popover and
+// create-slot modal grew up around (HAL0_DATA seed). Done in JSX rather
+// than at the API layer so the response stays identical to what the
+// Models view (models.jsx) already consumes. NEVER ship HAL0_DATA model
+// ids to the backend — they're fictional (`qwen3.6-27b-mtp` etc.) and
+// the slot orchestrator correctly rejects them against the real registry.
+function normalizeApiModel(m) {
+  // Accept both shapes: the registry/API shape (capabilities + backends +
+  // size_bytes + name + hf_repo) and the legacy HAL0_DATA seed shape
+  // (labels + device + size + longName + repo + type). Local dev without
+  // a backend falls back via src/api/mock.ts to HAL0_DATA.models, and the
+  // γ-suite hits that fallback when fetch fails before page.route catches
+  // (race + connection-refused on the Vite proxy target). Tolerating both
+  // shapes keeps the popover non-empty in every mock path.
+  const sourceCaps = Array.isArray(m.capabilities)
+    ? m.capabilities
+    : Array.isArray(m.labels) ? m.labels : [];
+  const derivedType =
+    sourceCaps.includes('chat') || sourceCaps.includes('coding') ? 'llm'
+    : sourceCaps.includes('rerank') || sourceCaps.includes('reranking') ? 'reranking'
+    : sourceCaps.includes('embed') || sourceCaps.includes('embeddings') ? 'embedding'
+    : sourceCaps.includes('transcription') || sourceCaps.includes('asr') ? 'transcription'
+    : sourceCaps.includes('tts') ? 'tts'
+    : sourceCaps.includes('image') ? 'image'
+    : '';
+  const type = typeof m.type === 'string' && m.type ? m.type : derivedType;
+  const backends = Array.isArray(m.backends) ? m.backends : [];
+  const derivedDevice =
+    backends.includes('rocm') ? 'rocm'
+    : backends.includes('vulkan') ? 'vulkan'
+    : backends.includes('cpu') ? 'cpu'
+    : backends[0] || '';
+  const device = typeof m.device === 'string' && m.device ? m.device : derivedDevice;
+  const b = m.size_bytes || 0;
+  const derivedSize = !b
+    ? '—'
+    : b < 1024 ** 2 ? `${(b / 1024).toFixed(1)} KB`
+    : b < 1024 ** 3 ? `${(b / 1024 ** 2).toFixed(1)} MB`
+    : `${(b / 1024 ** 3).toFixed(2)} GB`;
+  const size = typeof m.size === 'string' && m.size ? m.size : derivedSize;
+  return {
+    ...m,
+    type,
+    device,
+    longName: m.longName || m.name || m.id,
+    size,
+    repo: m.repo || m.hf_repo || m.path || '',
+  };
+}
 
 // ─── Create-slot modal ──────────────────────────────────────────
 function CreateSlotModal({ open, onClose, defaults = {}, existingSlots = [] }) {
@@ -30,6 +81,7 @@ function CreateSlotModal({ open, onClose, defaults = {}, existingSlots = [] }) {
 
   const createMut = useSlotCreate();
   const hwQuery = useHardware();
+  const modelsQuery = useModels();
 
   useEffectSM(() => {
     if (open) {
@@ -51,11 +103,17 @@ function CreateSlotModal({ open, onClose, defaults = {}, existingSlots = [] }) {
   const nameInvalid = name && !/^[a-z][a-z0-9-]{0,30}$/.test(name);
   const nameError = nameCollision ? "name already in use" : nameInvalid ? "lowercase + dashes only" : null;
 
-  // Model catalogue still lives in HAL0_DATA — replaced when the models
-  // hook ships (parallel teammate). NPU availability is now live.
-  const compatible = HAL0_DATA.models.filter(m =>
+  // Live catalogue from /api/models (normalized to the legacy HAL0_DATA
+  // shape so the existing filter + render code keeps working). Sending a
+  // mock id like `qwen3.6-27b-mtp` here would tunnel into POST
+  // /api/slots/{name}/swap and the slot orchestrator would reject it
+  // against the real registry (slot.not_found).
+  const allModels = (modelsQuery.data ?? []).map(normalizeApiModel);
+  const compatible = allModels.filter(m =>
     m.type === type &&
-    (device === "cpu" || m.device === (device || "cpu").replace("gpu-", "") || (device === "npu" && m.device === "npu"))
+    (device === "cpu"
+      || (Array.isArray(m.backends) && m.backends.includes((device || "cpu").replace("gpu-", "")))
+      || (device === "npu" && m.device === "npu"))
   );
 
   const npuAvailable = !!hwQuery.data?.npu?.present;
@@ -182,7 +240,7 @@ function CreateSlotModal({ open, onClose, defaults = {}, existingSlots = [] }) {
             ))}
           </select>
           {model && compatible.find(m => m.id === model) && (
-            <div className="ok">✓ fits in available memory ({HAL0_DATA.host.ram.free} GB free)</div>
+            <div className="ok">✓ fits in available memory ({hwQuery.data?.ram?.free ?? "?"} GB free)</div>
           )}
         </div>
       </div>
@@ -517,14 +575,22 @@ function ReadOnlyStrip({ k, v }) {
 
 // ─── Inline swap popover ────────────────────────────────────────
 function InlineSwapPopover({ slot, open, onClose, onPick }) {
+  // Hooks first — React rules-of-hooks forbid an early return before
+  // them. The popover is mounted unconditionally and toggles via `open`;
+  // useQuery's own caching means useModels() costs ~nothing when closed.
+  const modelsQuery = useModels();
+  const hwQuery = useHardware();
   if (!open) return null;
-  const compatible = HAL0_DATA.models.filter(m => m.type === slot.type);
+  const ramFreeGb = hwQuery.data?.ram?.free ?? 0;
+  const compatible = (modelsQuery.data ?? [])
+    .map(normalizeApiModel)
+    .filter(m => m.type === slot.type);
   return (
     <div className="swap-pop" onClick={e => e.stopPropagation()}>
       <div className="swap-pop-h">Swap model · type {slot.type}</div>
       {compatible.map(m => {
         const isCur = slot.model_id === m.id;
-        const fits = HAL0_DATA.host.ram.free > parseSizeGB(m.size);
+        const fits = ramFreeGb > parseSizeGB(m.size);
         return (
           // The whole row is a mouse-click target (convenience) but the
           // nested chevron button is the single keyboard/AT-accessible
