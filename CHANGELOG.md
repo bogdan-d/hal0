@@ -10,6 +10,63 @@ Tags older than v0.2.0 ship release notes inside the GitHub release
 page; this CHANGELOG starts at v0.2.0 (the Lemonade migration cut).
 For ADR-level architecture context see `docs/internal/adr/`.
 
+## Unreleased — v0.3 MCP completion + memory-map redesign
+
+End-to-end completion of the `hal0-admin` + `hal0-memory` bundled MCP
+servers and the dashboard v3 surfaces that consume them. Landed
+2026-05-28 across PRs #364, #365, #366, #368, #369, and (in parallel)
+#370 for the GTT-aware memory-map widget.
+
+### Added
+
+- **Dashboard v3 `/agent` real-backend wiring** (#364, closes #207
+  #228 #227 #226). `useAgents()` hook against `/api/agents`; live
+  Memory tab against `/api/memory/graph/status`; live Skills tab
+  against new `GET /api/agents/skills`; PersonaEditModal hydrated
+  from new `GET /api/agents/persona-enums`. Server-side TONES + TOOLS
+  + skill catalog moved to `src/hal0/agents/persona.py`.
+- **Embedding model pinning + rerank wiring** (#365, closes #116).
+  New `[memory.embedding]` config block — `model`,
+  `rerank_enabled`, `rerank_url`, `rerank_over_fetch_factor`,
+  `rerank_max_candidates`, split `rerank_connect_timeout_s` /
+  `rerank_read_timeout_s`. Defaults preserve v0.3.0 semantics
+  (rerank off, embedding model unchanged).
+- **Private namespace contract for REST + read path** (#366 + #369,
+  closes #317 #367). `X-hal0-Agent` + `X-hal0-Private` header
+  contract on `/api/memory/{add,search,list,delete}` — shared
+  ADR-0005 §3 resolver in `src/hal0/memory/namespace.py`. Wrapper
+  `add` / `search` / `list_items` / `delete` accept per-call
+  `client_id`; `_allowed_read_datasets` honors it so per-agent
+  reads work end-to-end. Audit rows now stamp the resolved per-call
+  identity instead of the singleton wrapper's anonymous default.
+  Identity hardening: regex on agent id (path-traversal blocked),
+  rejection of `private:*` agent values, rejection of body
+  `dataset=private:*` when the private toggle is off.
+- **Dashboard v3 `/mcp` install/uninstall/config + real audit
+  stream** (#368, closes #305 #224 #222). New
+  `src/hal0/mcp/installed.py` registry + `src/hal0/mcp/manifest.py`
+  resolver (`oci` / `npm` / `uvx` / `git` / `http` specs). 501
+  stubs for install / uninstall / config replaced with real
+  impls; `/api/mcp/resolve` added; `/api/mcp/servers` merges
+  bundled (live FastMCP introspection) + installed (registry).
+  Real audit stream consumed by `useMcpServerLogs`. SSRF guard
+  on URL fetch (loopback / RFC-1918 / link-local / 169.254.169.254
+  / mDNS / CGNAT / unspecified all blocked; redirects disabled).
+  Registry files at `/etc/hal0/mcp-servers/<id>.toml` written
+  0o600 inside a 0o700 directory.
+
+### Deferred
+
+- MCP-installed-server supervisor: start / stop / restart still
+  return 501; installed servers report `state=stopped`. Dashboard
+  buttons disabled with tooltip pending the supervisor design.
+- AgentInbox / AgentOverview hero strip / Recent records pane /
+  Skills "calls" column / per-store DB tile breakdown — adjacent
+  hardcoded surfaces in dashboard v3 (filed as #374-#380).
+- Manifest fetcher streaming + size guard, patch_config R-M-W lock,
+  bundled-id shadow defense, dev-host worktree disk footprint
+  (filed as #381-#384).
+
 ## [v0.3.1-alpha.1] — 2026-05-27
 
 Hermes-and-Cognee + dashboard v3 polish release. v0.3 stream work that
