@@ -1115,18 +1115,139 @@ class AgentConfig(BaseModel):
         return v
 
 
+class MemoryEmbeddingConfig(BaseModel):
+    """[memory.embedding] section of hal0.toml (issue #116 G3 + G4).
+
+    Pins the embedding model Cognee uses for memory vector retrieval and
+    (optionally) wires a second-pass rerank slot in front of
+    :meth:`hal0.memory.cognee_wrapper.CogneeWrapper.search`.
+
+    Defaults are zero-config preserving:
+
+      - ``model`` keeps Cognee's stock pick (``BAAI/bge-small-en-v1.5``,
+        384-dim) so an upgrade does NOT silently re-embed an existing
+        LanceDB index (dimension mismatch corrupts the store).
+      - ``rerank_enabled`` is OFF by default; when flipped on, the
+        wrapper calls ``rerank_url`` after vector retrieval and reorders
+        candidates by relevance score. Failures fall through to the
+        original vector ordering — never block memory_search.
+      - ``rerank_url`` points at hal0's built-in rerank slot (port 8086
+        per auto-memory ``hal0-rerank-slot-wiring``).
+
+    G3 (pin embedding model) deliberately ships the *existing* default
+    so users who do not flip the toggle see no behavioral change. Future
+    work (audit doc §G3) may bump the default to ``bge-large-en-v1.5``
+    once a migration story for the LanceDB index exists.
+    """
+
+    model_config = {"populate_by_name": True, "extra": "allow"}
+
+    model: str = Field(
+        default="BAAI/bge-small-en-v1.5",
+        description=(
+            "Embedding model the Cognee wrapper pins (issue #116 G3). "
+            "Defaults to the existing Cognee stock value so the install "
+            "default is byte-identical to v0.3.0 behavior — bumping this "
+            "without a re-embed migration corrupts the LanceDB index."
+        ),
+    )
+    rerank_enabled: bool = Field(
+        default=False,
+        description=(
+            "When True, memory_search posts the vector top-N candidates "
+            "to ``rerank_url`` and reorders by ``relevance_score`` before "
+            "returning the top-K (issue #116 G4). When False (default), "
+            "vector ordering is returned unchanged."
+        ),
+    )
+    rerank_url: str = Field(
+        default="http://127.0.0.1:8086",
+        description=(
+            "Base URL of the llama.cpp rerank endpoint. The wrapper "
+            "POSTs to ``{rerank_url}/rerank`` with "
+            "``{model, query, documents}`` per llama.cpp's reranking "
+            "protocol. Defaults to hal0's bundled embed-rerank slot."
+        ),
+    )
+    rerank_over_fetch_factor: int = Field(
+        default=5,
+        ge=1,
+        le=20,
+        description=(
+            "Multiplier on ``limit`` used to determine the vector-search "
+            "candidate count fed into the rerank pass. With the default of "
+            "5, a ``limit=10`` search rerank-scores up to 50 candidates "
+            "before clipping back to the top 10. Bumping this trades "
+            "rerank latency for recall; dropping it toward 1 makes the "
+            "rerank pass increasingly pointless."
+        ),
+    )
+    rerank_max_candidates: int = Field(
+        default=500,
+        ge=10,
+        le=2000,
+        description=(
+            "Absolute cap on candidates per rerank call, applied AFTER "
+            "``rerank_over_fetch_factor`` so memory + latency stay bounded "
+            "regardless of the requested ``limit``. The pre-PR hard-coded "
+            "100 silently collapsed the over-fetch ratio at ``limit >= 20`` "
+            "and made rerank a no-op at ``limit >= 100``."
+        ),
+    )
+    rerank_connect_timeout_s: float = Field(
+        default=1.0,
+        ge=0.05,
+        le=10.0,
+        description=(
+            "TCP connect timeout for the rerank HTTP call. Kept short so "
+            "a wedged rerank slot can't stall memory_search; the read "
+            "budget is the larger of the two knobs."
+        ),
+    )
+    rerank_read_timeout_s: float = Field(
+        default=8.0,
+        ge=0.05,
+        le=60.0,
+        description=(
+            "Read budget for the rerank slot. Default raised from the "
+            "previous shared 2.0s scalar because GPU rerank under "
+            "concurrent load (see auto-memory "
+            "``hal0-lemonade-threads-deadlock``) regularly breaches a "
+            "tight total budget, which silently falls through to vector "
+            "ordering. Failures still fall through — this just stops "
+            "spurious timeouts under healthy-but-loaded conditions."
+        ),
+    )
+
+    @field_validator("model")
+    @classmethod
+    def model_nonempty(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("memory.embedding.model must not be empty")
+        return v
+
+    @field_validator("rerank_url")
+    @classmethod
+    def rerank_url_nonempty(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("memory.embedding.rerank_url must not be empty")
+        return v
+
+
 class MemoryConfig(BaseModel):
     """[memory] section of hal0.toml.
 
-    Container for the per-subsystem memory tunables; today only
-    ``[memory.graph]`` lives here (ADR-0014) but the section exists so
-    future memory features (retention, prune-policy, archival) land
-    under a single namespace rather than scattering top-level tables.
+    Container for the per-subsystem memory tunables. Today carries
+    ``[memory.graph]`` (ADR-0014) and ``[memory.embedding]`` (issue
+    #116). Future memory features (retention, prune-policy, archival)
+    land under a single namespace rather than scattering top-level
+    tables.
     """
 
     model_config = {"populate_by_name": True, "extra": "allow"}
 
     graph: MemoryGraphConfig = Field(default_factory=MemoryGraphConfig)
+    embedding: MemoryEmbeddingConfig = Field(default_factory=MemoryEmbeddingConfig)
 
 
 class ModelsConfig(BaseModel):
@@ -1266,6 +1387,7 @@ __all__ = [
     "HardwareInfo",
     "MCPServerConfig",
     "MemoryConfig",
+    "MemoryEmbeddingConfig",
     "MemoryGraphConfig",
     "MetaConfig",
     "ModelConfig",
