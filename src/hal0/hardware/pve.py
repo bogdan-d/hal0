@@ -31,6 +31,7 @@ import os
 import ssl
 import tempfile
 import urllib.request
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
@@ -202,6 +203,61 @@ def _summarise(entries: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+# ── Auto-detection (used when no proxmox.json is configured) ───────────────
+
+
+class PveDetectionState(StrEnum):
+    """Confidence that the current host is a Proxmox-managed LXC.
+
+    Used only when /etc/hal0/proxmox.json is missing — the UI surfaces a
+    non-blocking nudge in the DETECTED / UNCERTAIN cases.
+    """
+
+    NOT_DETECTED = "not_detected"
+    UNCERTAIN = "uncertain"
+    DETECTED = "detected"
+
+
+# Module-level Paths so tests can monkeypatch the read sources.
+_PROC_VERSION = Path("/proc/version")
+_PROC_1_CGROUP = Path("/proc/1/cgroup")
+
+
+def _has_pve_kernel() -> bool:
+    try:
+        return "-pve" in _PROC_VERSION.read_text(errors="ignore")
+    except OSError:
+        return False
+
+
+def _is_lxc_init() -> bool:
+    try:
+        text = _PROC_1_CGROUP.read_text(errors="ignore")
+    except OSError:
+        return False
+    # Proxmox LXCs put init under lxc.payload.<vmid>/… or /lxc/<vmid>/…
+    return "lxc.payload" in text or "/lxc/" in text
+
+
+def detect_proxmox_host() -> PveDetectionState:
+    """Best-effort detection of whether hal0 is running inside a Proxmox LXC.
+
+    Signals (each independent, none requires shelling out):
+      - /proc/version contains '-pve'   (strong)
+      - /proc/1/cgroup is lxc-shaped    (medium)
+
+    Both signals present → DETECTED. Either signal alone → UNCERTAIN. Neither → NOT_DETECTED.
+    Never raises; unreadable inputs collapse to NOT_DETECTED.
+    """
+    pve_kernel = _has_pve_kernel()
+    lxc_init = _is_lxc_init()
+    if pve_kernel and lxc_init:
+        return PveDetectionState.DETECTED
+    if pve_kernel or lxc_init:
+        return PveDetectionState.UNCERTAIN
+    return PveDetectionState.NOT_DETECTED
+
+
 # ── Slim projection + transition detection ──────────────────────────────────
 
 # Fields the dashboard's /api/stats/hardware doesn't read — keep them in
@@ -353,7 +409,9 @@ async def pve_test(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 __all__ = [
+    "PveDetectionState",
     "delete_pve_config",
+    "detect_proxmox_host",
     "invalidate_pve_cache",
     "pve_config_path",
     "pve_status",

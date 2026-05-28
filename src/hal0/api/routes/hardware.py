@@ -13,6 +13,8 @@ from hal0.config.loader import load_hardware_info
 
 router = APIRouter()
 
+_PVE_CONFIGURE_HINT = "Configure /etc/hal0/proxmox.json to see host pressure."
+
 
 def _flatten_for_ui(info: dict[str, Any]) -> dict[str, Any]:
     """Project HardwareInfo into the fields the Vue Hardware view expects.
@@ -352,7 +354,22 @@ async def stats_hardware(request: Request) -> dict[str, Any]:
                         f"Proxmox host integration recovered ({full.get('node', '?')})",
                         data={"node": full.get("node")},
                     )
-        primary["host"] = pve.project_slim(full)
+        slim = pve.project_slim(full)
+        # When unconfigured, also fold in best-effort detection so the
+        # dashboard can render a "Configure Proxmox →" nudge.
+        if not slim.get("configured"):
+            state = pve.detect_proxmox_host()
+            nudge = state in (
+                pve.PveDetectionState.DETECTED,
+                pve.PveDetectionState.UNCERTAIN,
+            )
+            host_block: dict[str, Any] = {"configured": False, "detected": nudge}
+            if nudge:
+                host_block["detection"] = state.value
+                host_block["hint"] = _PVE_CONFIGURE_HINT
+            primary["host"] = host_block
+        else:
+            primary["host"] = slim
 
     primary["per_upstream"] = per_upstream
     primary["upstream_names"] = list(per_upstream.keys())
