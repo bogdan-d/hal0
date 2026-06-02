@@ -30,8 +30,10 @@ in addition to the Bearer check.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import logging
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
@@ -61,6 +63,14 @@ DEFAULT_BASE_URL = "http://127.0.0.1:13305"
 # separate progress polling loop).
 DEFAULT_TIMEOUT_S = 5.0
 DEFAULT_LOAD_TIMEOUT_S = 120.0
+
+# PERF: /v1/health is hit once per configured slot during a single
+# /api/slots refresh (SlotManager.list() fans out _is_active over every
+# slot, each calling health()), plus one more from the route's enrichment
+# pass — ~8 identical round-trips per request on a 7-slot box. The body is
+# a global pool snapshot, so a sub-second coalescing cache collapses the
+# burst to one upstream call without changing observed behaviour.
+_HEALTH_CACHE_TTL_S = 0.5
 
 
 class LemonadeClient:
@@ -99,6 +109,13 @@ class LemonadeClient:
         # exercise only one method don't open sockets.
         self._http_client: httpx.AsyncClient | None = http_client
         self._owns_http_client: bool = http_client is None
+        # PERF: short-TTL coalescing cache for /v1/health (see
+        # _HEALTH_CACHE_TTL_S). _health_lock serialises the concurrent
+        # burst from SlotManager.list()'s asyncio.gather so exactly one
+        # upstream request fills the cache for the whole batch.
+        self._health_cache: dict[str, Any] | None = None
+        self._health_cache_at: float = 0.0
+        self._health_lock: asyncio.Lock = asyncio.Lock()
 
     # ── lifecycle ──────────────────────────────────────────────────
 
@@ -150,7 +167,38 @@ class LemonadeClient:
         Expected shape (per Lemonade docs, may evolve): ``{"loaded":
         [{"model_name": "...", "backend_url": "...", ...}], "ready":
         bool, ...}``. Caller treats unknown fields permissively.
+
+        PERF: results are cached for ``_HEALTH_CACHE_TTL_S`` and the
+        concurrent burst (e.g. SlotManager.list()'s per-slot probes) is
+        coalesced under ``_health_lock`` so a single /api/slots refresh
+        makes one upstream call instead of one per slot. Errors are NOT
+        cached — a failed probe falls straight through to the caller's
+        existing degrade-to-empty handling and the next call retries.
+
+        Only callers that derive slot/loaded state go through this cache.
+        Background consumers that just need a field from health (the
+        log-stream ws-port resolver) use :meth:`_health_uncached` so they
+        never pre-populate this cache with a snapshot the foreground
+        introspection would then read stale within the TTL window.
         """
+        now = time.monotonic()
+        if self._health_cache is not None and (now - self._health_cache_at) < _HEALTH_CACHE_TTL_S:
+            return self._health_cache
+        async with self._health_lock:
+            now = time.monotonic()
+            if (
+                self._health_cache is not None
+                and (now - self._health_cache_at) < _HEALTH_CACHE_TTL_S
+            ):
+                return self._health_cache
+            body = await self._health_uncached()
+            self._health_cache = body
+            self._health_cache_at = time.monotonic()
+            return body
+
+    async def _health_uncached(self) -> dict[str, Any]:
+        """Raw ``GET /v1/health`` with no caching. Raises the usual
+        ``LemonadeError`` subclasses on transport/HTTP failure."""
         async with self._request("GET", "/v1/health") as resp:
             self._raise_for_status(resp)
             return resp.json()
@@ -425,7 +473,10 @@ class LemonadeClient:
         skip the connection entirely (see issue #421).
         """
         try:
-            health = await self.health()
+            # Uncached: the journal bridge calls this on every (re)connect;
+            # routing it through the cached health() would poison the
+            # slot-introspection cache with a stale loaded[] snapshot.
+            health = await self._health_uncached()
         except LemonadeError:
             return None
         ws_port = health.get("websocket_port") if isinstance(health, dict) else None

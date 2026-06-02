@@ -16,6 +16,13 @@
                         renders the usage_hint into the system prompt.
      system_prompt    — str          (persona-rendered prelude; PR-3 Phase 7)
      personality_name — str          (display name of active persona; PR-3 Phase 8)
+     delegation       — dict or None ({model, base_url, provider}) — subagent
+                        role model from the `agent-hermes` slot. None → block
+                        omitted → subagents inherit the chat model.
+     auxiliary_tasks  — dict          task → {provider, model, base_url}.
+                        Drives the auxiliary: block. utility-slot tasks render
+                        provider:"custom"+base_url; vision/web_extract stay
+                        provider:"main". (feat/hermes-role-slots)
 #}# Managed by hal0 (issue #241). Edits MAY be overwritten by
 # `hal0 agent bootstrap hermes`. Drop a file at
 # /etc/hal0/agents/hermes/overrides.yaml to merge on top.
@@ -29,14 +36,17 @@
    rendered ``base_url`` driving the actual calls. The legacy
    ``Hal0Profile`` plugin was removed in PR-1-bundle (R4 H4) — it
    hardcoded an :8000 base_url that has no listener. #}
+{# NB: `model.context_length` is deliberately NOT emitted. hermes 0.14.0
+   `agent/model_metadata.py:get_model_context_length` treats it as a
+   GLOBAL override applied to EVERY model — so switching to a cloud model
+   (deepseek/openrouter) wrongly inherited our local value. Per-model
+   context now lives in the `custom_providers:` block below, matched by
+   base_url + model_id. #}
 model:
 {%- if primary %}
   default: {{ primary.model_id | tojson }}
   provider: "custom"
   base_url: {{ primary.backend_url | tojson }}
-{%- if primary.context_length %}
-  context_length: {{ primary.context_length }}
-{%- endif %}
 {%- else %}
   # No chat slot was ready at bootstrap time — operator must wire one
   # before the agent can serve completions. Re-run bootstrap with
@@ -65,6 +75,39 @@ model_aliases:
     base_url: {{ slot.backend_url | tojson }}
 {%- endfor %}
 {%- endif %}
+{%- if custom_providers %}
+
+{# Per-model context_length, keyed by model_id under the hal0 gateway.
+   hermes_cli/config.py:get_custom_provider_context_length matches
+   base_url + model here (trailing-slash-insensitive) at startup, /model
+   switch and /info; get_compatible_custom_providers also merges these
+   into the model picker. Replaces the global model.context_length above:
+   each entry scopes context to its own model_id, so cloud models keep
+   their real context instead of inheriting our local value. #}
+custom_providers:
+{%- for prov in custom_providers %}
+  - name: {{ prov.name | tojson }}
+    base_url: {{ prov.base_url | tojson }}
+    models:
+{%- for model_id, mcfg in prov.models.items() %}
+      {{ model_id | tojson }}:
+        context_length: {{ mcfg.context_length }}
+{%- endfor %}
+{%- endfor %}
+{%- endif %}
+{%- if delegation %}
+
+{# feat/hermes-role-slots: subagents run on a dedicated slot
+   (`agent-hermes`). delegate_tool.py `_resolve_delegation_credentials`
+   reads delegation.{model,provider,base_url}; setting base_url forces
+   provider → "custom" so subagents hit hal0's OpenAI surface. Omitted
+   entirely when the slot isn't live, in which case subagents inherit the
+   parent (chat) model. #}
+delegation:
+  model: {{ delegation.model | tojson }}
+  provider: {{ delegation.provider | default("custom") | tojson }}
+  base_url: {{ delegation.base_url | tojson }}
+{%- endif %}
 
 memory:
   # Hal0MemoryProvider plugin (#242). MCP server stays mounted in parallel
@@ -87,6 +130,7 @@ memory:
 mcp_servers:
 {%- for srv in mcp_servers %}
   {{ srv.name }}:
+    type: {{ srv.type | default("http") | tojson }}
     url: {{ srv.url | tojson }}
     headers:
       X-hal0-Agent: {{ agent_id | tojson }}
@@ -129,10 +173,22 @@ display:
   personality: {{ personality_name | tojson }}
 {%- endif %}
 
+{# feat/hermes-role-slots: per-task side-job routing. Each task is read by
+   auxiliary_client.py `_resolve_task_provider_model` as
+   auxiliary.<task>.{provider,model,base_url}. utility-slot tasks render
+   provider:"custom"+base_url (cheap compaction/search/title model);
+   vision/web_extract stay provider:"main" so they inherit the chat model.
+   A base_url is only emitted when set, so provider:"main" rows stay
+   minimal. #}
 auxiliary:
-  vision: { provider: "main", model: "" }
-  web_extract: { provider: "main", model: "" }
-  session_search: { provider: "main", model: "" }
+{%- for task, cfg in auxiliary_tasks.items() %}
+  {{ task }}:
+    provider: {{ cfg.provider | default("main") | tojson }}
+    model: {{ cfg.model | default("") | tojson }}
+{%- if cfg.base_url %}
+    base_url: {{ cfg.base_url | tojson }}
+{%- endif %}
+{%- endfor %}
 
 {%- if stt %}
 

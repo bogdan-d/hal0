@@ -23,6 +23,12 @@ from hal0.agents import hermes_provision as hp
 from hal0.agents import personas as P
 
 
+@pytest.fixture(autouse=True)
+def _offline_model_contexts(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Never hit the live daemon's /v1/models during unit tests."""
+    monkeypatch.setattr(hp, "_fetch_model_contexts", lambda: {})
+
+
 @pytest.fixture
 def hermetic_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> hp.BootstrapState:
     """A BootstrapState rooted entirely in ``tmp_path`` with externals stubbed."""
@@ -72,6 +78,16 @@ def hermetic_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> hp.Bootst
                 "backend_url": "http://127.0.0.1:8001/v1",
                 "context_length": 16384,
             },
+            {
+                "name": "utility",
+                "type": "llm",
+                "kind": "local",
+                "state": "ready",
+                "status": "ready",
+                "model_id": "qwen3-utility-test",
+                "backend_url": "http://127.0.0.1:8001/v1",
+                "context_length": 8192,
+            },
             # An embed slot that must NEVER appear in chat aliases.
             {
                 "name": "embed",
@@ -85,6 +101,9 @@ def hermetic_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> hp.Bootst
         ]
 
     monkeypatch.setattr(hp, "_fetch_slots", _fake_slots)
+    # /v1/models context fetch → empty so per-model context falls back to each
+    # slot's own context_length (set on the fixture), keeping renders offline.
+    monkeypatch.setattr(hp, "_fetch_model_contexts", lambda: {})
 
     # MCP probes succeed deterministically with a fixed tool list so the
     # provision.json `mcp_wire.details` hash matches across runs.
@@ -246,6 +265,7 @@ def test_config_yaml_contains_chat_slot_aliases(
 ) -> None:
     """Phase 5 contract: chat_slots appear in the first render
     (pre-PR-3 they only appeared after Phase 9)."""
+    yaml = pytest.importorskip("yaml")
     state_root = tmp_path / "state"
     hp.run(state_root=state_root, initial_state=hermetic_state)
     config = (Path(hermetic_state.hermes_home) / "config.yaml").read_text(encoding="utf-8")
@@ -255,6 +275,14 @@ def test_config_yaml_contains_chat_slot_aliases(
     assert "embed:" not in config.split("model_aliases:")[1].split("\n\n")[0], (
         "embed slot leaked into chat aliases"
     )
+    # Every alias routes through the STABLE gateway, NOT the slot's raw
+    # per-slot upstream port (:8001 in the fixture) — lemond reassigns
+    # those on reload, so baked-in ports go stale.
+    cfg = yaml.safe_load(config)
+    for alias, entry in cfg["model_aliases"].items():
+        assert entry["base_url"] == "http://127.0.0.1:8080/v1", (
+            f"alias {alias} base_url should be the gateway, got {entry['base_url']}"
+        )
 
 
 def test_config_yaml_contains_mcp_servers(
@@ -269,6 +297,46 @@ def test_config_yaml_contains_mcp_servers(
     assert "hal0-admin:" in config
     assert "hal0-memory:" in config
     assert '"hermes-agent"' in config  # X-hal0-Agent value
+
+
+def test_config_yaml_contains_role_slot_blocks(
+    tmp_path: Path, hermetic_state: hp.BootstrapState
+) -> None:
+    """feat/hermes-role-slots: an end-to-end bootstrap renders the
+    delegation block from the ``agent-hermes`` slot and routes the
+    auxiliary compaction group to the ``utility`` slot."""
+    yaml = pytest.importorskip("yaml")
+    state_root = tmp_path / "state"
+    hp.run(state_root=state_root, initial_state=hermetic_state)
+    config_text = (Path(hermetic_state.hermes_home) / "config.yaml").read_text(encoding="utf-8")
+    cfg = yaml.safe_load(config_text)
+    # delegation → agent-hermes slot model at the hal0 /v1 endpoint.
+    assert cfg["delegation"]["model"] == "qwen3-coder-test"
+    assert cfg["delegation"]["provider"] == "custom"
+    assert cfg["delegation"]["base_url"] == "http://127.0.0.1:8080/v1"
+    # auxiliary compaction/search/title → utility slot model.
+    for task in ("compression", "session_search", "title_generation"):
+        assert cfg["auxiliary"][task]["model"] == "qwen3-utility-test"
+        assert cfg["auxiliary"][task]["provider"] == "custom"
+        assert cfg["auxiliary"][task]["base_url"] == "http://127.0.0.1:8080/v1"
+    # vision/web_extract still inherit the chat model.
+    assert cfg["auxiliary"]["vision"]["provider"] == "main"
+    # Per-model context_length via custom_providers (keyed by model_id),
+    # NOT a global model.context_length override (the deepseek-bleed bug).
+    assert "context_length" not in cfg["model"]
+    assert cfg["custom_providers"] == [
+        {
+            "name": "hal0",
+            "base_url": "http://127.0.0.1:8080/v1",
+            "models": {
+                "qwen3-test": {"context_length": 32768},
+                "qwen3-coder-test": {"context_length": 16384},
+                "qwen3-utility-test": {"context_length": 8192},
+            },
+        }
+    ]
+    # The embed slot must not leak into custom_providers either.
+    assert "bge-test" not in cfg["custom_providers"][0]["models"]
 
 
 def test_persona_seed_appears_in_phase_order_before_config_write(tmp_path: Path) -> None:
