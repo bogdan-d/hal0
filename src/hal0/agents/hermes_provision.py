@@ -1276,6 +1276,15 @@ HAL0_BUNDLED_SKILLS = Path("/usr/share/hal0/skills")
 ETC_HAL0_DIR = Path("/etc/hal0")
 ETC_HAL0_AGENT_SKILLS = ETC_HAL0_DIR / "agent-skills"
 
+# STATE.md — the volatile live snapshot rewritten on every restart / model
+# swap — lives under the hal0-owned /var/lib/hal0 rather than the root-owned
+# /etc/hal0 (#473): the hermes unit runs User=hal0 with ProtectSystem=strict,
+# so its ExecStartPre `render-context` can only write to paths in
+# ReadWritePaths — /var/lib/hal0 is already there, /etc/hal0 is not. HERMES.md
+# (structural, cwd-injected from /etc/hal0) and the rest of the config stay
+# under ETC_HAL0_DIR, written at provision time as root.
+RUNTIME_SNAPSHOT_DIR = Path("/var/lib/hal0")
+
 
 def _latest_env_snapshot(hermes_home: Path) -> dict[str, Any]:
     """Load the most recent env-<ts>.json snapshot env_probe wrote.
@@ -1424,7 +1433,6 @@ def _phase_context_link(state: BootstrapState) -> PhaseResult:
         rendered["SOUL.md"] = fallback_soul
 
     for tpl_name, _out_name in (
-        ("HERMES.md.j2", "HERMES.md"),
         ("AGENTS.md.j2", "AGENTS.md"),
         ("MCP-CLIENTS.md.j2", "MCP-CLIENTS.md"),
     ):
@@ -1439,19 +1447,32 @@ def _phase_context_link(state: BootstrapState) -> PhaseResult:
     h = _atomic_write(soul_path, rendered["SOUL.md"])
     details["rendered"]["SOUL.md"] = {"path": str(soul_path), "sha256": h}
 
-    if "HERMES.md" in rendered:
-        try:
-            ETC_HAL0_DIR.mkdir(parents=True, exist_ok=True)
-            hpath = ETC_HAL0_DIR / "HERMES.md"
-            h = _atomic_write(hpath, rendered["HERMES.md"])
-            details["rendered"]["HERMES.md"] = {"path": str(hpath), "sha256": h}
-            # Mirror into HERMES_HOME/memories/HOST.md so context shows up in
-            # the memory tier as well as cwd auto-injection.
+    # STATE.md + HERMES.md are the live files — render via the one shared
+    # path used by the per-restart / per-swap writers. Best-effort: failure
+    # here must not fail bootstrap (SOUL/AGENTS already written).
+    try:
+        # NB: render_live_context re-fetches /api/slots + /v1/models itself
+        # (separate from the vars_ fetch above). Acceptable at bootstrap
+        # frequency; keeps it usable standalone from the restart/swap writers.
+        live = render_live_context(hermes_home=hermes_home)
+        details["rendered"]["STATE.md"] = {"path": live["state_path"]}
+        details["rendered"]["HERMES.md"] = {
+            "path": str(ETC_HAL0_DIR / "HERMES.md"),
+            "written": live["hermes_written"],
+        }
+        if live["degraded"]:
+            warnings.append("STATE.md rendered with daemon degraded")
+        if live.get("hermes_error"):
+            warnings.append(f"HERMES.md render: {live['hermes_error']}")
+        # render_live_context writes HERMES.md but not the HOST.md mirror;
+        # re-establish the symlink that the memory tier reads.
+        hpath = ETC_HAL0_DIR / "HERMES.md"
+        if hpath.exists():
             host_md = hermes_home / "memories" / "HOST.md"
             if _safe_symlink(hpath, host_md):
                 details["links"].append(str(host_md))
-        except OSError as exc:
-            warnings.append(f"HERMES.md write to /etc/hal0: {exc}")
+    except Exception as exc:  # best-effort
+        warnings.append(f"render_live_context: {exc}")
 
     if "AGENTS.md" in rendered:
         try:
@@ -1853,6 +1874,210 @@ def _slot_context_length(slot: dict[str, Any]) -> int | None:
         return int(raw)
     except (TypeError, ValueError):
         return None
+
+
+# capability slot `type` (from /api/slots) -> STATE.md rollup label.
+_CAPABILITY_TYPE_LABELS = {
+    "embedding": "embed",
+    "stt": "voice-stt",
+    "tts": "voice-tts",
+    "image": "img",
+    "img": "img",
+    "rerank": "rerank",
+}
+
+
+def _collect_capability_rollup(slots: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Ready non-chat capability slots, mapped to STATE.md rollup rows.
+
+    Chat (``type=='llm'``) slots are handled by the primary/chat path and
+    excluded here. Only ready slots are advertised so we never tell the
+    agent about a capability that isn't actually loaded.
+    """
+    out: list[dict[str, Any]] = []
+    for s in slots:
+        if not isinstance(s, dict):
+            continue
+        label = _CAPABILITY_TYPE_LABELS.get((s.get("type") or "").lower())
+        if not label:
+            continue
+        if not _is_ready(s):
+            continue
+        out.append(
+            {
+                "capability": label,
+                "model_id": _slot_model_id(s),
+                "backend": s.get("backend"),
+            }
+        )
+    return out
+
+
+def _igpu_sclk_mhz(sysfs_root: Path = Path("/sys/class/drm")) -> int | None:
+    """Active iGPU shader clock (MHz) from amdgpu sysfs, or None.
+
+    Reads ``pp_dpm_sclk`` and returns the MHz of the active ('*') DPM
+    level. Best-effort: any read/parse error returns None so the template
+    simply omits the clock line. Tries card0..card3 (Strix Halo dev nodes);
+    ``sysfs_root`` is injectable for tests.
+    """
+    for idx in range(4):
+        path = sysfs_root / f"card{idx}" / "device" / "pp_dpm_sclk"
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        for line in text.splitlines():
+            if line.rstrip().endswith("*"):
+                # e.g. "2: 2900Mhz *"
+                for tok in line.replace("Mhz", " ").replace("MHz", " ").split():
+                    if tok.isdigit():
+                        return int(tok)
+        # no active line on this card — try the next one
+    return None
+
+
+def _state_body_minus_timestamp(text: str) -> str:
+    """STATE.md body with the volatile ``_as_of:`` line removed.
+
+    Used for content-hash gating so a regen that finds nothing
+    substantive changed does not churn the file (and bust prompt-cache).
+    Assumes ``_as_of:`` is not a prefix of any substantive content line
+    (guaranteed by STATE.md.j2, which emits it only as the final footer).
+    """
+    return "\n".join(line for line in text.splitlines() if not line.startswith("_as_of:"))
+
+
+def render_live_context(
+    *,
+    hermes_home: Path,
+    slots_fetcher: Callable[[], list[dict[str, Any]]] | None = None,
+    now_iso: str | None = None,
+) -> dict[str, Any]:
+    """Re-probe live slot/capability state; (re)write HERMES.md + STATE.md.
+
+    STATE.md is content-hash gated: rewritten (and its ``_as_of`` line
+    bumped) only when the substantive body changes. HERMES.md is written
+    atomically (identical content => identical bytes => prompt-cache safe).
+    Never raises on a daemon-unreachable read — leaves last-good files and
+    reports ``degraded=True``.
+
+    Returns: {"state_written": bool, "hermes_written": bool,
+              "degraded": bool, "state_path": str}.
+    """
+    fetch = slots_fetcher or _fetch_slots
+    slots_all = fetch() or []
+    # Reachability is independent of slot count. A reachable daemon with
+    # zero configured slots is NOT degraded (we render "no chat model
+    # loaded" + reachable). degraded == the daemon couldn't be reached at
+    # all — in which case we must NOT clobber a last-good snapshot. A
+    # non-empty fetch implies the daemon answered, so we only probe health
+    # when the slot list came back empty.
+    reachable = True if slots_all else _http_get(DAEMON_HEALTH_URL) == 200
+    degraded = not reachable
+
+    contexts = _fetch_model_contexts()
+    chat_slots = _collect_chat_slots(slots_all, contexts=contexts)
+    primary_raw = _resolve_primary_slot(slots_fetcher=lambda: slots_all)
+
+    primary_slot = next(
+        (s for s in slots_all if isinstance(s, dict) and s.get("name") == "primary"),
+        None,
+    )
+    primary_for_template: dict[str, Any] | None = None
+    if primary_raw["model"] and primary_raw["model"] != "primary":
+        primary_for_template = {
+            "alias": _slot_alias(primary_slot) if primary_slot else "primary",
+            "model_id": primary_raw["model"],
+            "backend_url": primary_raw["base_url"],
+            "context_length": primary_raw["context_length"],
+            "backend": (primary_slot or {}).get("backend"),
+        }
+
+    capabilities = _collect_capability_rollup(slots_all)
+
+    # NPU: present from the cached env snapshot; loaded model from any FLM
+    # backend slot (NPU LLM path is FastFlowLM).
+    env_report = _latest_env_snapshot(hermes_home).get("env_report", {})
+    npu_model = next(
+        (
+            _slot_model_id(s)
+            for s in slots_all
+            if isinstance(s, dict) and "flm" in str(s.get("backend") or "").lower()
+        ),
+        None,
+    )
+    npu = {"present": bool(env_report.get("npu", {}).get("present")), "model_id": npu_model}
+
+    now = now_iso or datetime.datetime.now(datetime.UTC).isoformat()
+
+    state_vars = {
+        "primary": primary_for_template,
+        "capabilities": capabilities,
+        "npu": npu,
+        "igpu_sclk_mhz": _igpu_sclk_mhz(),
+        "dashboard_url": os.environ.get("HAL0_DASHBOARD_URL", "https://hal0.thinmint.dev"),
+        "lemonade_base": os.environ.get("HAL0_LEMONADE_BASE", "http://127.0.0.1:13305"),
+        "daemon": "degraded" if degraded else "reachable",
+        "as_of": now,
+    }
+    new_state = _render_template("STATE.md.j2", **state_vars)
+
+    out: dict[str, Any] = {
+        "state_written": False,
+        "hermes_written": False,
+        "degraded": degraded,
+        "state_path": str(RUNTIME_SNAPSHOT_DIR / "STATE.md"),
+    }
+
+    # STATE.md — content-hash gated (ignore the as_of line). Written under the
+    # hal0-owned RUNTIME_SNAPSHOT_DIR so render-context works under the User=hal0
+    # / ProtectSystem=strict hermes sandbox (#473).
+    RUNTIME_SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
+    state_path = RUNTIME_SNAPSHOT_DIR / "STATE.md"
+    existing = ""
+    if state_path.exists():
+        existing = state_path.read_text(encoding="utf-8")
+
+    # Daemon unreachable but we already have a last-good snapshot: preserve
+    # it (spec — never clobber good state with a degraded one, e.g. when
+    # ExecStartPre fires before hal0-api is up). Leave mtime stale so the
+    # session hook keeps retrying the regen until the daemon returns.
+    if degraded and existing:
+        return out  # state_written=False, hermes_written=False, degraded=True
+
+    if _state_body_minus_timestamp(existing) != _state_body_minus_timestamp(new_state):
+        _atomic_write(state_path, new_state)
+        out["state_written"] = True
+    elif reachable:
+        # Content unchanged, but we just confirmed it current against a
+        # reachable daemon — bump mtime so the on_session_start hook's TTL
+        # staleness check settles instead of firing a background regen every
+        # session forever. mtime is not content, so Hermes's injected text
+        # is byte-identical and the prompt-cache prefix stays warm.
+        os.utime(state_path, None)
+
+    # HERMES.md — structural map; atomic write (identical content => identical
+    # bytes => prompt-cache safe). Render failure is non-fatal.
+    try:
+        hermes_md = _render_template(
+            "HERMES.md.j2",
+            env=env_report,
+            hal0_version=_hal0_version_string(),
+            hermes_version=_hermes_version_pin(),
+            primary=primary_for_template,
+            chat_slots=chat_slots,
+            peer_agents=[],
+        )
+        hpath = ETC_HAL0_DIR / "HERMES.md"
+        if not hpath.exists() or hpath.read_text(encoding="utf-8") != hermes_md:
+            _atomic_write(hpath, hermes_md)
+            out["hermes_written"] = True
+    except Exception as exc:  # best-effort; STATE.md already written
+        log.warning("hermes_provision.render_live_context_hermes_failed", error=str(exc))
+        out["hermes_error"] = str(exc)
+
+    return out
 
 
 def _collect_chat_slots(

@@ -431,6 +431,17 @@ class CapabilityOrchestrator:
         # call doesn't leave a stale selection on disk.
         self._save(cfg)
 
+        # A capability change (enable/disable/model/backend) just altered
+        # live slot state — refresh Hermes's context files (detached;
+        # best-effort, never blocks the API response). NB: the hot-swap
+        # branch above already triggers manager.swap()'s own refresh, so a
+        # model/backend change fires this twice; that's harmless — the
+        # render is idempotent and content-hash gated, and manager.swap()
+        # must keep its spawn for direct /api/slots/<name>/swap callers.
+        from hal0.agents.hermes_refresh import spawn_context_refresh
+
+        spawn_context_refresh()
+
         status_str = await self._slot_status_string(slot_name)
         return {
             "backend": merged.backend,
