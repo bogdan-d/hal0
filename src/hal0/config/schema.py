@@ -1300,6 +1300,24 @@ class MemoryConfig(BaseModel):
 
     graph: MemoryGraphConfig = Field(default_factory=MemoryGraphConfig)
     embedding: MemoryEmbeddingConfig = Field(default_factory=MemoryEmbeddingConfig)
+    engine: str = Field(
+        default="cognee",
+        description=(
+            "Active memory engine. One of 'cognee' | 'hindsight' | 'mem0' | "
+            "'pgvector'. Default 'cognee' until P2 cutover. The fallback flag: "
+            "set back to 'cognee' to revert to the untouched Cognee store for "
+            "one release after the Hindsight cutover."
+        ),
+    )
+
+    @field_validator("engine")
+    @classmethod
+    def _engine_is_known(cls, v: str) -> str:
+        known = {"cognee", "hindsight", "mem0", "pgvector"}
+        s = str(v or "cognee").strip().lower()
+        if s not in known:
+            raise ValueError(f"memory.engine {v!r} must be one of {sorted(known)}")
+        return s
 
 
 class ModelsConfig(BaseModel):
