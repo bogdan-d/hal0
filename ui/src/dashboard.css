@@ -2250,7 +2250,7 @@ select.npu-sel {
   .topbar { padding: 0 12px; gap: 10px; }
   .footer { display: none; }
   .bottom-tabs { display: grid; }
-  .app { grid-template-rows: var(--topbar-h) 1fr; grid-template-areas: "topbar" "main"; }
+  .app { grid-template-columns: 1fr; grid-template-rows: var(--topbar-h) 1fr; grid-template-areas: "topbar" "main"; }
 }
 
 /* ─── Persona-above-composer placement ─────────────────────────── */
