@@ -989,7 +989,15 @@ function SlotsView({ slotVariant, slotParam, onGo }) {
       ? <SlotCard key={s.name} slot={s} />
       : <SlotCard key={s.name} slot={s} />;
 
-  const renderGroup = (label, items) => {
+  // C6: stable-sort enabled slots before disabled ones, preserving the
+  // existing order within each bucket. Array.prototype.sort is stable, so a
+  // 0/1 key keeps the original type/role ordering intact otherwise. Pairs
+  // with the faded card so disabled slots sink to the end of their section.
+  const enabledFirst = (items) =>
+    items.slice().sort((a, b) => (a?.enabled === false ? 1 : 0) - (b?.enabled === false ? 1 : 0));
+
+  const renderGroup = (label, rawItems, opts = {}) => {
+    const items = enabledFirst(rawItems);
     if (!items.length) return null;
     if (slotVariant === "list") {
       return (
@@ -1018,7 +1026,7 @@ function SlotsView({ slotVariant, slotParam, onGo }) {
           <h2>{label}<span className="ct mono">{items.length}</span></h2>
           <div className="rule" />
         </div>
-        <div className={"slots-grid" + (slotVariant === "spec" ? " spec" : "")}>
+        <div className={"slots-grid" + (slotVariant === "spec" ? " spec" : "") + (opts.quarter ? " quarter" : "")}>
           {items.map(s => {
             // Demo: show error banner on a single slot if a banner-state would fire
             const errMsg = (window.__hal0Banners && window.__hal0Banners.get && window.__hal0Banners.get()["model-missing"] && s.name === "primary")
@@ -1043,9 +1051,13 @@ function SlotsView({ slotVariant, slotParam, onGo }) {
 
       <div className="dash">
         <div className="dash-main">
-          {renderGroup("Chat",  groups.chat)}
-          {renderGroup("Embed", groups.embed)}
-          {renderGroup("Voice", groups.voice)}
+          {renderGroup("Chat", groups.chat)}
+          {/* Capabilities (C7): embedding/reranking/transcription/tts cards are
+              content-light, so they render in a denser 4-up quarter-width grid
+              instead of two separate full-width Embed/Voice sections. NPU
+              modalities (group "npu") are excluded by grouping — they live in
+              the dedicated NPU/FLM stack section below. */}
+          {renderGroup("Capabilities", [...groups.embed, ...groups.voice], { quarter: true })}
           {renderGroup("Image", groups.img)}
 
           {slots.some(s => s.device === "npu") && (
