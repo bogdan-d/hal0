@@ -87,3 +87,20 @@ async def test_graph_status_shape(conformant):
         "last_built_at",
         "last_error",
     }
+
+
+def _pgvector_factory():
+    from hal0.memory.pgvector_provider import PgVectorProvider
+
+    return PgVectorProvider(client_id="alice")
+
+
+@pytest.mark.slow
+@pytest.mark.asyncio
+async def test_pgvector_conforms():
+    p = _pgvector_factory()
+    res = await p.add("pg note", dataset="shared")
+    assert set(res) == {"id", "timestamp"}
+    out = await p.search("pg", dataset="private:bob", client_id="bob")
+    assert out == []
+    assert set(p.graph_status()) >= {"enabled", "route"}
