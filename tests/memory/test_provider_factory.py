@@ -31,3 +31,20 @@ def test_factory_returns_cognee_for_default_engine():
     with patch("hal0.memory.CogneeWrapper", autospec=True) as mock_cls:
         provider_from_config(_cfg("cognee"))
         assert mock_cls.called
+
+
+def test_factory_returns_hindsight_when_engine_hindsight():
+    with (
+        patch("hal0.memory.HindsightProvider", autospec=True) as mock_cls,
+        patch("hal0.memory._build_hindsight_client", return_value=object()),
+    ):
+        provider_from_config(_cfg("hindsight"))
+        assert mock_cls.called
+
+
+def test_factory_degrades_to_pgvector_when_hindsight_unavailable():
+    from hal0.memory.pgvector_provider import PgVectorProvider
+
+    with patch("hal0.memory._build_hindsight_client", side_effect=RuntimeError("no daemon")):
+        provider = provider_from_config(_cfg("hindsight"))
+        assert isinstance(provider, PgVectorProvider)

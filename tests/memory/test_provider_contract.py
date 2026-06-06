@@ -104,3 +104,24 @@ async def test_pgvector_conforms():
     out = await p.search("pg", dataset="private:bob", client_id="bob")
     assert out == []
     assert set(p.graph_status()) >= {"enabled", "route"}
+
+
+def _hindsight_factory():
+    from hal0.memory.hindsight_provider import HindsightProvider
+    from tests.memory.test_hindsight_provider import FakeHindsightClient
+
+    return HindsightProvider(client=FakeHindsightClient(), client_id="alice")
+
+
+@pytest.mark.slow
+@pytest.mark.asyncio
+async def test_hindsight_conforms_to_contract():
+    p = _hindsight_factory()
+    res = await p.add("hs note", dataset="shared")
+    assert set(res) == {"id", "timestamp"}
+    # Foreign-private read → empty.
+    out = await p.search("note", dataset="private:bob", client_id="bob")
+    assert out == []
+    assert set(p.graph_status()) >= {"enabled", "route"}
+    d = await p.delete([res["id"]])
+    assert "deleted" in d

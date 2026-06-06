@@ -12,6 +12,8 @@ from typing import Any
 import structlog
 
 from hal0.memory.cognee_wrapper import CogneeWrapper, MemoryRecord
+from hal0.memory.hindsight_provider import HindsightProvider
+from hal0.memory.pgvector_provider import PgVectorProvider
 from hal0.memory.provider import (
     AddResult,
     DeleteResult,
@@ -29,13 +31,28 @@ __all__ = [
     "CogneeWrapper",
     "DeleteResult",
     "GraphStatus",
+    "HindsightProvider",
     "ListPage",
     "MemoryItem",
     "MemoryProvider",
     "MemoryRecord",
     "Mode",
+    "PgVectorProvider",
+    "_build_hindsight_client",
     "provider_from_config",
 ]
+
+
+def _build_hindsight_client(cfg: Any) -> Any:
+    """Construct the Hindsight REST client from config + env.
+
+    Raises if the daemon is unreachable so the factory can degrade. The
+    actual httpx-backed client lives in hindsight_provider; this indirection
+    exists purely so the boot-degrade path is unit-testable.
+    """
+    from hal0.memory.hindsight_client import HindsightRestClient
+
+    return HindsightRestClient.from_env()
 
 
 def provider_from_config(cfg: Any) -> MemoryProvider:
@@ -62,6 +79,21 @@ def provider_from_config(cfg: Any) -> MemoryProvider:
             rerank_read_timeout_s=float(embed.rerank_read_timeout_s),
         )
 
-    # P1 wires hindsight/mem0/pgvector here.
+    if engine == "hindsight":
+        try:
+            client = _build_hindsight_client(cfg)
+        except Exception as exc:  # daemon down at boot → degrade ladder
+            log.warning("hal0.memory.hindsight_unavailable", error=str(exc), fallback="pgvector")
+            return PgVectorProvider()
+        return HindsightProvider(client=client)
+
+    if engine == "pgvector":
+        return PgVectorProvider()
+
+    if engine == "mem0":  # documented fallback (spec §2) — not yet implemented
+        log.warning("hal0.memory.mem0_not_implemented", fallback="cognee")
+        return CogneeWrapper(embedding_model=str(embed.model))
+
+    # cognee branch above is the default; unknown engines log + fall back.
     log.warning("hal0.memory.unknown_engine", engine=engine, fallback="cognee")
     return CogneeWrapper(embedding_model=str(embed.model))
