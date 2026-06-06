@@ -166,16 +166,69 @@ class HindsightProvider(MemoryProvider):
         tags: list[str] | None = None,
         client_id: str | None = None,
     ) -> list[dict[str, Any]]:
-        # Single-bank placeholder; Task P1-3 replaces this with the fan-out.
+        """Fan out per-bank recall to the caller's allowed banks, merge under
+        one token budget. Hindsight has no server-side cross-bank query and
+        returns no numeric score, so we re-rank the union via the :8086
+        reranker, with the §4b precedence ladder as the tiebreak.
+        """
+        import asyncio
+
         banks = [namespace_to_bank(ns) for ns in self._allowed_namespaces(dataset, client_id)]
-        merged: list[dict[str, Any]] = []
-        for bank in banks:
+        if not banks:
+            return []
+
+        async def _one(bank: str) -> list[dict[str, Any]]:
             resp = await self._client.recall(
                 bank_id=bank, query=query, types=types, max_tokens=max_tokens, tags=tags
             )
-            for fact in resp.get("results", []):
-                merged.append(self._fact_to_item(fact, bank))
-        return merged
+            return [self._fact_to_item(f, bank) for f in resp.get("results", [])]
+
+        per_bank = await asyncio.gather(*[_one(b) for b in banks])
+        union: list[dict[str, Any]] = [item for bank_items in per_bank for item in bank_items]
+        if not union:
+            return []
+
+        union = await self._rerank_union(query, union)
+        union.sort(key=self._precedence_key)  # stable: precedence wins ties
+        return self._apply_token_budget(union, max_tokens)
+
+    @staticmethod
+    def _precedence_key(item: dict[str, Any]) -> tuple[int, float]:
+        """§4b ladder: shared/curated observations rank above raw private
+        facts. Lower tuple sorts first. Second element is negative rerank
+        score so higher score sorts earlier within the same tier.
+        """
+        is_observation = item.get("type") == "observation"
+        is_shared = item.get("dataset") == _SHARED
+        tier = 0 if (is_observation or is_shared) else 1
+        return (tier, -float(item.get("score") or 0.0))
+
+    async def _rerank_union(self, query: str, union: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        if self._reranker is None or len(union) < 2:
+            return union
+        try:
+            ranked = await self._reranker.rerank(query, [u["text"] for u in union])
+        except Exception:
+            return union  # reranker down → keep fused order (fail-soft)
+        for entry in ranked:
+            idx = entry.get("index")
+            if isinstance(idx, int) and 0 <= idx < len(union):
+                union[idx]["score"] = float(entry.get("relevance_score", 0.0))
+        return union
+
+    @staticmethod
+    def _apply_token_budget(items: list[dict[str, Any]], max_tokens: int) -> list[dict[str, Any]]:
+        """Greedy fill by ~4 chars/token on the text field (Hindsight counts
+        only fact text toward the budget)."""
+        out: list[dict[str, Any]] = []
+        spent = 0
+        for item in items:
+            cost = max(1, len(item.get("text", "")) // 4)
+            if spent + cost > max_tokens and out:
+                break
+            out.append(item)
+            spent += cost
+        return out
 
     # ── Runtime toggles ────────────────────────────────────────────────
 
