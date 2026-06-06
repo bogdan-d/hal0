@@ -1726,7 +1726,31 @@ a { color: inherit; text-decoration: none; }
    absolutely-positioned .swap-pop can extend past the card bottom. */
 .slot.swap-open { overflow: visible; }
 .slot.serving { border-color: var(--accent-line); }
+/* C3: disabled slot — fade the card body, but keep the enable toggle (which
+   lives in .slot-h .right) full-opacity + interactive so it can be flipped
+   back on. */
+.slot--disabled { opacity: 0.5; }
+.slot--disabled:hover { opacity: 0.72; }
+.slot--disabled .slot-enable-toggle { opacity: 1; }
+.slot-disabled-note { font-size: 11px; color: var(--fg-4); text-transform: uppercase; letter-spacing: 0.04em; }
+/* C7: Capabilities section — denser quarter-width grid for the narrow utility
+   cards (embed/rerank/stt/tts). Collapses 4-up → 2-up → 1-up. */
+.slots-grid--quarter { grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
 .slot-h { display: flex; align-items: center; gap: 8px; }
+/* C3: compact enable/disable switch on the card header. */
+.slot-enable-toggle { display: inline-flex; align-items: center; cursor: pointer; }
+.slot-enable-toggle input { position: absolute; opacity: 0; width: 0; height: 0; }
+.slot-enable-track {
+  display: inline-block; width: 26px; height: 15px; border-radius: 999px;
+  background: var(--line-strong); position: relative; transition: background 0.12s ease;
+}
+.slot-enable-track::after {
+  content: ""; position: absolute; top: 2px; left: 2px; width: 11px; height: 11px;
+  border-radius: 50%; background: var(--bg); transition: transform 0.12s ease;
+}
+.slot-enable-toggle input:checked + .slot-enable-track { background: var(--accent); }
+.slot-enable-toggle input:checked + .slot-enable-track::after { transform: translateX(11px); }
+.slot-enable-toggle input:focus-visible + .slot-enable-track { outline: 2px solid var(--accent); outline-offset: 2px; }
 .slot-name {
   display: flex; align-items: center; gap: 8px;
   font-family: var(--jbm); font-size: 14.5px; font-weight: 500; color: var(--fg);
@@ -1854,7 +1878,56 @@ a { color: inherit; text-decoration: none; }
 .npu-mod[data-on="0"] { opacity: 0.5; }
 .npu-mod .npu-mod-icon { font-size: 15px; line-height: 1; }
 .npu-mod-body { padding: 8px 0 2px; }
+
 .npu-sel { width: 100%; }
+/* The native <select> renders its caret hard against the right border and
+   lets the (mono, often long) model id run underneath it. Draw our own
+   chevron and reserve room for it so text never collides with the caret.
+   Use `select.npu-sel` (0,1,1) so it beats the base `select.input` rule
+   (same specificity, but this comes later) — a bare `.npu-sel` (0,1,0)
+   loses to `select.input`'s `padding`/`background` shorthand. */
+select.npu-sel {
+  appearance: none;
+  -webkit-appearance: none;
+  padding-right: 28px;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23888' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'><polyline points='6 9 12 15 18 9'/></svg>");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  background-size: 12px;
+}
+
+/* Read-only model label for the ASR/embed modalities (model fixed by FLM). */
+.npu-mod-fixed {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-width: 0;
+  padding: 8px 11px;
+  border: 1px solid var(--line);
+  border-radius: var(--rad);
+  background: var(--bg);
+  color: var(--fg-4);
+  font-size: 12.5px;
+  cursor: default;
+}
+.npu-mod-fixed .npu-fixed-model {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.npu-mod-fixed .npu-fixed-tag {
+  flex: 0 0 auto;
+  font-size: 9px;
+  letter-spacing: 0.06em;
+  padding: 1px 5px;
+  border-radius: 999px;
+  color: var(--dev-npu);
+  border: 1px solid rgba(200, 150, 255, 0.30);
+  background: rgba(200, 150, 255, 0.06);
+}
 
 /* On/off switch (matches prototype). */
 .npu-switch {
@@ -2151,7 +2224,8 @@ a { color: inherit; text-decoration: none; }
   .view-banners { padding: 14px 16px 0; }
   .tb-brand { width: auto; }
   .tb-host .ut { display: none; }
-  .tb-cmdk span { display: none; }
+  .tb-cmdk { display: none; }   /* command palette folded into the nav drawer on mobile */
+  .topbar .tb-menu { display: flex; }
   .tb-eyebrow { display: none; }
   .tiers { grid-template-columns: 1fr; }
   .slots-grid { grid-template-columns: 1fr; }
@@ -2176,8 +2250,7 @@ a { color: inherit; text-decoration: none; }
   .settings-nav { position: static; flex-direction: row; flex-wrap: wrap; overflow-x: auto; }
   .topbar { padding: 0 12px; gap: 10px; }
   .footer { display: none; }
-  .bottom-tabs { display: grid; }
-  .app { grid-template-rows: var(--topbar-h) 1fr; grid-template-areas: "topbar" "main"; }
+  .app { grid-template-columns: 1fr; grid-template-rows: var(--topbar-h) 1fr; grid-template-areas: "topbar" "main"; }
 }
 
 /* ─── Persona-above-composer placement ─────────────────────────── */
@@ -2358,34 +2431,104 @@ a { color: inherit; text-decoration: none; }
 }
 
 /* ─── Bottom tab bar (mobile <720px) ──────────────────────────── */
-.bottom-tabs {
+/* ─── Mobile nav: topbar hamburger + slide-in drawer ──────────
+   .tb-menu is hidden on desktop (the sidebar handles nav) and revealed at
+   ≤720px by the media query above, where it opens .nav-drawer. */
+.tb-menu {
   display: none;
-  position: fixed;
-  bottom: 0;
-  left: 0;
-  right: 0;
-  z-index: 80;
-  background: var(--bg);
-  border-top: 1px solid var(--line);
-  grid-template-columns: repeat(5, 1fr);
-  padding-bottom: env(safe-area-inset-bottom);
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: var(--rad);
+  color: var(--fg-2);
+  cursor: pointer;
 }
-.bottom-tab {
+.tb-menu:hover { color: var(--fg); border-color: var(--line-strong); }
+
+.nav-drawer-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  background: rgba(0, 0, 0, 0.5);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.2s ease;
+}
+.nav-drawer-backdrop.open { opacity: 1; pointer-events: auto; }
+
+.nav-drawer {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 100;
+  width: min(82vw, 320px);
   display: flex;
   flex-direction: column;
+  gap: 2px;
+  padding: 12px 8px calc(12px + env(safe-area-inset-bottom));
+  background: var(--bg);
+  border-left: 1px solid var(--line);
+  box-shadow: -8px 0 32px rgba(0, 0, 0, 0.4);
+  transform: translateX(100%);
+  transition: transform 0.22s cubic-bezier(0.4, 0, 0.2, 1);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.nav-drawer.open { transform: translateX(0); }
+
+.nav-drawer-head {
+  display: flex;
   align-items: center;
-  gap: 3px;
-  padding: 9px 6px 7px;
+  justify-content: space-between;
+  padding: 2px 6px 6px;
+}
+.nav-drawer-close {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
   background: transparent;
   border: none;
   color: var(--fg-3);
-  font-family: var(--jbm);
-  font-size: 9px;
-  letter-spacing: 0.02em;
   cursor: pointer;
 }
-.bottom-tab.active { color: var(--accent); }
-.bottom-tab svg { width: 18px; height: 18px; }
+.nav-drawer-close:hover { color: var(--fg); }
+
+.nav-drawer-cmdk {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 8px 6px;
+  padding: 9px 11px;
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: var(--rad);
+  color: var(--fg-3);
+  font-family: var(--jbm);
+  font-size: 12.5px;
+  cursor: pointer;
+}
+.nav-drawer-cmdk:hover { color: var(--fg); border-color: var(--line-strong); }
+.nav-drawer-cmdk svg { flex: 0 0 auto; }
+.nav-drawer-cmdk kbd {
+  margin-left: auto;
+  font-family: var(--jbm);
+  font-size: 10px;
+  color: var(--fg-4);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+/* The 1080px breakpoint hides .sb-status globally (desktop sidebar rail
+   collapse); re-show it inside the drawer where the rail is full-width. */
+.nav-drawer .sb-status { display: block; }
 
 /* ─── Toast ────────────────────────────────────────────────────── */
 .hal0-toast {

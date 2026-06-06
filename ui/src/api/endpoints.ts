@@ -61,6 +61,10 @@ export const ENDPOINTS = {
   // ── Capabilities ─────────────────────────────────────────────────
   capabilities: '/api/capabilities',
   capability: (key: string) => `/api/capabilities/${encodeURIComponent(key)}`,
+  // POST /api/capabilities/{slot}/{child} — apply a partial selection update
+  // (model/provider/enabled). Whitelisted keys only; 400 on unknown fields.
+  capabilityApply: (slot: string, child: string) =>
+    `/api/capabilities/${encodeURIComponent(slot)}/${encodeURIComponent(child)}`,
 
   // ── Hardware ─────────────────────────────────────────────────────
   hardware: '/api/hardware',
@@ -142,6 +146,8 @@ export const ENDPOINTS = {
   settings: '/api/settings',
   settingsReload: '/api/settings/reload',
   settingsSchema: '/api/settings/schema',
+  // Apply-plan registry — key→{apply_class, services} for all settings (#552).
+  settingsApplyPlan: '/api/settings/apply-plan',
   // Single-source-of-truth model storage (Settings → Storage).
   settingsModelsStore: '/api/settings/models/store',
   settingsModelsStoreMigrate: '/api/settings/models/store/migrate',
@@ -166,6 +172,19 @@ export const ENDPOINTS = {
   // request host, so links work on any install (localhost / LAN IP /
   // hal0.local / custom domain) without hardcoding. See routes/config.py.
   configUrls: '/api/config/urls',
+
+  // ── Connections (issue #549) — providers + upstreams + reachability test
+  // ``/api/providers`` is the alias of ``/api/upstreams`` filtered to remote
+  // (kind != "slot"); ``/api/upstreams`` returns every routing target. The
+  // POST /test probe is what the dashboard's per-upstream Test button calls.
+  providers: '/api/providers',
+  providersCatalog: '/api/providers/catalog',
+  upstreams: '/api/upstreams',
+  upstream: (name: string) =>
+    `/api/upstreams/${encodeURIComponent(name)}`,
+  upstreamTest: (name: string) =>
+    `/api/upstreams/${encodeURIComponent(name)}/test`,
+
   // Install / FirstRun
   installState: '/api/install/state',
   firstrunState: '/api/firstrun/state',

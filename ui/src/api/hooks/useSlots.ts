@@ -50,6 +50,7 @@ export interface Slot {
   device: string
   model: string
   model_id?: string
+  modelDefault?: string
   modelLong?: string
   group?: string
   state: string
@@ -65,6 +66,16 @@ export interface Slot {
    *  model in memory. Source of truth for the memory-map attribution
    *  (BE-METRICS contract). Prefer this over equal-split GTT division. */
   mem_mb?: number
+  /** Whether the slot is activated. Disabled slots fade on the card, sort to
+   *  the end of the grid, and hide their lifecycle buttons. Defaults to true
+   *  when absent (a slot is enabled unless explicitly off). */
+  enabled?: boolean
+  /** Per-slot reasoning default (llm slots). true → thinking on; false/null →
+   *  off (suppressed). Seeds the drawer's Thinking toggle. */
+  enable_thinking?: boolean | null
+  /** GPU offload layer count for the slot's model (-1 = all). Seeds the
+   *  drawer's Advanced n_gpu_layers input. */
+  n_gpu_layers?: number
   /** Wall-clock epoch (seconds) of the most recent request served by
    *  this slot. ``null``/undefined means hal0-api has not seen a request
    *  for this slot since startup. Used by the slots view to render the
@@ -185,6 +196,11 @@ function normalizeSlot(s: any): Slot {
     metrics: { ...DEFAULT_METRICS, ...(s?.metrics ?? {}) },
     spark: Array.isArray(s?.spark) ? s.spark : [],
     model: s?.model ?? s?.model_id ?? s?.model_default ?? '',
+    // Configured (TOML) model, surfaced separately so the NPU-trio
+    // read-only labels can show the intended FLM tag even when the live
+    // model_id is stale on the pre-trio GGUF (trio slots never load as
+    // their own process, so model_id never reconciles).
+    modelDefault: s?.model_default ?? '',
     // Backend selection (ADR-0022) — pass through verbatim. The backend
     // emits declared_backend always (when configured) and actual_backend/
     // backend_mismatch only when the child is introspectable; we surface
@@ -192,6 +208,10 @@ function normalizeSlot(s: any): Slot {
     declared_backend: s?.declared_backend ?? null,
     actual_backend: s?.actual_backend ?? null,
     backend_mismatch: !!s?.backend_mismatch,
+    // Spec 1: a slot is enabled unless explicitly off. /api/status-sourced
+    // entries in the union may omit the flag, so default it here rather than
+    // letting the card read undefined as "disabled".
+    enabled: s?.enabled !== false,
   }
 }
 
@@ -366,5 +386,20 @@ export function useSlotDelete() {
   return useMutation({
     mutationFn: (name: string) => slotDelete(ENDPOINTS.slot(name)),
     onSuccess: invalidate,
+  })
+}
+
+/**
+ * GET /api/slots/{name}/config — read a slot's full TOML config as a dict.
+ * Used by voice + image-gen settings sections to reflect current effective
+ * values (e.g. default_voice, default_steps) that live in the slot TOML
+ * but are not surfaced by the capabilities/selections payload.
+ */
+export function useSlotConfig(name: string | null | undefined) {
+  return useQuery<Record<string, unknown>>({
+    queryKey: ['slot-config', name],
+    queryFn: () => apiGet<Record<string, unknown>>(ENDPOINTS.slotConfig(name as string)),
+    enabled: !!name,
+    staleTime: 10_000,
   })
 }

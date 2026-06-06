@@ -12,8 +12,24 @@ import {
   useSlotBackend,
 } from '@/api/hooks/useSlots'
 import { useHardware } from '@/api/hooks/useHardware'
+import { useBackends } from '@/api/hooks/useBackends'
 import { useModels } from '@/api/hooks/useModels'
 import { ENDPOINTS } from '@/api/endpoints'
+
+// Full static device list — shown as fallback when /api/backends hasn't
+// loaded yet or returns empty. Never render an empty device dropdown.
+const DEVICE_STATIC = ['gpu-rocm', 'gpu-vulkan', 'cpu', 'npu']
+
+// Map a backend id (e.g. "llamacpp:rocm", "llamacpp:vulkan", "flm:npu",
+// "llamacpp:cpu") to its slot device token.
+function backendToDevice(id) {
+  const s = String(id || '').toLowerCase()
+  if (s.includes('rocm'))   return 'gpu-rocm'
+  if (s.includes('vulkan')) return 'gpu-vulkan'
+  if (s.includes('npu') || s.includes('flm')) return 'npu'
+  if (s.includes('cpu'))    return 'cpu'
+  return null
+}
 
 const { useState: useStateSM, useEffect: useEffectSM, useRef: useRefSM } = React;
 
@@ -93,7 +109,22 @@ function CreateSlotModal({ open, onClose, defaults = {}, existingSlots = [] }) {
 
   const createMut = useSlotCreate();
   const hwQuery = useHardware();
+  const backendsQuery = useBackends();
   const modelsQuery = useModels();
+
+  // Device options: derived from installed backends in /api/backends.
+  // cpu is always runnable — force-add it whenever we have real backend data.
+  // Fallback to DEVICE_STATIC when data is absent/loading/empty so the
+  // dropdown is never empty.
+  const backendsData = backendsQuery.data;
+  const haveBackends = (backendsData?.backends?.length ?? 0) > 0;
+  const deviceOptions = (() => {
+    if (!haveBackends) return DEVICE_STATIC;
+    const installed = (backendsData.backends || []).filter(b => b.state === 'installed');
+    const avail = new Set(installed.map(b => backendToDevice(b.id)).filter(Boolean));
+    avail.add('cpu'); // always runnable on the host
+    return DEVICE_STATIC.filter(d => avail.has(d));
+  })();
 
   useEffectSM(() => {
     if (open) {
@@ -107,6 +138,15 @@ function CreateSlotModal({ open, onClose, defaults = {}, existingSlots = [] }) {
       setSubmitErr(null);
     }
   }, [open, defaults]);
+
+  // Reconcile selected device with the derived option list: if the current
+  // selection isn't in the available set (e.g. rocm not installed), snap to
+  // the first available device rather than silently POSTing an invalid one.
+  useEffectSM(() => {
+    if (deviceOptions.length && !deviceOptions.includes(device)) {
+      setDevice(deviceOptions[0]);
+    }
+  }, [deviceOptions.join(','), device]);
 
   // validation — slot collision uses the live slot list passed in from
   // the SlotsView (useSlots data), not HAL0_DATA.
@@ -232,10 +272,11 @@ function CreateSlotModal({ open, onClose, defaults = {}, existingSlots = [] }) {
         </div>
         <div className="form-ctl">
           <select className="input mono" value={device} onChange={e => setDevice(e.target.value)}>
-            <option value="gpu-rocm">gpu-rocm</option>
-            <option value="gpu-vulkan">gpu-vulkan</option>
-            <option value="cpu">cpu</option>
-            <option value="npu" disabled={!npuAvailable}>npu{!npuAvailable ? " — install FLM first" : ""}</option>
+            {deviceOptions.map(d => (
+              <option key={d} value={d} disabled={d === 'npu' && !npuAvailable}>
+                {d === 'npu' && !npuAvailable ? 'npu — install FLM first' : d}
+              </option>
+            ))}
           </select>
         </div>
       </div>
@@ -340,13 +381,37 @@ function EditSlotDrawer({ open, slot, onClose }) {
   const deleteMut = useSlotDelete();
   const backendMut = useSlotBackend();
 
+  // Seed from the slot list payload when available (PR #587 — same fix
+  // class as #584). idle_timeout_s / workers / llamacpp_args are all
+  // surfaced on the list payload now, so the drawer mirrors them
+  // verbatim and only sends what actually changed. When the payload
+  // is missing the field (older backend, or synthetic slot), the
+  // schema defaults act as a fallback for first-time edits only.
+  const initialIdle = slot?.idle_timeout_s != null ? slot.idle_timeout_s : 900;
+  const initialWorkers = slot?.workers != null ? slot.workers : 1;
+  const initialExtraArgs = slot?.llamacpp_args != null ? slot.llamacpp_args : "";
+  const initialRope = slot?.rope_freq_base != null ? slot.rope_freq_base : 0;
+
   const [ctx, setCtx] = useStateSM(slot?.metrics?.ctx || 4096);
-  const [idleTimeout, setIdleTimeout] = useStateSM(900);
-  const [workers, setWorkers] = useStateSM(1);
-  const [extraArgs, setExtraArgs] = useStateSM("--flash-attn on --no-mmap");
+  // C4/C5: thinking is instant-apply (its own PUT); n_gpu_layers rides the Save
+  // button through PATCH /defaults. Both seed from the slot list payload.
+  const [thinking, setThinking] = useStateSM(slot?.enable_thinking === true);
+  const [thinkingPending, setThinkingPending] = useStateSM(false);
+  const [nGpuLayers, setNGpuLayers] = useStateSM(
+    slot?.n_gpu_layers != null ? String(slot.n_gpu_layers) : "-1"
+  );
+  // Issue #548: rope_freq_base — seeded from list payload (null → "0" default).
+  const [ropeFreqBase, setRopeFreqBase] = useStateSM(
+    slot?.rope_freq_base != null ? String(slot.rope_freq_base) : "0"
+  );
+  const [idleTimeout, setIdleTimeout] = useStateSM(initialIdle);
+  const [workers, setWorkers] = useStateSM(initialWorkers);
+  const [extraArgs, setExtraArgs] = useStateSM(initialExtraArgs);
   const [device, setDevice] = useStateSM(slot?.device || "gpu-rocm");
   const [makeDefault, setMakeDefault] = useStateSM(!!slot?.isDefault);
   const [submitErr, setSubmitErr] = useStateSM(null);
+  // Per-field validation errors for numeric inputs (#548).
+  const [fieldErrs, setFieldErrs] = useStateSM({});
   // Runtime Backend selector (ADR-0022). Seeded from the DECLARED backend
   // token (bare rocm|vulkan|cpu|flm), falling back to the gpu-stripped
   // device. The selector itself only offers the selectable backends.
@@ -358,12 +423,22 @@ function EditSlotDrawer({ open, slot, onClose }) {
   useEffectSM(() => {
     if (slot) {
       setCtx(slot.metrics?.ctx || 4096);
+      setThinking(slot.enable_thinking === true);
+      setThinkingPending(false);
+      setNGpuLayers(slot.n_gpu_layers != null ? String(slot.n_gpu_layers) : "-1");
+      setRopeFreqBase(slot.rope_freq_base != null ? String(slot.rope_freq_base) : "0");
       setDevice(slot.device || "gpu-rocm");
       setMakeDefault(!!slot.isDefault);
-      setIdleTimeout(900);
-      setWorkers(1);
-      setExtraArgs("--flash-attn on --no-mmap");
+      // #587: re-seed from the slot prop so the drawer tracks the real
+      // on-disk values (was hardcoded constants before — that was the
+      // bug). The dirty-tracking in onSaveClick below only ships fields
+      // that actually changed, so a no-op edit no longer rewrites
+      // anything.
+      setIdleTimeout(slot.idle_timeout_s != null ? slot.idle_timeout_s : 900);
+      setWorkers(slot.workers != null ? slot.workers : 1);
+      setExtraArgs(slot.llamacpp_args != null ? slot.llamacpp_args : "");
       setSubmitErr(null);
+      setFieldErrs({});
       setSelectedBackend(
         slot.declared_backend || (slot.device || "gpu-rocm").replace("gpu-", "") || "rocm"
       );
@@ -375,28 +450,69 @@ function EditSlotDrawer({ open, slot, onClose }) {
 
   async function onSaveClick() {
     setSubmitErr(null);
+    // Issue #548: validate numeric fields before any network call.
+    // Invalid values surface inline and block Save.
+    const ctxNum = Number(ctx);
+    const nglNum = Number(nGpuLayers);
+    const ropeNum = Number(ropeFreqBase);
+    const errs = {};
+    if (!Number.isFinite(ctxNum) || !Number.isInteger(ctxNum) || ctxNum < 128) {
+      errs.ctx = "Must be an integer ≥ 128";
+    }
+    if (!Number.isFinite(nglNum) || !Number.isInteger(nglNum) || nglNum < -1) {
+      errs.ngl = "Must be an integer ≥ -1 (use -1 to offload all layers)";
+    }
+    if (!Number.isFinite(ropeNum) || ropeNum < 0) {
+      errs.rope = "Must be a number ≥ 0 (0 = use model default)";
+    }
+    if (Object.keys(errs).length > 0) {
+      setFieldErrs(errs);
+      return;
+    }
+    setFieldErrs({});
     try {
-      // Two-step: defaults (ctx_size lives under [model]) + slot config
-      // for the top-level keys (device, llamacpp_args, idle_timeout_s,
-      // workers, default).
-      const ctxNum = Number(ctx);
+      // Two-step: defaults (ctx_size / n_gpu_layers / rope_freq_base live
+      // under [model]) + slot config for the top-level keys (device,
+      // llamacpp_args, idle_timeout_s, workers, default).
       const idleNum = Number(idleTimeout);
       const workersNum = Number(workers);
+      // #587 dirty-tracking: only include a field in the body if the
+      // user actually changed it from the seeded (on-disk) value.
+      // Sending every field unconditionally is what clobbered values
+      // before — same fix class as #584. ctx_size / n_gpu_layers stay
+      // unconditional because the drawer's seed is best-effort
+      // (metrics?.ctx / -1 sentinel) and NOT the truth source.
+      const ctxBody = {
+        ctx_size: ctxNum,
+        n_gpu_layers: nglNum,
+      };
+      // rope_freq_base is dirty-tracked (seed = real on-disk value).
+      if (Number(ropeFreqBase) !== Number(initialRope)) {
+        ctxBody.rope_freq_base = ropeNum;
+      }
+      const slotBody = {
+        device,
+        default: makeDefault,
+      };
+      const idleSeeded = initialIdle;
+      const workersSeeded = initialWorkers;
+      const extraArgsSeeded = initialExtraArgs;
+      if (Number(idleTimeout) !== Number(idleSeeded)) {
+        slotBody.idle_timeout_s = Number.isFinite(idleNum) ? idleNum : idleTimeout;
+      }
+      if (Number(workers) !== Number(workersSeeded)) {
+        slotBody.workers = Number.isFinite(workersNum) ? workersNum : workers;
+      }
+      if (extraArgs !== extraArgsSeeded) {
+        slotBody.llamacpp_args = extraArgs;
+      }
       await defaultsMut.mutateAsync({
         name: slot.name,
-        body: {
-          ctx_size: Number.isFinite(ctxNum) ? ctxNum : ctx,
-        },
+        body: ctxBody,
       });
       await editMut.mutateAsync({
         name: slot.name,
-        body: {
-          device,
-          default: makeDefault,
-          llamacpp_args: extraArgs,
-          idle_timeout_s: Number.isFinite(idleNum) ? idleNum : idleTimeout,
-          workers: Number.isFinite(workersNum) ? workersNum : workers,
-        },
+        body: slotBody,
       });
       window.__hal0Toast && window.__hal0Toast(
         `Slot "${slot.name}" saved — restart required for ctx_size`,
@@ -583,16 +699,89 @@ function EditSlotDrawer({ open, slot, onClose }) {
         </div>
       </div>
 
+      {/* C4: per-slot thinking default — llm slots only. Instant-apply (its
+          own PUT /config), no restart: _slot_thinking_default reads it live
+          on the next request. */}
+      {slot.type === "llm" && (
+        <div className="form-row">
+          <div className="form-lbl">
+            <span>Thinking</span>
+            <span className="sub">Stream reasoning before the answer. Off = faster, direct replies.</span>
+          </div>
+          <div className="form-ctl">
+            <label className="checkbox-row">
+              <input
+                type="checkbox"
+                checked={thinking}
+                disabled={thinkingPending}
+                onChange={async (e) => {
+                  const next = e.target.checked;
+                  setThinking(next);
+                  setThinkingPending(true);
+                  setSubmitErr(null);
+                  try {
+                    await editMut.mutateAsync({
+                      name: slot.name,
+                      body: { enable_thinking: next },
+                    });
+                    window.__hal0Toast && window.__hal0Toast(
+                      `${slot.name} thinking ${next ? "on" : "off"} — applies to next message`,
+                      "ok",
+                    );
+                  } catch (err) {
+                    setThinking(!next); // revert on failure
+                    setSubmitErr(err?.message || "thinking toggle failed");
+                  } finally {
+                    setThinkingPending(false);
+                  }
+                }}
+              />
+              <span>{thinking ? "Reasoning on" : "Reasoning off"}</span>
+            </label>
+          </div>
+        </div>
+      )}
+
       <div className="form-section">Advanced</div>
 
       <div className="form-row">
         <div className="form-lbl"><span>ctx_size</span><span className="warn">⟳ restart required</span></div>
         <div className="form-ctl">
           <input
-            className="input mono"
+            className={"input mono" + (fieldErrs.ctx ? " input-err" : "")}
             value={ctx}
-            onChange={e => setCtx(e.target.value)}
+            onChange={e => { setCtx(e.target.value); setFieldErrs(p => ({...p, ctx: undefined})); }}
           />
+          {fieldErrs.ctx && <div className="hint" style={{color: "var(--err)"}}>{fieldErrs.ctx}</div>}
+        </div>
+      </div>
+
+      {/* C5: GPU offload tuning — saved via the Save button (PATCH /defaults),
+          restart-required like ctx_size since it changes model load. */}
+      <div className="form-row">
+        <div className="form-lbl"><span>n_gpu_layers</span><span className="warn">⟳ restart required</span></div>
+        <div className="form-ctl">
+          <input
+            className={"input mono" + (fieldErrs.ngl ? " input-err" : "")}
+            value={nGpuLayers}
+            onChange={e => { setNGpuLayers(e.target.value); setFieldErrs(p => ({...p, ngl: undefined})); }}
+          />
+          {fieldErrs.ngl && <div className="hint" style={{color: "var(--err)"}}>{fieldErrs.ngl}</div>}
+          {!fieldErrs.ngl && <div className="hint">-1 offloads all layers to the GPU.</div>}
+        </div>
+      </div>
+
+      {/* Issue #548: rope_freq_base — load-time knob, restart required. */}
+      <div className="form-row">
+        <div className="form-lbl"><span>rope_freq_base</span><span className="warn">⟳ restart required</span></div>
+        <div className="form-ctl">
+          <input
+            className={"input mono" + (fieldErrs.rope ? " input-err" : "")}
+            value={ropeFreqBase}
+            onChange={e => { setRopeFreqBase(e.target.value); setFieldErrs(p => ({...p, rope: undefined})); }}
+          />
+          {fieldErrs.rope && <div className="hint" style={{color: "var(--err)"}}>{fieldErrs.rope}</div>}
+          {!fieldErrs.rope && <div className="hint">0 uses the model default. Override for long-context models.</div>}
         </div>
       </div>
 

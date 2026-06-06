@@ -748,7 +748,12 @@ def _build_idle_ttl_provider(
     return _provider
 
 
-async def _start_lemonade_idle_driver(app: FastAPI, slot_manager: SlotManager) -> IdleDriver | None:
+async def _start_lemonade_idle_driver(
+    app: FastAPI,
+    slot_manager: SlotManager,
+    *,
+    global_idle_timeout_s: float = 300.0,
+) -> IdleDriver | None:
     """Start the Lemonade idle-unload driver.
 
     v0.2 (ADR-0008 §1): Lemonade is the sole inference backend; this
@@ -758,6 +763,10 @@ async def _start_lemonade_idle_driver(app: FastAPI, slot_manager: SlotManager) -
     The driver consumes a per-model TTL provider (issue #414) so each
     slot's configured ``idle_timeout_s`` actually drives eviction
     instead of a single hardcoded 300s global.
+
+    ``global_idle_timeout_s`` is the fleet-level fallback from
+    ``[slots].idle_timeout_s`` in hal0.toml (default 300 s).
+    Individual slot TOML values override this via the TTL provider.
 
     Failures here MUST NOT block API startup — a busted Lemonade
     config shouldn't keep the dashboard from coming up so the user
@@ -777,6 +786,7 @@ async def _start_lemonade_idle_driver(app: FastAPI, slot_manager: SlotManager) -
         )
         driver = IdleDriver(
             client,
+            idle_timeout_s=global_idle_timeout_s,
             ttl_provider=_build_idle_ttl_provider(slot_manager),
         )
         await driver.start()
@@ -828,6 +838,32 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             )
         except Exception as exc:
             log.warning("models.auto_scan_failed", error=str(exc))
+
+    # Keep Lemonade's server_models.json in sync with the registry. The hook is
+    # wired AFTER the startup auto-scan so a multi-model scan triggers a single
+    # regeneration (the explicit one below) rather than one per added model.
+    # Every subsequent runtime mutation (pull, register, remove) regenerates the
+    # catalog via ModelRegistry.on_change — fixing the drift where curated models
+    # were invisible to Lemonade until a manual `hal0 capabilities sync`.
+    from pathlib import Path as _Path
+
+    from hal0.lemonade.server_models_gen import write_server_models
+
+    _server_models_path = _Path(
+        os.environ.get("HAL0_SERVER_MODELS_PATH", "/opt/lemonade/resources/server_models.json")
+    )
+
+    def _regen_server_models() -> None:
+        write_server_models(model_registry.registry_file, _server_models_path)
+
+    model_registry.on_change = _regen_server_models
+    # One-shot sync so startup scan results land in the catalog immediately,
+    # without waiting for the next mutation. Best-effort: a failure (e.g. the
+    # Lemonade resources dir is absent on a dev box) must not block startup.
+    try:
+        _regen_server_models()
+    except Exception as exc:
+        log.warning("server_models.startup_regen_failed", error=str(exc))
 
     # Shared in-process /v1/models cache.  The dispatcher's cold-cache
     # prefetch path needs cached_models() and fetch_models() to share
@@ -1034,7 +1070,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # makes Lemonade the sole backend, so this driver always starts —
     # the prior ``HAL0_BACKEND=lemonade`` gate retired in PR-10. Stored
     # on app.state so tests + future shutdown hooks can introspect it.
-    lemonade_idle_driver = await _start_lemonade_idle_driver(app, slot_manager)
+    lemonade_idle_driver = await _start_lemonade_idle_driver(
+        app,
+        slot_manager,
+        global_idle_timeout_s=float(hal0_cfg.slots.idle_timeout_s),
+    )
     # Lemonade metrics shim (PR-12, plan §10.1 + §11). Shares the
     # ``app.state.lemonade_client`` attached by the idle driver so we
     # don't double up on connection pools against lemond. Provides the

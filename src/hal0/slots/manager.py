@@ -1348,6 +1348,8 @@ class SlotManager:
             ) from exc
 
         cfg_dict = _cfg_to_dict(slot_cfg)
+        # #585: canonicalize a ctx_size alias from the create modal too.
+        _normalize_ctx_key(cfg_dict)
         await self._check_npu_exclusivity(slot_name, cfg_dict)
         cfg_path = self._config_file(slot_name)
         cfg_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1422,10 +1424,27 @@ class SlotManager:
 
         cfg = await self._load_slot_config(slot_name)
         cfg_dict = _cfg_to_dict(cfg)
-        # Shallow merge — nested dicts are replaced wholesale to keep update
-        # semantics predictable. Callers wanting a partial nested update
-        # build the sub-dict on their side first.
-        cfg_dict.update(updates)
+        # One-level deep merge for nested TOML tables ([model], [server]).
+        # A bare shallow ``dict.update`` replaced a sub-table wholesale, so a
+        # partial ``PATCH /defaults`` body like ``{"model": {"ctx_size": N}}``
+        # silently dropped sibling keys — most damagingly ``[model].default``
+        # (the model name), which left the slot unable to resolve a model and
+        # turned the dashboard Start button into a silent no-op after a
+        # restart. Merge sub-table dicts key-by-key so partial updates only
+        # touch the fields they carry; scalars and lists still replace
+        # wholesale (predictable, and no caller relies on list-merge).
+        for key, value in updates.items():
+            existing = cfg_dict.get(key)
+            if isinstance(existing, dict) and isinstance(value, dict):
+                merged = dict(existing)
+                merged.update(value)
+                cfg_dict[key] = merged
+            else:
+                cfg_dict[key] = value
+
+        # #585: the dashboard writes [model].ctx_size; canonicalize to
+        # context_size so the two keys can't diverge on disk.
+        _normalize_ctx_key(cfg_dict)
 
         # PR-11: re-run the NPU exclusivity guard whenever the merged
         # config could land a second device=npu, type=llm anchor (plan
@@ -2139,6 +2158,21 @@ def _model_default(cfg: SlotConfig | dict[str, Any]) -> str:
     if isinstance(model, dict):
         return str(model.get("default") or "")
     return ""
+
+
+def _normalize_ctx_key(cfg_dict: dict[str, Any]) -> None:
+    """Fold the legacy ``[model].ctx_size`` alias into the canonical
+    ``context_size`` (SlotConfig's field), in place (#585).
+
+    The dashboard slot-edit panel writes ``ctx_size``; the Lemonade load
+    path reads ``context_size``. Persisting both lets them silently diverge.
+    A fresh ``ctx_size`` (the operator's latest UI write) wins over any
+    stale ``context_size`` seed, then the alias is dropped so exactly one
+    key survives on disk. No-op when ``ctx_size`` is absent.
+    """
+    model = cfg_dict.get("model")
+    if isinstance(model, dict) and "ctx_size" in model:
+        model["context_size"] = model.pop("ctx_size")
 
 
 def _cfg_effective_backend(cfg: SlotConfig | dict[str, Any]) -> str | None:

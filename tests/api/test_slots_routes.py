@@ -376,6 +376,84 @@ def test_unload_after_load_transitions_to_offline(
     assert systemctl_stub["_lemonade"]["unload_calls"], "expected /v1/unload"
 
 
+# ── Spec 1 / Component 2: enabled transition safety ─────────────────────────
+
+
+def test_disable_running_slot_stops_it(
+    slot_root: Path,
+    systemctl_stub: dict[str, Any],
+    stub_await_ready: None,
+    isolated_client: TestClient,
+) -> None:
+    """PUT /config {enabled: false} on a RUNNING slot persists the flag AND stops it.
+
+    The faded card must match reality — a disabled slot should not keep a
+    llama-server child resident, so the config write is followed by an unload.
+    """
+    isolated_client.post("/api/slots/primary/load")
+    # Clear the load-path bookkeeping so we assert only the disable's unload.
+    systemctl_stub["_lemonade"]["unload_calls"].clear()
+
+    r = isolated_client.put("/api/slots/primary/config", json={"enabled": False})
+    assert r.status_code == 200, r.text
+    # The persisted flag is off …
+    cfg = isolated_client.get("/api/slots/primary/config").json()
+    assert cfg.get("enabled") is False
+    # … and the running child was actually stopped.
+    assert systemctl_stub["_lemonade"]["unload_calls"], (
+        "disabling a running slot must trigger /v1/unload"
+    )
+
+
+def test_disable_offline_slot_does_not_unload(
+    slot_root: Path,
+    systemctl_stub: dict[str, Any],
+    stub_await_ready: None,
+    isolated_client: TestClient,
+) -> None:
+    """Disabling an already-offline slot writes the flag with no unload call."""
+    # Drive the slot genuinely offline: lemond reports nothing resident, so
+    # the adoption probe never marks primary running.
+    systemctl_stub["_lemonade"]["loaded"] = []
+    r = isolated_client.put("/api/slots/primary/config", json={"enabled": False})
+    assert r.status_code == 200, r.text
+    assert systemctl_stub["_lemonade"]["unload_calls"] == [], (
+        "an offline slot needs no stop — the write alone suffices"
+    )
+
+
+def test_invalid_enable_surfaces_conflict(
+    tmp_hal0_home: str,
+    systemctl_stub: dict[str, Any],
+    isolated_client: TestClient,
+) -> None:
+    """Enabling a 2nd NPU LLM anchor → 409 with the exclusivity message, no write."""
+    root = Path(tmp_hal0_home) / "etc" / "hal0" / "slots"
+    root.mkdir(parents=True, exist_ok=True)
+    for nm in ("agent", "agent2"):
+        (root / f"{nm}.toml").write_text(
+            "\n".join(
+                [
+                    f'name = "{nm}"',
+                    'device = "npu"',
+                    'type = "llm"',
+                    f"enabled = {'true' if nm == 'agent' else 'false'}",
+                    "[model]",
+                    'default = "gemma3-1b"',
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+    # agent is enabled; enabling agent2 would land a second NPU LLM anchor.
+    r = isolated_client.put("/api/slots/agent2/config", json={"enabled": True})
+    assert r.status_code == 409, r.text
+    assert r.json()["error"]["code"] == "slot.npu_exclusivity_violation"
+    # The rejected write must not have flipped agent2 on.
+    cfg = isolated_client.get("/api/slots/agent2/config").json()
+    assert cfg.get("enabled") is False
+
+
 # ── state-stream-shape ─────────────────────────────────────────────────────
 
 
@@ -794,3 +872,48 @@ def test_synthetic_composite_slot_serving_when_model_loaded(
     by_name = {e["name"]: e for e in r.json()}
     assert "hal0" in by_name, f"composite hal0 slot missing: {sorted(by_name)}"
     assert by_name["hal0"]["status"] == "serving"
+
+
+def test_patch_defaults_preserves_model_default(
+    slot_root: Path,
+    isolated_client: TestClient,
+) -> None:
+    """Regression: the slot-edit Save's ``PATCH /defaults`` must not wipe the
+    model name.
+
+    The dashboard edit drawer saves ctx_size / n_gpu_layers via
+    ``PATCH /api/slots/{name}/defaults`` with a partial ``[model]`` body.
+    A shallow merge replaced the whole ``[model]`` table, silently dropping
+    ``[model].default`` — so after a restart the slot had no resolvable model
+    and the Start button became a silent no-op. The partial update must touch
+    only the keys it carries.
+    """
+    # Sanity: the seeded slot starts with a model default.
+    before = isolated_client.get("/api/slots/primary/config")
+    assert before.status_code == 200, before.text
+    assert before.json()["model"]["default"] == "qwen3-4b-q4_k_m"
+
+    r = isolated_client.patch("/api/slots/primary/defaults", json={"ctx_size": 8192})
+    assert r.status_code == 200, r.text
+
+    after = isolated_client.get("/api/slots/primary/config").json()
+    # The ctx value lands; #585 normalizes the alias to canonical context_size.
+    assert after["model"]["context_size"] == 8192
+    # The model name survived the partial defaults write.
+    assert after["model"]["default"] == "qwen3-4b-q4_k_m"
+
+
+def test_patch_defaults_canonicalizes_ctx_size_key(
+    slot_root: Path,
+    isolated_client: TestClient,
+) -> None:
+    """#585: the dashboard writes ``ctx_size``; it must persist as the canonical
+    ``context_size`` with no lingering alias, so the Lemonade load path (which
+    reads context_size) actually honors a ctx set from the UI.
+    """
+    r = isolated_client.patch("/api/slots/primary/defaults", json={"ctx_size": 32768})
+    assert r.status_code == 200, r.text
+
+    model = isolated_client.get("/api/slots/primary/config").json()["model"]
+    assert model["context_size"] == 32768
+    assert "ctx_size" not in model

@@ -15,6 +15,7 @@ import { useUpdateState } from '@/api/hooks/useUpdates'
 import { useSidebarAgentRollup } from '@/api/hooks/useAgents'
 import { useConfigUrls } from '@/api/hooks/useConfigUrls'
 import { useHardware } from '@/api/hooks/useHardware'
+import { useUpstreams } from '@/api/hooks/useConnections'
 
 const { useState: useStateC, useEffect: useEffectC } = React;
 
@@ -63,6 +64,8 @@ const Icons = {
   hardware:  <Icon><rect x="3" y="3" width="10" height="10" rx="1"/><rect x="5.5" y="5.5" width="5" height="5" rx="0.5"/><path d="M3 6h-1M3 10h-1M13 6h1M13 10h1M6 3v-1M10 3v-1M6 13v1M10 13v1"/></Icon>,
   backends:  <Icon><circle cx="4" cy="4" r="2"/><circle cx="12" cy="4" r="2"/><circle cx="4" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><path d="M6 4h4M4 6v4M12 6v4M6 12h4"/></Icon>,
   logs:      <Icon><path d="M3 3h10M3 6h10M3 9h7M3 12h5"/></Icon>,
+  // issue #549 — two linked rings echo the "remote ↔ local" connection metaphor.
+  connections: <Icon><circle cx="6" cy="8" r="2.5"/><circle cx="11" cy="11" r="1.5" fill="currentColor" stroke="none"/><path d="M8 9.5l2 1M3.5 4.5h4M3.5 6.5h3"/></Icon>,
   agent:     <Icon><circle cx="8" cy="6" r="2.5"/><path d="M3 14c0-2.5 2.2-4.5 5-4.5s5 2 5 4.5"/><circle cx="13" cy="3" r="1.5"/></Icon>,
   settings:  <Icon><circle cx="8" cy="8" r="2"/><path d="M8 1v2M8 13v2M1 8h2M13 8h2M3 3l1.5 1.5M11.5 11.5L13 13M3 13l1.5-1.5M11.5 4.5L13 3"/></Icon>,
   bell:      <Icon d="M4 11h8c-1 0-1.5-0.5-1.5-2V6.5a2.5 2.5 0 0 0-5 0V9c0 1.5-0.5 2-1.5 2zM6.5 13a1.5 1.5 0 0 0 3 0"/>,
@@ -73,6 +76,7 @@ const Icons = {
   chev:      <Icon d="M4 6l4 4 4-4"/>,
   chevR:     <Icon d="M6 4l4 4-4 4"/>,
   close:     <Icon d="M4 4l8 8M12 4l-8 8"/>,
+  menu:      <Icon d="M2 4h12M2 8h12M2 12h12"/>,
   check:     <Icon d="M3 8l3 3 7-7"/>,
   warn:      <Icon><path d="M8 2l6 11H2L8 2z"/><path d="M8 7v3M8 12v0.01"/></Icon>,
   plus:      <Icon d="M8 3v10M3 8h10"/>,
@@ -89,7 +93,7 @@ const Icons = {
 };
 
 // ─── TopBar ───
-function TopBar({ route, hostUptime = "14d 02:11", onBell, onCmdK, approvals = 0 }) {
+function TopBar({ route, hostUptime = "14d 02:11", onBell, onCmdK, onMenu, menuOpen = false, approvals = 0 }) {
   // Issue #333: hostname from live /api/hardware (useHardware hook) instead of
   // the legacy HAL0_DATA seed. Fall back to a neutral "hal0" placeholder
   // while the first response is in flight so the layout stays stable.
@@ -103,6 +107,7 @@ function TopBar({ route, hostUptime = "14d 02:11", onBell, onCmdK, approvals = 0
     logs:      ["Runtime", "Logs"],
     agent:     ["Tools",  "Agent"],
     settings:  ["Configure", "Settings"],
+    connections: ["Network", "Connections"],
   };
   const [eyebrow, title] = labels[route] || ["", ""];
   return (
@@ -132,35 +137,60 @@ function TopBar({ route, hostUptime = "14d 02:11", onBell, onCmdK, approvals = 0
         {Icons.bell}
         {approvals > 0 && <span className="badge num">{approvals}</span>}
       </button>
+      {/* Mobile-only nav launcher (hidden ≤720px sidebar is gone) → opens NavDrawer. */}
+      <button
+        className="tb-menu"
+        onClick={onMenu}
+        aria-label="Menu"
+        aria-haspopup="menu"
+        aria-expanded={menuOpen}
+      >
+        {Icons.menu}
+      </button>
     </div>
   );
 }
 
-// ─── Sidebar ───
-function Sidebar({ route, onGo }) {
+// ─── Nav model (shared) ───
+// Canonical list of primary destinations with live counts and the 0.4
+// memory gate applied. Shared by the desktop Sidebar and the mobile
+// NavDrawer so the two navs can never drift apart.
+function useNavItems() {
   const slotsQuery  = useSlots();
   const modelsQuery = useModels();
+  const upstreamsQuery = useUpstreams();
   const slotCount   = slotsQuery.data?.length  ?? 0;
   const modelCount  = modelsQuery.data?.length ?? 0;
+  // #549 — badge the Connections nav with the total upstream count so
+  // the operator can see "I have N routing targets" at a glance.
+  const upCount     = upstreamsQuery.data?.length ?? 0;
   // 0.4 gate: the Agent route is reduced to the Memory tab, so when the
   // memory subsystem is disabled (HAL0_MEMORY_ENABLED!=1) there is nothing
   // to show — drop the nav item entirely. Driven by /api/status so the UI
   // can never disagree with the backend. main.jsx applies the matching
   // route guard for deep links.
   const memoryEnabled = useMemoryEnabled();
-  const items = [
+  return [
     { id: "dashboard", label: "Dashboard", icon: Icons.dashboard },
     { id: "slots",     label: "Slots",     icon: Icons.slots, cnt: slotCount },
     { id: "models",    label: "Models",    icon: Icons.models, cnt: modelCount },
     { id: "logs",      label: "Logs",      icon: Icons.logs },
     ...(memoryEnabled ? [{ id: "agent", label: "Agent", icon: Icons.agent }] : []),
     // Issue #206 — MCP page wired to /api/mcp/*. Lives under "Agents"
-    // conceptually but kept as a sibling in the sidebar so the URL is
-    // discoverable. Icon reuses the agent glyph (no dedicated MCP icon
-    // in the design system yet).
+    // conceptually but kept as a sibling so the URL is discoverable.
     { id: "mcp",       label: "MCP",       icon: Icons.agent },
     { id: "settings",  label: "Settings",  icon: Icons.settings },
+    // Issue #549 — Connections surface (read-only providers/upstreams rollup
+    // with per-row reachability test). Sits between Settings and the end so
+    // the operator-configure feel reads "settings, then look at your
+    // wiring".
+    { id: "connections", label: "Connections", icon: Icons.connections, cnt: upCount },
   ];
+}
+
+// ─── Sidebar ───
+function Sidebar({ route, onGo }) {
+  const items = useNavItems();
   return (
     <div className="sidebar">
       <div className="sb-section">Navigate</div>
@@ -452,18 +482,23 @@ function Footer({ updateAvailable, expanded = false, onToggle }) {
           <span className="v">{L.status}</span>
         </div>
         {/*
-          Throughput chip (#326): Lemonade does not yet surface
-          throughput_mbps on /v1/health for every backend. The rollup
-          coerces missing → null. Hide the chip entirely instead of
-          rendering "—" or "0.0 MB/s" — a value of 0 from a live system
-          actually serving traffic is just as meaningless as null.
+          Throughput chip (#340): prefer tok/s from /v1/stats (always
+          present on a serving backend) over throughput_mbps from
+          /v1/health (Lemonade omits it on most backends). Fall back to
+          MB/s only if lastTokPerSec is null. Both branches hide on
+          null/0 — a 0 from a live system is as meaningless as null.
         */}
-        {L.throughput != null && L.throughput > 0 && (
+        {L.lastTokPerSec != null && L.lastTokPerSec > 0 ? (
+          <div className="foot-chip">
+            <span className="k">throughput</span>
+            <span className="v num">{`${Math.round(L.lastTokPerSec)} tok/s`}</span>
+          </div>
+        ) : L.throughput != null && L.throughput > 0 ? (
           <div className="foot-chip">
             <span className="k">throughput</span>
             <span className="v num">{`${L.throughput} MB/s`}</span>
           </div>
-        )}
+        ) : null}
         {/* "models loaded N/budget" chip removed (2026-06-05) — the figure now
             lives in the sidebar Runtime widget's lemond row tooltip only. */}
         {L.coresident && (
@@ -634,28 +669,55 @@ if (typeof document !== "undefined" && !document.getElementById("hal0-modal-css"
 }
 
 // ─── Bottom tab bar (mobile <720px) ───
-function BottomTabs({ route, onGo }) {
-  const tabs = [
-    { id: "dashboard", label: "Home",   icon: Icons.dashboard },
-    { id: "agent",     label: "Agent",  icon: Icons.agent },
-    { id: "slots",     label: "Slots",  icon: Icons.slots },
-    { id: "models",    label: "Models", icon: Icons.models },
-    { id: "settings",  label: "More",   icon: Icons.settings },
-  ];
+// ─── NavDrawer (mobile) ───
+// Slide-in drawer that replaces the (display:none) desktop sidebar at
+// ≤720px. Mirrors the sidebar: the command-palette launcher (folded in
+// from the topbar on mobile), the full nav (useNavItems), and the runtime
+// status widget. Opened from the topbar hamburger; closed via backdrop,
+// the X, Esc, or navigating.
+function NavDrawer({ open, route, onGo, onClose, onCmdK }) {
+  const items = useNavItems();
   return (
-    <nav className="bottom-tabs" aria-label="Primary">
-      {tabs.map(t => (
-        <button
-          key={t.id}
-          className={"bottom-tab" + (route === t.id ? " active" : "")}
-          onClick={() => onGo(t.id)}
-        >
-          {t.icon}
-          <span>{t.label}</span>
+    <>
+      <div
+        className={"nav-drawer-backdrop" + (open ? " open" : "")}
+        onClick={onClose}
+        aria-hidden="true"
+      />
+      <aside
+        className={"nav-drawer" + (open ? " open" : "")}
+        aria-label="Navigation"
+        aria-hidden={!open}
+      >
+        {open && (<>
+        <div className="nav-drawer-head">
+          <span className="sb-section">Navigate</span>
+          <button className="nav-drawer-close" onClick={onClose} aria-label="Close menu">
+            {Icons.close}
+          </button>
+        </div>
+        <button className="nav-drawer-cmdk" onClick={onCmdK}>
+          {Icons.search}<span>Command palette</span><kbd>⌘K</kbd>
         </button>
-      ))}
-    </nav>
+        <div className="sb-list">
+          {items.map(it => (
+            <div
+              key={it.id}
+              className={"sb-row" + (route === it.id ? " active" : "")}
+              onClick={() => onGo(it.id)}
+            >
+              {it.icon}
+              <span className="lbl">{it.label}</span>
+              {it.cnt !== undefined && <span className="cnt num">{it.cnt}</span>}
+            </div>
+          ))}
+        </div>
+        <div className="sb-spacer" />
+        <SidebarRuntimeWidget onGo={onGo} />
+        </>)}
+      </aside>
+    </>
   );
 }
 
-Object.assign(window, { Wordmark, Icons, Icon, TopBar, Sidebar, Footer, ApprovalModal, BottomTabs });
+Object.assign(window, { Wordmark, Icons, Icon, TopBar, Sidebar, Footer, ApprovalModal, NavDrawer });

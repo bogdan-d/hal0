@@ -215,6 +215,50 @@ async def _lemonade_state_enrichment(request: Request) -> dict[str, dict[str, An
             entry["labels"] = model_labels
         entry["enabled"] = enabled
 
+        # Spec 1 / Component 1: surface the three edit-panel config fields so
+        # the card + drawer seed their controls without a per-slot /config
+        # fetch. ``enable_thinking`` is tri-valued on disk (true/false/absent);
+        # absent → null (effective OFF). ``n_gpu_layers`` falls back to the
+        # ModelConfig default sentinel (-1 = all layers) when unset.
+        entry["enable_thinking"] = cfg.get("enable_thinking")
+        n_gpu = model_section.get("n_gpu_layers") if isinstance(model_section, dict) else None
+        entry["n_gpu_layers"] = n_gpu if isinstance(n_gpu, int) else -1
+        # Issue #548: expose rope_freq_base so the Edit drawer can dirty-track
+        # it and avoid clobbering the on-disk value on unrelated saves.
+        # Absent (None) is surfaced as-is — frontend treats null as "use
+        # model default" (0.0 sentinel) and only writes back when changed.
+        rope = model_section.get("rope_freq_base") if isinstance(model_section, dict) else None
+        entry["rope_freq_base"] = rope if isinstance(rope, (int, float)) else None
+
+        # Spec 1 / Component 2 (issue #587): surface idle_timeout_s,
+        # workers, and the slot's freeform llamacpp_args so the Edit
+        # drawer can seed from real on-disk values. Without these the
+        # drawer used hardcoded constants (900 / 1 /
+        # "--flash-attn on --no-mmap") and unconditionally rewrote the
+        # on-disk values on every Save — same bug class as #584. The
+        # on-disk field for the freeform overlay is ``[server].extra_args``
+        # (ServerConfig); the dashboard's wire key is ``llamacpp_args``
+        # (matches the global lemond admin panel), so we map at this
+        # boundary. ``idle_timeout_s`` and ``workers`` are flat top-level
+        # SlotConfig fields, hoisted from [slot] by the loader. Defaults
+        # are NOT applied here — the wire payload is the truth source
+        # the dashboard uses to dirty-track changes, so an absent
+        # on-disk field should surface as null/None, not the schema
+        # default (which would let a stale slot sneak in a new value
+        # on a no-op save).
+        entry["idle_timeout_s"] = cfg.get("idle_timeout_s")
+        entry["workers"] = cfg.get("workers")
+        server_cfg = cfg.get("server")
+        if server_cfg is None:
+            extra_args: Any = None
+        elif isinstance(server_cfg, dict):
+            extra_args = server_cfg.get("extra_args")
+        else:
+            # ServerConfig pydantic model — read via attribute to stay
+            # consistent with the .get() pattern above.
+            extra_args = getattr(server_cfg, "extra_args", None)
+        entry["llamacpp_args"] = extra_args
+
         loaded_entry = loaded_by_model.get(model_default) if model_default else None
         if not enabled:
             entry["lemonade_state"] = "disabled"
@@ -1104,6 +1148,24 @@ async def update_slot_config(name: str, request: Request) -> dict[str, object]:
     if not isinstance(body, dict):
         raise BadRequest("request body must be a JSON object", code="request.not_an_object")
     snap = await sm.update_config(name, body)
+    # Spec 1 / Component 2: an explicit ``enabled: false`` write must take a
+    # running slot actually offline so the faded card matches reality. The
+    # config write alone only flips the on-disk flag; without this a disabled
+    # slot would keep its llama-server child resident until the next restart.
+    # ``unload`` is idempotent (short-circuits when already OFFLINE), but we
+    # gate on a live state so an offline/error slot incurs no /v1/unload call.
+    if body.get("enabled") is False:
+        from hal0.slots.state import SlotState
+
+        _LIVE = {
+            SlotState.STARTING,
+            SlotState.WARMING,
+            SlotState.READY,
+            SlotState.SERVING,
+            SlotState.IDLE,
+        }
+        if snap.state in _LIVE:
+            snap = await sm.unload(name)
     return _slot_to_dict(snap, request)
 
 

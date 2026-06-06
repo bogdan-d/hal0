@@ -13,7 +13,7 @@ const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
 // We also accept "agents/mcp" as an alias so the canonical URL path stays
 // readable (`/agents/mcp` from the spec). Any unknown head falls back to
 // the dashboard.
-const ROUTES = ["dashboard", "firstrun", "slots", "models", "logs", "agent", "settings", "mcp"];
+const ROUTES = ["dashboard", "firstrun", "slots", "models", "logs", "agent", "settings", "mcp", "connections"];
 function parseRoute() {
   const raw = (window.location.hash || "#dashboard").replace(/^#/, "");
   const [path, qs] = raw.split("?");
@@ -63,6 +63,7 @@ function App() {
   const [composerState, setComposerState] = useStateA("idle");
   const [footerOpen, setFooterOpen] = useStateA(false);
   const [paletteOpen, setPaletteOpen] = useStateA(false);
+  const [navOpen, setNavOpen] = useStateA(false);
 
   // 0.4 gate: the Agent route is reduced to the Memory tab, so it only
   // renders when the memory subsystem is live (HAL0_MEMORY_ENABLED, surfaced
@@ -95,7 +96,7 @@ function App() {
   useEffectA(() => {
     // global keyboard shortcuts
     const onKey = (e) => {
-      if (e.key === "Escape") { setBellOpen(false); return; }
+      if (e.key === "Escape") { setBellOpen(false); setNavOpen(false); return; }
       const tgt = e.target;
       const typing = tgt && (tgt.tagName === "INPUT" || tgt.tagName === "TEXTAREA" || tgt.isContentEditable);
       if (typing) return;
@@ -120,6 +121,10 @@ function App() {
     window.addEventListener("hal0:open-approvals", onApprovals);
     return () => window.removeEventListener("hal0:open-approvals", onApprovals);
   }, []);
+
+  // Close the mobile nav drawer on any route change (deep links, command
+  // palette). Direct taps also close it via the onGo wrapper below.
+  useEffectA(() => { setNavOpen(false); }, [route]);
 
   const go = (id) => {
     window.location.hash = "#" + id;
@@ -177,6 +182,7 @@ function App() {
         );
       case "mcp":      return <McpView />;
       case "settings": return <SettingsView />;
+      case "connections": return <ConnectionsView />;
       default:         return <div className="view">Not found.</div>;
     }
   };
@@ -195,6 +201,8 @@ function App() {
           route={route}
           onBell={() => setBellOpen(true)}
           onCmdK={() => setPaletteOpen(true)}
+          onMenu={() => setNavOpen(true)}
+          menuOpen={navOpen}
           approvals={0}
         />
         {!isFirstrun && <Sidebar route={route} onGo={go} />}
@@ -224,7 +232,15 @@ function App() {
         />
       </div>
 
-      {!isFirstrun && <BottomTabs route={route} onGo={go} />}
+      {!isFirstrun && (
+        <NavDrawer
+          open={navOpen}
+          route={route}
+          onGo={(id) => { setNavOpen(false); go(id); }}
+          onClose={() => setNavOpen(false)}
+          onCmdK={() => { setNavOpen(false); setPaletteOpen(true); }}
+        />
+      )}
 
       {/* v0.3 PR-8: ApprovalModal stays mounted but its content is
           backed by the live agent approvals queue in PR-10. Today the
