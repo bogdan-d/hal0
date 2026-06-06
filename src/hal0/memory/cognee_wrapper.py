@@ -47,6 +47,8 @@ from typing import Any
 
 import structlog
 
+from hal0.memory.provider import MemoryProvider
+
 # Cognee bootstrap. Import is deferred to first-use because importing
 # `cognee` at module-import time runs the package's logging side-effect
 # (it writes to ~/.cognee/logs/...). Keeping the import lazy means hal0
@@ -173,7 +175,7 @@ class MemoryRecord:
 # ── Wrapper ───────────────────────────────────────────────────────────────
 
 
-class CogneeWrapper:
+class CogneeWrapper(MemoryProvider):
     """Async wrapper around Cognee — see module docstring.
 
     One instance per (Cognee dir, client_id) is the intended usage —

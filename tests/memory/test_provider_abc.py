@@ -44,3 +44,10 @@ def test_add_signature_matches_cognee_call_sites():
     params = list(sig.parameters)
     # Mirrors CogneeWrapper.add + the REST/MCP callers.
     assert params == ["self", "text", "dataset", "tags", "source", "metadata", "client_id"]
+
+
+def test_cognee_wrapper_is_a_memory_provider():
+    from hal0.memory.cognee_wrapper import CogneeWrapper
+    from hal0.memory.provider import MemoryProvider
+
+    assert issubclass(CogneeWrapper, MemoryProvider)
