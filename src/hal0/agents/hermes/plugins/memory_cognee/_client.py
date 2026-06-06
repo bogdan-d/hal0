@@ -131,16 +131,21 @@ class Hal0MemoryClient:
         return await self._request("POST", "/api/memory/search", json=payload)
 
     async def list_items(self, *, limit: int = 50) -> dict[str, Any]:
-        """GET /api/memory — page through stored items.
+        """GET /api/memory/list — page through stored items.
 
-        ``limit`` is forwarded as a query parameter so the server can
-        cap the response; pagination cursors are an upstream concern.
+        ``limit`` is forwarded as a query parameter; the server resolves the
+        dataset from ``X-hal0-Agent``. (Was GET /api/memory — a 404 — fixed
+        in P0.)
         """
-        return await self._request("GET", "/api/memory", params={"limit": int(limit)})
+        return await self._request("GET", "/api/memory/list", params={"limit": int(limit)})
 
     async def delete(self, item_id: str) -> dict[str, Any]:
-        """DELETE /api/memory/{id} — remove a single memory item."""
-        return await self._request("DELETE", f"/api/memory/{item_id}")
+        """POST /api/memory/delete — remove memory items by id.
+
+        The router exposes a body-based bulk delete (``{ids: [...]}``), not a
+        path-param DELETE. (Was DELETE /api/memory/{id} — a 404 — fixed in P0.)
+        """
+        return await self._request("POST", "/api/memory/delete", json={"ids": [item_id]})
 
     # ── transport core ─────────────────────────────────────────────────
 
