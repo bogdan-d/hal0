@@ -51,7 +51,7 @@ class _FakeWrapper:
 @pytest.fixture
 def fake_wrapper_empty(client: TestClient) -> _FakeWrapper:
     fake = _FakeWrapper({"items": [], "next_cursor": None})
-    client.app.state.memory_wrapper = fake
+    client.app.state.memory_provider = fake
     return fake
 
 
@@ -66,7 +66,7 @@ def test_memory_stats_no_wrapper_returns_available_false(client: TestClient) -> 
     # Default app state has no memory wrapper (init failed on the test
     # host because /var/lib/hal0 isn't writable). The endpoint must
     # render an ``available=false`` envelope rather than 500.
-    client.app.state.memory_wrapper = None
+    client.app.state.memory_provider = None
     r = client.get("/api/agents/hermes/memory/stats")
     assert r.status_code == 200, r.text
     body = r.json()
@@ -105,7 +105,7 @@ def test_memory_stats_with_items_reports_count_and_last_write(client: TestClient
             "next_cursor": None,
         }
     )
-    client.app.state.memory_wrapper = fake
+    client.app.state.memory_provider = fake
 
     r = client.get("/api/agents/hermes/memory/stats")
     assert r.status_code == 200
@@ -125,7 +125,7 @@ def test_memory_stats_with_int_timestamp_converts_to_iso(client: TestClient) -> 
             "next_cursor": None,
         }
     )
-    client.app.state.memory_wrapper = fake
+    client.app.state.memory_provider = fake
 
     r = client.get("/api/agents/hermes/memory/stats")
     body = r.json()
@@ -139,7 +139,7 @@ def test_memory_stats_with_int_timestamp_converts_to_iso(client: TestClient) -> 
 
 def test_memory_stats_wrapper_raises_returns_available_false(client: TestClient) -> None:
     fake = _FakeWrapper(exc=RuntimeError("simulated wrapper failure"))
-    client.app.state.memory_wrapper = fake
+    client.app.state.memory_provider = fake
 
     r = client.get("/api/agents/hermes/memory/stats")
     # Still 200 — the sidebar chip can't degrade if this 500s.
@@ -153,7 +153,7 @@ def test_memory_stats_wrapper_raises_returns_available_false(client: TestClient)
 def test_memory_stats_namespace_is_per_agent_private(client: TestClient) -> None:
     """Sidebar reflects what THIS agent has done; ``shared`` would muddy."""
     fake = _FakeWrapper()
-    client.app.state.memory_wrapper = fake
+    client.app.state.memory_provider = fake
 
     client.get("/api/agents/hermes/memory/stats")
     assert fake.calls[0]["dataset"] == "private:hermes"
@@ -162,7 +162,7 @@ def test_memory_stats_namespace_is_per_agent_private(client: TestClient) -> None
 def test_memory_stats_handles_malformed_payload_gracefully(client: TestClient) -> None:
     """Wrapper returned something that isn't ``{items: [...]}``."""
     fake = _FakeWrapper({"not_items": []})  # type: ignore[arg-type]
-    client.app.state.memory_wrapper = fake
+    client.app.state.memory_provider = fake
 
     r = client.get("/api/agents/hermes/memory/stats")
     body = r.json()

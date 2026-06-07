@@ -169,7 +169,7 @@ class MemoryUnavailable(Hal0Error):
 
 def _wrapper(request: Request) -> Any:
     """Return the live :class:`CogneeWrapper` or raise 503."""
-    wrapper = getattr(request.app.state, "memory_wrapper", None)
+    wrapper = getattr(request.app.state, "memory_provider", None)
     if wrapper is None:
         raise MemoryUnavailable("memory engine is not available on this hal0 instance")
     return wrapper

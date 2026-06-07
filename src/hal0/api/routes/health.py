@@ -95,7 +95,7 @@ async def get_status(request: Request) -> dict[str, Any]:
         # reads this to show/hide the Agent → Memory nav so the UI and the
         # backend can never disagree. Reflects the real wrapper, so an init
         # failure also reads as off.
-        "memory_enabled": getattr(request.app.state, "memory_wrapper", None) is not None,
+        "memory_enabled": getattr(request.app.state, "memory_provider", None) is not None,
     }
 
 

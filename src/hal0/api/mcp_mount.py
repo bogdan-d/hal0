@@ -169,13 +169,13 @@ def mount_mcp_servers(
     app,
     *,
     approval_queue,
-    memory_wrapper=None,
+    memory_provider=None,
     memory_dispatcher=None,
     base_url: str = "http://127.0.0.1:8080",
 ) -> None:
     """Build + mount the admin and (optionally) memory MCP sub-apps.
 
-    Called once from :func:`create_app`. ``memory_wrapper`` may be None
+    Called once from :func:`create_app`. ``memory_provider`` may be None
     when Cognee isn't initialized (e.g. tests that don't exercise
     /mcp/memory); the mount silently skips the memory server in that
     case.
@@ -218,11 +218,11 @@ def mount_mcp_servers(
     # builders. Keyed by mount id (matches ``connect_url`` last segment).
     mcp_servers: dict[str, object] = {"hal0-admin": admin_server}
 
-    if memory_wrapper is not None:
+    if memory_provider is not None:
         from hal0.mcp.memory import build_server as build_memory_server
 
         memory_server = build_memory_server(
-            wrapper=memory_wrapper,
+            wrapper=memory_provider,
             client_id_resolver=client_id_resolver,
             private_resolver=private_resolver,
         )
@@ -238,7 +238,7 @@ def mount_mcp_servers(
     log.info(
         "hal0.mcp.mounted",
         admin=True,
-        memory=memory_wrapper is not None,
+        memory=memory_provider is not None,
         dns_rebinding_protection=transport_security.enable_dns_rebinding_protection,
         allowed_hosts=len(transport_security.allowed_hosts),
     )
