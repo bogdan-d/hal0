@@ -575,11 +575,11 @@ if [[ ! -f "${API_ENV}" ]]; then
 HAL0_PORT=${HAL0_PORT}
 HAL0_LOG_LEVEL=info
 HAL0_UI_DIST=${HAL0_UI_DIST_VAL}
-# Memory subsystem (Cognee engine + /mcp/memory + the Agent → Memory tab)
-# is deferred in this release and ships disabled by default. Uncomment to
-# reintroduce it — no other change needed; the dashboard Agent nav returns
-# automatically once /api/status reports it live.
-# HAL0_MEMORY_ENABLED=1
+# Memory subsystem (Hindsight engine + /mcp/memory + the Agent → Memory tab)
+# is ENABLED by default as of v0.5 (brain re-enablement). Comment out to ship
+# with memory dark. Needs the shared hindsight-api daemon (installer/systemd/
+# hindsight-api.service); set [memory] engine = "cognee" to fall back.
+HAL0_MEMORY_ENABLED=1
 # Uncomment to pin specific toolbox images:
 # HAL0_TOOLBOX_IMAGE_VULKAN=ghcr.io/hal0ai/hal0-toolbox-vulkan:v1
 # HAL0_TOOLBOX_IMAGE_ROCM=ghcr.io/hal0ai/hal0-toolbox-rocm:v1

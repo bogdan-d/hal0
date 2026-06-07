@@ -152,12 +152,37 @@ source_facts}`. Retain response: `{success, bank_id, items_count, usage}`.
    Remaining (minor): NPU extraction shares the NPU with the FLM asr/embed trio; confirm no NPU
    contention under load at gate-on. Reverting to iGPU `gemma-4-26b-a4b-it` reinstates the risk.
 
-## ⚠ Not yet deployed to the runtime
+## P2-6 — DEPLOYED + BRAIN LIVE (2026-06-07)
 
-P0–P2 code (incl. the P2-5 default flip + reranker) lives on `feat/hindsight-memory`, NOT in
-`/opt/hal0` (runtime runs old code). The hindsight-api **daemon** IS deployed. Activating the
-brain (P2-6) requires: deploy the branch code to /opt/hal0 (rebuild ui/dist per
-`hal0_ct105_deploy_rebuilds_ui`) + flip `HAL0_MEMORY_ENABLED=1` + bring up rerank (item 1).
+PR #601 (feat/hindsight-memory → main, 30 commits) merged after **full CI green** (py3.11+3.12
+2793 tests, ui, γ-suite). CI caught one miss my scoped local runs didn't: `memory migrate`
+undocumented in `cli.mdx` (parity gate) → fixed (af87a49).
+
+Deployed `/opt/hal0` via `scripts/deploy.sh` (reset→origin/main `ee98106` + clean ui/dist
+rebuild + hal0-api restart). Gate-OFF verify first: `/api/{models,slots,config/urls}`=200,
+`/api/memory/add`=503 (dark) — P2-1 rename didn't break anything. Then flipped
+`HAL0_MEMORY_ENABLED=1` in `/etc/hal0/api.env` + restart → `/api/status memory_enabled=True`.
+No `[memory].engine` pin → schema default `hindsight` wins.
+
+### End-to-end verified through the live front door
+- `POST /api/memory/add` → `{id,timestamp}` (HindsightProvider→:9177 retain, async) ✅
+- NPU `gemma3-4b-FLM` extraction ~150s (async/background) → `POST /api/memory/recall` returns
+  the fact ("HAL 0.5 re-enabled its brain using Hindsight memory engine | When: 2026-06-07") ✅
+- `POST /api/memory/search` (back-compat) → 1 item ✅
+- ACL: foreign-private read (`X-hal0-Agent: bob`, `dataset=private:alice`) → 0 items
+  (fail-open-empty) ✅
+- `/mcp/memory` mount live (`GET`→200 streamable-http; memory_recall tool unit-tested P2-3).
+
+### Known follow-ups (not blockers; brain is functional)
+- **`/api/memory/list` returns 0** — `HindsightProvider.list_items` is the P1-2 `recall("*")`
+  placeholder. FIX: wire it to Hindsight `GET /v1/default/banks/{bank}/memories/list`.
+- **Rerank still dormant** (see carry-forward #1) — recall is fused, not §4b-ordered, until a
+  `/rerank` endpoint is stood up + `rerank_url`/`rerank_enabled` set. Verify by ordering change.
+- **MCP full tool-call round-trip** only unit-tested (raw curl can't do the MCP handshake).
+- **install.sh template** flip (new installs default-on) — follow-up PR.
+
+### Rollback (instant): unset `HAL0_MEMORY_ENABLED` in `/etc/hal0/api.env` + restart hal0-api
+(back to dark). Or `[memory] engine = "cognee"` to revert engine (Cognee store never mutated).
 
 ## Rollback
 
