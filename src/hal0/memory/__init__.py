@@ -91,7 +91,7 @@ def provider_from_config(cfg: Any) -> MemoryProvider:
         from hal0.memory.hindsight_provider import LemonadeReranker
 
         reranker = LemonadeReranker(
-            url=str(embed.rerank_url),
+            base_url=str(getattr(embed, "rerank_gateway_url", None) or "http://127.0.0.1:13305"),
             connect_timeout_s=float(embed.rerank_connect_timeout_s),
             read_timeout_s=float(embed.rerank_read_timeout_s),
         )
