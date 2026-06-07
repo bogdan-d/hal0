@@ -83,7 +83,7 @@ def _build_app(stub: StubWrapper) -> FastAPI:
     app = FastAPI()
     error_codes.install(app)
     app.include_router(memory_routes.router, prefix="/api/memory", tags=["memory"])
-    app.state.memory_wrapper = stub
+    app.state.memory_provider = stub
     return app
 
 
@@ -182,7 +182,7 @@ def test_status_unavailable_when_no_wrapper(
     app = FastAPI()
     error_codes.install(app)
     app.include_router(memory_routes.router, prefix="/api/memory", tags=["memory"])
-    app.state.memory_wrapper = None
+    app.state.memory_provider = None
     with TestClient(app) as c:
         r = c.get("/api/memory/graph/status")
         assert r.status_code == 503

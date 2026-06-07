@@ -94,7 +94,7 @@ def _build_app(stub: StubWrapper) -> FastAPI:
     app = FastAPI()
     error_codes.install(app)
     app.include_router(memory_routes.router, prefix="/api/memory", tags=["memory"])
-    app.state.memory_wrapper = stub
+    app.state.memory_provider = stub
     return app
 
 

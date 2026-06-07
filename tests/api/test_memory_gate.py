@@ -36,7 +36,7 @@ def test_memory_disabled_unless_flag_is_one(
 ) -> None:
     app, client = _build(monkeypatch, flag)
     # The wrapper is constructed at create_app time, before lifespan.
-    assert app.state.memory_wrapper is None
+    assert app.state.memory_provider is None
     with client:
         body = client.get("/api/status").json()
         assert body["memory_enabled"] is False
@@ -56,4 +56,4 @@ def test_status_exposes_memory_enabled_as_bool(
         assert isinstance(body["memory_enabled"], bool)
         # The reported flag must mirror the real wrapper state so the field
         # is trustworthy even if Cognee fails to construct in this image.
-        assert body["memory_enabled"] is (app.state.memory_wrapper is not None)
+        assert body["memory_enabled"] is (app.state.memory_provider is not None)

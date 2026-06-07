@@ -146,6 +146,7 @@ without loading it.
 hal0 memory graph status [--json]
 hal0 memory graph enable [--route R] [--provider P] [--model M] [--json]
 hal0 memory graph disable [--json]
+hal0 memory migrate [--dry-run]
 ```
 
 The `memory graph` group is the ADR-0014 graph-extraction gate. It
@@ -153,6 +154,10 @@ controls whether Cognee runs the (expensive) graph-build step on
 memory writes and which upstream serves it. `--route=upstream`
 requires `--provider` and `--model`; `--route=primary` and
 `--route=agent` reuse hal0's own slots.
+
+`memory migrate --dry-run` reports the Cognee→Hindsight row mapping
+without writing (a no-op when the legacy Cognee store is empty/stale).
+Part of the v0.5 brain engine swap.
 
 ## Configuration
 

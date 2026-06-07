@@ -138,7 +138,7 @@ async def get_agent_memory_stats(agent_id: str, request: Request) -> dict[str, A
         )
 
     namespace = _namespace_for(agent_id)
-    wrapper = getattr(request.app.state, "memory_wrapper", None)
+    wrapper = getattr(request.app.state, "memory_provider", None)
     if wrapper is None:
         log.info(
             "agent.memory.stats_unavailable",

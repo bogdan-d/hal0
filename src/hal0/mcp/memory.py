@@ -328,11 +328,55 @@ async def _memory_delete(
     return {"deleted": deleted_count}
 
 
+async def _memory_recall(
+    wrapper: Any,
+    args: dict[str, Any],
+    *,
+    client_id: str | None,
+    private: bool,
+) -> dict[str, Any]:
+    """memory_recall(query, max_tokens=4096, types?, dataset?, tags?) → {results}.
+
+    The Hindsight-preferred retrieval path: token-budgeted, observation
+    hierarchy, no numeric score. Provider.recall falls back to search on
+    engines without a richer recall (ABC default), so this tool is safe
+    regardless of active engine.
+    """
+    query = _require(args, "query", str)
+    if not query.strip():
+        raise MemorySchemaError("query must be non-empty")
+    max_tokens = args.get("max_tokens", 4096)
+    if not isinstance(max_tokens, int) or max_tokens < 1 or max_tokens > 32768:
+        raise MemorySchemaError("max_tokens must be 1..32768")
+    requested = args.get("dataset")
+    dataset: Any
+    if isinstance(requested, list):
+        dataset = [str(d) for d in requested]
+    elif requested is None or (isinstance(requested, str) and not requested):
+        dataset = ["shared", f"private:{client_id}"] if private and client_id else _DEFAULT_DATASET
+    elif isinstance(requested, str):
+        dataset = _resolve_dataset(requested, private=private, client_id=client_id)
+    else:
+        raise MemorySchemaError("dataset must be str | list[str] | null")
+    tags = _normalise_tags(args.get("tags"))
+    types = args.get("types")
+    results = await wrapper.recall(
+        query=query,
+        types=types,
+        max_tokens=max_tokens,
+        dataset=dataset,
+        tags=tags,
+        client_id=client_id,
+    )
+    return {"results": list(results)}
+
+
 _MEMORY_HANDLERS = {
     "memory_add": _memory_add,
     "memory_search": _memory_search,
     "memory_list": _memory_list,
     "memory_delete": _memory_delete,
+    "memory_recall": _memory_recall,
 }
 
 
@@ -410,6 +454,9 @@ _ANNOTATIONS: dict[str, ToolAnnotations] = {
     "memory_delete": ToolAnnotations(
         readOnlyHint=False, destructiveHint=True, idempotentHint=True, openWorldHint=False
     ),
+    "memory_recall": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
 }
 
 
@@ -457,6 +504,10 @@ def build_server(
     _register(
         "memory_delete",
         "Delete one or more memory items by id (bulk deletes gate at admin layer).",
+    )
+    _register(
+        "memory_recall",
+        "Recall token-budgeted, consolidated memory (preferred over search).",
     )
 
     return server

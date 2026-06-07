@@ -30,6 +30,7 @@ from hal0.cli._shared import (
     api_put,
     die,
 )
+from hal0.memory.migrate import migrate_cognee_to_hindsight_dryrun
 
 app = typer.Typer(help="Manage hal0 memory (Cognee — ADR-0005 + ADR-0014).")
 console = Console()
@@ -181,6 +182,50 @@ def graph_disable_cmd(
             border_style="yellow",
         )
     )
+
+
+# ── ``hal0 memory migrate`` ───────────────────────────────────────────────────
+
+_DEFAULT_COGNEE_DIR = "/var/lib/hal0/memory/cognee"
+
+
+@app.command("migrate")
+def migrate_cmd(
+    dry_run: bool = typer.Option(
+        True,
+        "--dry-run/--apply",
+        help="Report migration without touching Hindsight (--apply not yet implemented).",
+    ),
+    cognee_dir: str = typer.Option(
+        _DEFAULT_COGNEE_DIR,
+        "--cognee-dir",
+        help="Path to the Cognee data directory (contains hal0_memory_index.sqlite).",
+    ),
+    json_out: bool = typer.Option(
+        False,
+        "--json",
+        help="Emit raw JSON instead of the human-readable panel.",
+    ),
+) -> None:
+    """Migrate Cognee memory store → Hindsight banks (dry-run only, P2-4)."""
+    if not dry_run:
+        die("--apply is not yet implemented; dry-run only.")
+        return
+    report = migrate_cognee_to_hindsight_dryrun(cognee_dir=cognee_dir)
+    if json_out:
+        typer.echo(jsonlib.dumps(report, indent=2, sort_keys=True))
+        return
+    noop_label = (
+        "[dim]yes — nothing to migrate[/dim]" if report["noop"] else "[bold yellow]no[/bold yellow]"
+    )
+    t = Table.grid(padding=(0, 2))
+    t.add_column("k", style="dim")
+    t.add_column("v")
+    t.add_row("Rows total", str(report["rows_total"]))
+    t.add_row("Rows mapped", str(report["rows_mapped"]))
+    t.add_row("Rows unmapped", str(report["rows_unmapped"]))
+    t.add_row("No-op", noop_label)
+    console.print(Panel(t, title="memory · migrate (dry-run)", border_style="dim"))
 
 
 __all__ = ["app", "graph_app"]
