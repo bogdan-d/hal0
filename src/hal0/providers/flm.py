@@ -57,8 +57,30 @@ _DEFAULT_FLM_IMAGE = "ghcr.io/hal0ai/hal0-toolbox-flm:v1"
 _IMAGE_FLM_ROOT = "/opt/fastflowlm"
 _DEFAULT_FLM_ROOT = "/opt/hal0/flm-ubuntu"
 # FLM's per-user model cache. Bind-mounted writable so `flm pull` downloads
-# survive container restarts.
+# survive container restarts. (Still used by the serving container_spec below.)
 _DEFAULT_FLM_MODELS_DIR = "/var/lib/hal0/flm-models"
+
+# ── Host FLM (catalog probe + pull) ─────────────────────────────────────────────
+# The catalog probe and model pulls run the HOST flm binary directly — NOT the
+# docker toolbox — so they use the exact binary + on-disk cache that lemond
+# *serves* with. The toolbox had drifted to FLM v0.9.42 while the host serves
+# v0.9.43: it (a) bind-mounted the empty `_DEFAULT_FLM_MODELS_DIR`, so every
+# model reported installed=False and vanished from the dashboard (the UI hides
+# not-installed models), and (b) emitted "model may not be compatible" warnings
+# that broke JSON parsing once pointed at the real cache. Serving was already
+# host-native; probe/pull now match it.
+# See docs/superpowers/plans/2026-06-07-flm-host-probe-and-unified-model-storage.md.
+#
+# Run as the `hal0` user with HOME=/var/lib/hal0 so flm resolves its real cache
+# at ~/.config/flm/models. All three are env-overridable for dev/test.
+_HOST_FLM_BIN = os.environ.get("HAL0_FLM_BIN", "/usr/bin/flm")
+_HOST_FLM_HOME = os.environ.get("HAL0_FLM_HOME", "/var/lib/hal0")
+_HOST_FLM_USER = os.environ.get("HAL0_FLM_USER", "hal0")
+# Real FLM cache (HOME/.config/flm/models). Replaces the toolbox bind-mount
+# source for probe/pull; HAL0_FLM_MODELS_DIR still overrides if set.
+_HOST_FLM_MODELS_DIR = (
+    os.environ.get("HAL0_FLM_MODELS_DIR") or f"{_HOST_FLM_HOME}/.config/flm/models"
+)
 
 # ── Timeouts ───────────────────────────────────────────────────────────────────
 # TIER1: separate health budget from infer budget.
@@ -416,58 +438,84 @@ def _classify_flm_model(entry: dict[str, Any]) -> list[str]:
     return ["chat"]
 
 
-def _probe_flm_catalog() -> list[dict[str, Any]] | None:
-    """Run ``flm list -j`` in the toolbox image and parse the JSON output.
+def flm_host_spawn_kwargs() -> dict[str, Any]:
+    """subprocess/asyncio kwargs to run host ``flm`` as the hal0 identity.
 
-    Returns the raw model list (FLM's own shape) or ``None`` on any
-    failure — missing docker, image not pulled locally, container
-    crash, parse error, timeout. The caller treats ``None`` as
-    "advertise NPU with no served models" so the dashboard renders
-    cleanly instead of breaking on a probe error.
+    Sets ``HOME`` so flm resolves ``~/.config/flm/models`` to the real on-disk
+    cache, and drops to the ``hal0`` user/group when we have the privilege
+    (hal0-api runs as ``root`` in prod). When already running as a non-root
+    user (dev/test), ``user=`` would raise ``PermissionError``, so we skip it
+    and rely on the caller already being the model owner.
 
-    The probe does NOT pass ``--device /dev/accel/accel0`` because
-    ``flm list`` reads the bundled ``model_list.json`` and never touches
-    NPU hardware — keeping the device flag out makes the probe usable on
-    dev hosts without XDNA passthrough.
+    Accepted by both :func:`subprocess.run` and
+    :func:`asyncio.create_subprocess_exec` (the ``user``/``group`` kwargs are
+    available on Python ≥ 3.9).
+    """
+    import pwd
 
-    The hal0-managed FLM models cache is bind-mounted at the same path
-    the slot's container_spec uses (``~/.config/flm/models`` resolved
-    against the toolbox image's non-root ``hal0`` user, HOME=/var/lib/hal0).
-    Without it ``flm list`` runs against an empty overlay and reports
-    every model as not-installed — masking weights the host already has
-    on disk.
+    kwargs: dict[str, Any] = {"env": {**os.environ, "HOME": _HOST_FLM_HOME}}
+    try:
+        if os.geteuid() == 0:
+            pwd.getpwnam(_HOST_FLM_USER)  # raises KeyError if the user is absent
+            kwargs["user"] = _HOST_FLM_USER
+            kwargs["group"] = _HOST_FLM_USER
+    except (KeyError, OSError, AttributeError):
+        # Unknown user, or geteuid unavailable (non-POSIX) — run as-is.
+        pass
+    return kwargs
+
+
+def _extract_json_object(text: str) -> dict[str, Any] | None:
+    """Decode the first top-level JSON object in ``text``.
+
+    ``flm list -j`` normally prints clean JSON, but can prepend ``[WARNING]``
+    lines (e.g. a model written by a newer flm). Scan to the first ``{`` and
+    decode just that object so a stray preamble (or trailing) line can't null
+    the whole catalog.
     """
     import json
+
+    start = text.find("{")
+    if start < 0:
+        return None
+    try:
+        obj, _ = json.JSONDecoder().raw_decode(text[start:])
+    except ValueError:
+        return None
+    return obj if isinstance(obj, dict) else None
+
+
+def _probe_flm_catalog() -> list[dict[str, Any]] | None:
+    """Run host ``flm list -j`` (as the hal0 user) and parse the JSON output.
+
+    Uses the host ``/usr/bin/flm`` — the SAME binary lemond serves with, NOT a
+    docker toolbox — so the reported ``installed`` flag reflects the weights
+    actually on disk at ``~/.config/flm/models`` and there is no
+    toolbox-vs-host version skew. Returns the raw model list (FLM's own shape)
+    or ``None`` on any failure (missing binary, perms, crash, parse error,
+    timeout); the caller treats ``None`` as "advertise NPU with no served
+    models" so the dashboard renders cleanly.
+
+    No ``--device`` is needed: ``flm list`` reads the bundled
+    ``model_list.json`` and checks on-disk files; it never touches NPU
+    hardware, so the probe still works on dev hosts without XDNA.
+    """
     import subprocess
 
-    image = os.environ.get("HAL0_TOOLBOX_IMAGE_FLM", _DEFAULT_FLM_IMAGE)
-    flm_models = os.environ.get("HAL0_FLM_MODELS_DIR") or _DEFAULT_FLM_MODELS_DIR
-    cmd = [
-        "docker",
-        "run",
-        "--rm",
-        "--security-opt",
-        "apparmor=unconfined",
-        "-v",
-        f"{flm_models}:/var/lib/hal0/.config/flm/models",
-        image,
-        "list",
-        "-j",
-    ]
     try:
         proc = subprocess.run(
-            cmd,
+            [_HOST_FLM_BIN, "list", "-j"],
             stdin=subprocess.DEVNULL,
             capture_output=True,
             timeout=30.0,
+            **flm_host_spawn_kwargs(),
         )
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
         return None
     if proc.returncode != 0:
         return None
-    try:
-        payload = json.loads(proc.stdout.decode("utf-8", errors="replace"))
-    except (ValueError, UnicodeError):
+    payload = _extract_json_object(proc.stdout.decode("utf-8", errors="replace"))
+    if payload is None:
         return None
     models = payload.get("models")
     if not isinstance(models, list):
@@ -555,33 +603,19 @@ def is_flm_tag(model_id: str) -> bool:
 
 
 def flm_pull_command(tag: str) -> tuple[list[str], str]:
-    """Return ``(argv, host_models_dir)`` for an ``flm pull <tag>`` run.
+    """Return ``(argv, host_models_dir)`` for a host ``flm pull <tag>`` run.
 
-    Mirrors :func:`_probe_flm_catalog` argv shape (apparmor unconfined,
-    same bind mount target) but invokes ``pull`` instead of ``list``.
-    The host_models_dir is returned so callers can locate the on-disk
-    weights for registry/path bookkeeping after the pull finishes.
+    Uses the host ``/usr/bin/flm`` (same binary lemond serves with), NOT a
+    docker toolbox. The caller spawns ``argv`` with
+    :func:`flm_host_spawn_kwargs` so it runs as the ``hal0`` user with ``HOME``
+    set; downloads land in ``~/.config/flm/models`` (the real cache) owned by
+    ``hal0``, matching serving. ``host_models_dir`` is returned so callers can
+    locate the weights for progress polling + registry bookkeeping.
 
-    Like the slot's container_spec we do NOT pass ``--device``: ``flm
-    pull`` downloads files; it doesn't touch the NPU. Keeping the
-    device flag out lets the pull run on dev hosts without XDNA
-    passthrough (useful for tests).
+    No ``--device``: ``flm pull`` downloads files; it doesn't touch the NPU,
+    so it still runs on dev hosts without XDNA passthrough.
     """
-    image = os.environ.get("HAL0_TOOLBOX_IMAGE_FLM", _DEFAULT_FLM_IMAGE)
-    flm_models = os.environ.get("HAL0_FLM_MODELS_DIR") or _DEFAULT_FLM_MODELS_DIR
-    argv = [
-        "docker",
-        "run",
-        "--rm",
-        "--security-opt",
-        "apparmor=unconfined",
-        "-v",
-        f"{flm_models}:/var/lib/hal0/.config/flm/models",
-        image,
-        "pull",
-        tag,
-    ]
-    return argv, flm_models
+    return [_HOST_FLM_BIN, "pull", tag], _HOST_FLM_MODELS_DIR
 
 
 _FLM_PROGRESS_RE = re.compile(

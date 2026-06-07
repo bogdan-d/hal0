@@ -95,6 +95,20 @@ _CAPABILITY_TO_TYPE: dict[str, str] = {
 # the lowest-priority fallback so genuinely non-chat models surface.
 _TYPE_PRIORITY: tuple[str, ...] = ("rerank", "embed", "stt", "tts", "img", "chat")
 
+# FLM capability → dispatcher-vocab slot type. The NPU slot pickers
+# (ui/dash/slots.jsx ``modelSlotType``) speak the dispatcher vocabulary
+# (llm/embedding/transcription), NOT the W7 ``_CAPABILITY_TO_TYPE`` vocab, so
+# probe-sourced FLM rows must carry these values to be selectable.
+_FLM_DISPATCH_TYPE: dict[str, str] = {
+    "chat": "llm",
+    "embed": "embedding",
+    "stt": "transcription",
+    "asr": "transcription",
+    "rerank": "reranking",
+    "tts": "tts",
+    "image": "image",
+}
+
 
 def _classify_type(capabilities: Any, model_id: str = "") -> str:
     """Return the primary modality bucket for a model.
@@ -185,6 +199,54 @@ async def list_models(request: Request) -> dict[str, Any]:
                     "type": _classify_type(None, mid),
                 }
             )
+    # Installed FLM/NPU models — surfaced straight from the host-flm probe so
+    # the NPU slot pickers can select any model on disk, not just the one a slot
+    # already defaults to (the composite ``hal0`` upstream advertises only slot
+    # defaults, so without this only the configured npu model appeared). The id
+    # mirrors lemonade's ``<tag>-FLM`` convention so the dashboard maps it to the
+    # npu device; ``capabilities`` + an explicit ``device`` let the slot-swap
+    # popover derive type/device without requiring a registry entry.
+    try:
+        from hal0.providers.flm import flm_served_models
+
+        for fm in flm_served_models():
+            if not fm.get("installed"):
+                continue
+            mid = fm["tag"].replace(":", "-") + "-FLM"
+            if mid in seen:
+                continue
+            seen.add(mid)
+            caps = list(fm.get("capabilities") or [])
+            # FLM chat tags are chat-first even when multimodal (gemma4 also
+            # advertises ``stt``); pick chat as the primary role so they land
+            # in the NPU chat picker, not under stt.
+            primary = "chat" if "chat" in caps else (caps[0] if caps else "chat")
+            # The NPU slot pickers (ui/dash/slots.jsx) gate on the FLM-seed
+            # shape: ``isFlmModel`` needs backend=="flm" / upstream=="npu", and
+            # ``modelSlotType`` needs the DISPATCHER vocabulary (chat→llm,
+            # embed→embedding, stt→transcription) — not the W7 type vocab. Match
+            # that shape exactly so probe-sourced models are selectable.
+            data.append(
+                {
+                    "id": mid,
+                    "name": mid,
+                    "object": "model",
+                    "created": now,
+                    "owned_by": "flm",
+                    "upstream": "npu",
+                    "backend": "flm",
+                    "installed": True,
+                    "ns": "pulled",
+                    "type": _FLM_DISPATCH_TYPE.get(primary, "llm"),
+                    "capability": primary,
+                    "capabilities": caps,
+                    "device": "npu",
+                }
+            )
+    except Exception:
+        # Probe unavailable (no flm binary / dev host) — skip silently; the
+        # rest of the catalog still renders.
+        pass
     return {"models": data, "count": len(data), "filtered_aliases": filtered}
 
 
