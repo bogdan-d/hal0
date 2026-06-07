@@ -52,17 +52,18 @@ class HindsightRestClient:
         tags=None,
         timestamp=None,
     ):
-        body: dict[str, Any] = {"content": content, "document_id": document_id}
+        item: dict[str, Any] = {"content": content, "document_id": document_id}
         if context is not None:
-            body["context"] = context
+            item["context"] = context
         if metadata:
-            body["metadata"] = metadata
+            item["metadata"] = metadata
         if tags:
-            body["tags"] = list(tags)
+            item["tags"] = list(tags)
         if timestamp is not None:
-            body["timestamp"] = timestamp
+            item["timestamp"] = timestamp
+        body: dict[str, Any] = {"items": [item], "async": True}
         resp = await self._http.post(
-            f"/v1/default/banks/{bank_id}/retain", headers=self._headers(), json=body
+            f"/v1/default/banks/{bank_id}/memories", headers=self._headers(), json=body
         )
         resp.raise_for_status()
         return resp.json()
@@ -74,7 +75,7 @@ class HindsightRestClient:
         if tags:
             body["tags"] = list(tags)
         resp = await self._http.post(
-            f"/v1/default/banks/{bank_id}/recall", headers=self._headers(), json=body
+            f"/v1/default/banks/{bank_id}/memories/recall", headers=self._headers(), json=body
         )
         resp.raise_for_status()
         return resp.json()

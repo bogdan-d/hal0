@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import httpx
 import pytest
+
 from hal0.memory.hindsight_client import HindsightRestClient
 
 
@@ -15,7 +16,7 @@ async def test_retain_recall_delete_hit_v1_bank_paths():
         seen.append((request.method, request.url.path))
         if request.url.path.endswith("/recall"):
             return httpx.Response(200, json={"results": []})
-        if request.url.path.endswith("/retain"):
+        if request.url.path.endswith("/memories"):
             return httpx.Response(
                 200, json={"success": True, "bank_id": "shared", "items_count": 1}
             )
@@ -28,7 +29,7 @@ async def test_retain_recall_delete_hit_v1_bank_paths():
         await client.recall(bank_id="shared", query="x")
         await client.delete_document(bank_id="shared", document_id="d1")
 
-    assert ("POST", "/v1/default/banks/shared/retain") in seen
-    assert ("POST", "/v1/default/banks/shared/recall") in seen
+    assert ("POST", "/v1/default/banks/shared/memories") in seen
+    assert ("POST", "/v1/default/banks/shared/memories/recall") in seen
     # Delete is the documented delete_document path.
     assert any(m == "DELETE" and "/documents/d1" in p for m, p in seen)
