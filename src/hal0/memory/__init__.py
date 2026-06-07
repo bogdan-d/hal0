@@ -46,9 +46,12 @@ __all__ = [
 def _build_hindsight_client(cfg: Any) -> Any:
     """Construct the Hindsight REST client from config + env.
 
-    Raises if the daemon is unreachable so the factory can degrade. The
-    actual httpx-backed client lives in hindsight_provider; this indirection
-    exists purely so the boot-degrade path is unit-testable.
+    NOTE (P1): ``from_env()`` only builds the httpx client — it does NO I/O,
+    so it does not yet raise when the daemon is down. The boot-degrade ladder
+    (hindsight -> pgvector) only fires once P1-6 adds a connectivity probe
+    here (e.g. a ``/health`` call) so an unreachable daemon raises at boot
+    rather than at first recall. This indirection exists so that degrade path
+    is unit-testable (tests patch this function).
     """
     from hal0.memory.hindsight_client import HindsightRestClient
 
