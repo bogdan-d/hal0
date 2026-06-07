@@ -138,7 +138,9 @@ class Hal0MemoryProvider(MemoryProvider):  # type: ignore[misc]
         if not query or self._client is None:
             return ""
         try:
-            result = asyncio.run(self._client.search(query, limit=5))
+            result = asyncio.run(
+                self._client.recall(query, types=["observation", "world"], max_tokens=2048)
+            )
         except Hal0MemoryClientError as exc:
             logger.debug("hal0-memory prefetch transport failure: %s", exc)
             return ""

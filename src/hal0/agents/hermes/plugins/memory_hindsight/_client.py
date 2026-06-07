@@ -130,6 +130,16 @@ class Hal0MemoryClient:
         payload = {"query": query, "limit": int(limit)}
         return await self._request("POST", "/api/memory/search", json=payload)
 
+    async def recall(
+        self, query: str, *, types: list[str] | None = None, max_tokens: int = 4096
+    ) -> dict[str, Any]:
+        """POST /api/memory/recall — token-budgeted consolidated recall. Omits
+        dataset by design (server resolves namespace from X-hal0-Agent, #317)."""
+        payload: dict[str, Any] = {"query": query, "max_tokens": int(max_tokens)}
+        if types is not None:
+            payload["types"] = list(types)
+        return await self._request("POST", "/api/memory/recall", json=payload)
+
     async def list_items(self, *, limit: int = 50) -> dict[str, Any]:
         """GET /api/memory/list — page through stored items.
 
