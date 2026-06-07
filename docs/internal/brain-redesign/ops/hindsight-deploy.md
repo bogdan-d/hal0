@@ -229,3 +229,25 @@ real turn, THEN teardown.
   KEEP `/var/lib/hal0/memory/hindsight/*`. DESTROY only `/var/lib/hal0/.pg0` (spike, 61M, NOT
   running) + hindsight-* in `/var/lib/hal0/venvs/hermes/` (NOT the platform `.venv`). The pip
   uninstall is the fatal trap — both venvs have `hindsight-api`; use the exact `…/venvs/hermes/bin/pip`.
+
+## P5-H — COMPLETE (2026-06-07): Hermes converged onto the shared brain
+
+- P5H-3: stub rewritten to REST `/api/memory/*` + `is_available` (deployed to
+  `$HERMES_HOME/plugins/memory/hal0-memory/`); `provider: hindsight → hal0-memory`.
+  **local_embedded retired:** hindsight-{all,api-slim,embed,client} uninstalled from
+  `/var/lib/hal0/venvs/hermes` (platform `.venv` UNTOUCHED, verified imports + /health);
+  spike `20-hindsight.conf` + both patch scripts removed; `/var/lib/hal0/.pg0` (spike, dormant)
+  deleted. Platform pg0 (`/var/lib/hal0/memory/hindsight/.pg0`, :5432 pid 192259) intact.
+- Verified: deployed-stub prefetch → `/api/memory/recall` → shared brain returns shared facts
+  (post-teardown); a Hermes turn fanned recall to `private__hermes-agent` + `shared` banks.
+  NO local_embedded respawn (both guards gone). hermes venv: 0 hindsight pkgs.
+- P5H-4: config `hal0:hal0 600`; self-guard `/usr/local/bin/hermes` + backup present.
+- P5H-5: §4b precedence stanza appended to `$HERMES_HOME/SOUL.md`; `ground-truth-precedence`
+  directive set on `shared` bank. (private__hermes-agent directive deferred — bank auto-creates
+  on Hermes's first write; FK requires the bank to exist first.)
+- P5H-6: single provider `hal0-memory` (no second); plugin `kind: memory-provider`.
+- P5H-MIG: spike `hermes` bank abandoned (not migrated); started fresh.
+- Rollback: `config.yaml.bak-pre-p5h-flip-*` reverts the flip; local_embedded retire is one-way
+  (re-spike if ever needed — data was disposable).
+
+**PLAN COMPLETE: P0 + P1 + P2 + P5-H all shipped. The brain is live + Hermes runs on it.**
