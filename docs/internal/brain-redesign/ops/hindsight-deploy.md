@@ -78,14 +78,29 @@ returns a bare JSON **list**; Hindsight's `fact_extraction` rejects it
 ~63s/attempt. There is NO official toggle in 0.7.2 (the spike patched `fact_extraction.py` —
 we do NOT carry that unversioned patch).
 
-**Official fix (ladder option b):** point the extraction LLM at a grammar-capable GGUF
-**instruct (non-reasoning)** model on lemond. Verified live:
-- `gemma-4-26b-a4b-it-q4kxl` → returns `{"facts":[...]}` dict ✅ (MoE a4b ≈4B active, fast; 16GB fits GTT)
-- `qwen3.5-4b-q4kxl` (reasoning) → empty content ✗ (reasoning models fail extraction, per spike)
-- `qwen3-it-4b-FLM` (NPU) → bare list ✗
+Models evaluated live:
+- `gemma-4-26b-a4b-it-q4kxl` (iGPU GGUF) → returns `{"facts":[...]}` dict ✅ but contends with the 35B primary on the iGPU.
+- `qwen3.5-4b-q4kxl` (iGPU, reasoning) → empty content ✗ (reasoning models fail extraction).
+- `qwen3-it-4b-FLM` (NPU) → bare list ✗.
 
-→ unit sets `HINDSIGHT_API_LLM_MODEL=gemma-4-26b-a4b-it-q4kxl`. Lighter alt to evaluate:
-`gemma-4-12b-it` (6.9GB, instruct).
+### FINAL CHOICE (2026-06-07): NPU extraction via `gemma3-4b-FLM`
+
+Moved extraction to the **NPU** to free the iGPU for the user-facing primary (kills the
+P2-6 eviction risk). Path-finding:
+- `gemma4-it:e2b` AND `gemma4-it:e4b` (NPU) → **BLOCKED**: `DRM_IOCTL_AMDXDNA_CREATE_HWCTX
+  err=-22` ("Alloc hw resource failed"). Both sizes fail identically → Gemma-3n NPU2 arch is
+  unsupported by the installed NPU stack (amdxdna `0.7`, NPU FW `1.1.2.65`, FLM `0.9.43`).
+  Needs a host NPU driver/firmware update to enable. ~16GB downloaded + parked at
+  `/var/lib/hal0/.config/flm/models/Gemma4-E{2,4}B-IT-NPU2/` for if/when that happens.
+- `gemma3-4b-FLM` (NPU) → **WORKS** ✅. gemma3 arch loads on this NPU. Emits a ```json-fenced
+  `{"facts":[...]}`; Hindsight's `fact_extraction` strips the fence + parses. Live retain+recall
+  green (2 on-topic facts, with temporal/entity enrichment).
+
+→ unit sets `HINDSIGHT_API_LLM_MODEL=gemma3-4b-FLM`, `LLM_TIMEOUT=300`.
+**Trade-off:** NPU extraction ~160s vs iGPU gemma-26b ~74s — but retain is async/background
+(client sends `async:true`), so latency doesn't block, and the iGPU stays free.
+**To switch back to iGPU** (faster extraction, accepts contention): set model to
+`gemma-4-26b-a4b-it-q4kxl`. **To get gemma4 on NPU:** update the host amdxdna driver/FW.
 
 ## Recall sanity (P1-7, recorded not gated)
 
@@ -131,12 +146,11 @@ or the live brain ships broken:
    (`hindsight_client.py`, 997c1ec) sends `async:true` so `add()` doesn't block ~60-90s on
    extraction. Correct design, but the queued-extraction path was never exercised live — confirm
    a fire-and-forget retain actually lands + becomes recallable before relying on it at P2-5.
-3. **gemma-26b extraction vs the primary model — P2-6 eviction risk.** Extraction +
-   background consolidation load `gemma-4-26b-a4b-it-q4kxl` on lemond. Under lemond's
-   serialized-load + nuclear-evict policy (`hal0_lemonade_gotchas`), a consolidation cycle could
-   evict the user-facing 35B primary mid-chat. Verify coexistence (both resident in GTT, no
-   evict) under load before/at gate-on, or pin slots / use a lighter extraction model
-   (`gemma-4-12b-it`, 6.9GB).
+3. **iGPU eviction risk — RESOLVED 2026-06-07.** Extraction moved to the NPU
+   (`gemma3-4b-FLM`), so it no longer competes with the 35B primary on the iGPU. Remaining
+   (minor): NPU extraction shares the NPU with the FLM asr/embed trio + any NPU primary use;
+   confirm no NPU contention under load at gate-on. If reverting to iGPU `gemma-4-26b-a4b-it`,
+   the original eviction risk returns.
 
 ## Rollback
 
