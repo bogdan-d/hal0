@@ -23,7 +23,7 @@ from typing import Any
 from fastapi import APIRouter, Request
 from pydantic import ValidationError
 
-from hal0.api.middleware.error_codes import Hal0Error
+from hal0.api.middleware.error_codes import BadRequest, Hal0Error
 from hal0.config.loader import load_hal0_config, save_hal0_config
 from hal0.config.schema import GraphUpstreamConfig, MemoryGraphConfig
 from hal0.memory.cognee_wrapper import GraphRouteUnsupportedError
@@ -402,6 +402,48 @@ async def memory_search(request: Request) -> dict[str, Any]:
         tags=body.get("tags") or [],
         before=body.get("before"),
         after=body.get("after"),
+        client_id=agent_id if agent_id != "anonymous" else None,
+    )
+    return {"items": items}
+
+
+@router.post("/recall")
+async def memory_recall(request: Request) -> dict[str, Any]:
+    """Token-budgeted recall (Hindsight's preferred path).
+
+    Body: ``{query, max_tokens?, types?, dataset?, tags?}``. Identity +
+    namespace resolution behave like ``/search`` (X-hal0-Agent +
+    X-hal0-Private). Returns ``{items: [MemoryItem, ...]}`` ordered by
+    relevance (no numeric score — Hindsight recall returns none).
+
+    Falls back to ``search`` semantics on engines without a richer recall
+    (the ABC default), so this route is safe regardless of active engine.
+    """
+    body = await _read_json_body(request)
+    query = body.get("query")
+    if not isinstance(query, str) or not query:
+        raise BadRequest(
+            "memory_recall requires 'query' (non-empty string)",
+            details={"path": "/api/memory/recall"},
+        )
+    agent_id = _agent_id(request)
+    private = _is_private(request)
+    try:
+        dataset = resolve_read_datasets(
+            body.get("dataset"),
+            private=private,
+            client_id=agent_id if agent_id != "anonymous" else None,
+        )
+    except MemoryNamespaceError as exc:
+        raise MemoryNamespaceInvalid(str(exc)) from exc
+
+    wrapper = _wrapper(request)
+    items = await wrapper.recall(
+        query=query,
+        types=body.get("types"),
+        max_tokens=int(body.get("max_tokens", 4096)),
+        dataset=dataset,
+        tags=body.get("tags") or [],
         client_id=agent_id if agent_id != "anonymous" else None,
     )
     return {"items": items}
