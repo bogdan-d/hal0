@@ -157,14 +157,14 @@ async def test_lemonade_reranker_posts_rerank_and_parses_results():
         return httpx.Response(200, json={"results": [{"index": 0, "relevance_score": 0.9}]})
 
     transport = httpx.MockTransport(handler)
-    rr = LemonadeReranker(url="http://127.0.0.1:8086")
+    rr = LemonadeReranker(base_url="http://127.0.0.1:13305")
     orig = httpx.AsyncClient
     httpx.AsyncClient = lambda *a, **k: orig(transport=transport)
     try:
         out = await rr.rerank("q", ["doc a", "doc b"])
     finally:
         httpx.AsyncClient = orig
-    assert seen["path"] == "/rerank"
+    assert seen["path"] == "/v1/reranking"
     assert out == [{"index": 0, "relevance_score": 0.9}]
 
 
@@ -172,7 +172,7 @@ async def test_lemonade_reranker_posts_rerank_and_parses_results():
 async def test_lemonade_reranker_failsoft_returns_empty_on_error():
     from hal0.memory.hindsight_provider import LemonadeReranker
 
-    rr = LemonadeReranker(url="http://127.0.0.1:59999")  # nothing listening
+    rr = LemonadeReranker(base_url="http://127.0.0.1:59999")  # nothing listening
     out = await rr.rerank("q", ["a", "b"])
     assert out == []
 

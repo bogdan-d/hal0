@@ -35,30 +35,31 @@ def namespace_to_bank(namespace: str) -> str:
 
 
 class LemonadeReranker:
-    """Async reranker over the hal0 rerank slot (llama.cpp /rerank shape).
+    """Async reranker over lemond's gateway (Cohere-style ``/v1/reranking``).
 
-    POSTs {model, query, documents} to ``{url}/rerank`` and returns the raw
-    ``results`` list (``[{"index", "relevance_score"}, ...]``) that
+    POSTs {model, query, documents} to ``{base_url}/v1/reranking`` and returns
+    the raw ``results`` list (``[{"index", "relevance_score"}, ...]``, NOT
+    pre-sorted; lemond auto-loads the model on request) that
     HindsightProvider._rerank_union maps onto the cross-bank union. Fail-soft:
-    returns [] on any error (slot down/evicted, bad shape, timeout) so recall
-    falls back to fused order. The rerank slot may be dormant; that's fine.
+    returns [] on any error (gateway down, model load fail, bad shape, timeout)
+    so recall falls back to fused order.
     """
 
     def __init__(
         self,
         *,
-        url: str = "http://127.0.0.1:8086",
-        model: str = "bge-reranker-v2-m3-q4_k_m",
+        base_url: str = "http://127.0.0.1:13305",
+        model: str = "builtin.jina-reranker-v1-tiny-en-q8",
         connect_timeout_s: float = 1.0,
         read_timeout_s: float = 8.0,
     ) -> None:
-        self._url = str(url or "").rstrip("/")
+        self._base_url = str(base_url or "").rstrip("/")
         self._model = model
         self._connect_timeout_s = float(connect_timeout_s)
         self._read_timeout_s = float(read_timeout_s)
 
     async def rerank(self, query: str, documents: list[str]) -> list[dict[str, Any]]:
-        if not self._url or not documents:
+        if not self._base_url or not documents:
             return []
         import httpx
 
@@ -68,7 +69,7 @@ class LemonadeReranker:
         )
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
-                resp = await client.post(f"{self._url}/rerank", json=payload)
+                resp = await client.post(f"{self._base_url}/v1/reranking", json=payload)
                 resp.raise_for_status()
                 body = resp.json()
         except Exception:
