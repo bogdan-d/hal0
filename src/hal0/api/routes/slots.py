@@ -69,6 +69,22 @@ def _get_slot_manager(request: Request) -> SlotManager:
     return sm
 
 
+def _model_resolvable(registry: Any, model_id: str) -> bool:
+    """True if ``model_id`` can actually be loaded onto a slot.
+
+    The slot-apply guard used to require ``registry.has(model_id)``, but FLM
+    models are lemond-owned and are never in hal0's registry (see the
+    2026-06-07 shape audits) — yet they load fine via npu.toml's config path.
+    So gate on *provider-resolvability*: registry-resident OR an installed FLM
+    model. (Extensible later to a general ``lemond_serves(id)`` probe.)
+    """
+    if registry is not None and registry.has(model_id):
+        return True
+    from hal0.providers.flm import is_installed_flm_id
+
+    return is_installed_flm_id(model_id)
+
+
 def _slot_to_dict(slot: Slot, request: Request | None = None) -> dict[str, Any]:
     """Serialise a real Slot snapshot into the API shape.
 
@@ -1410,11 +1426,12 @@ async def load_slot(name: str, request: Request) -> dict[str, object]:
         model_id = body.get("model")
     if model_id:
         registry = getattr(request.app.state, "model_registry", None)
-        if registry is not None and not registry.has(model_id):
+        if registry is not None and not _model_resolvable(registry, model_id):
             from hal0.registry.store import ModelNotFound
 
             raise ModelNotFound(
-                f"model {model_id!r} is not in the registry (slot {name!r} not touched)",
+                f"model {model_id!r} is not resolvable — not in the registry and "
+                f"not an installed FLM model (slot {name!r} not touched)",
                 details={"model_id": model_id, "slot": name},
             )
     snap = await sm.load(name, model_id=model_id)
@@ -1459,11 +1476,12 @@ async def swap_slot(name: str, request: Request) -> dict[str, object]:
             code="swap.missing_model",
         )
     registry = getattr(request.app.state, "model_registry", None)
-    if registry is not None and not registry.has(model_id):
+    if registry is not None and not _model_resolvable(registry, model_id):
         from hal0.registry.store import ModelNotFound
 
         raise ModelNotFound(
-            f"model {model_id!r} is not in the registry (slot {name!r} not touched)",
+            f"model {model_id!r} is not resolvable — not in the registry and "
+            f"not an installed FLM model (slot {name!r} not touched)",
             details={"model_id": model_id, "slot": name},
         )
     snap = await sm.swap(name, model_id)
