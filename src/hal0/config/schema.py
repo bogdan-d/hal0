@@ -1301,12 +1301,11 @@ class MemoryConfig(BaseModel):
     graph: MemoryGraphConfig = Field(default_factory=MemoryGraphConfig)
     embedding: MemoryEmbeddingConfig = Field(default_factory=MemoryEmbeddingConfig)
     engine: str = Field(
-        default="cognee",
+        default="hindsight",
         description=(
             "Active memory engine. One of 'cognee' | 'hindsight' | 'mem0' | "
-            "'pgvector'. Default 'cognee' until P2 cutover. The fallback flag: "
-            "set back to 'cognee' to revert to the untouched Cognee store for "
-            "one release after the Hindsight cutover."
+            "'pgvector'. Default 'hindsight' (P2 cutover). Set to 'cognee' to "
+            "revert to the untouched Cognee store for one release."
         ),
     )
 

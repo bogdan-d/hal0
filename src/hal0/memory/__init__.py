@@ -65,7 +65,7 @@ def provider_from_config(cfg: Any) -> MemoryProvider:
     + the degrade ladder; P2 flips the default. ``cfg`` is the object returned
     by ``hal0.config.loader.load_hal0_config``.
     """
-    engine = str(getattr(cfg.memory, "engine", "cognee") or "cognee").lower()
+    engine = str(getattr(cfg.memory, "engine", "hindsight") or "hindsight").lower()
     embed = cfg.memory.embedding
     graph = cfg.memory.graph
 
@@ -88,7 +88,14 @@ def provider_from_config(cfg: Any) -> MemoryProvider:
         except Exception as exc:  # daemon down at boot → degrade ladder
             log.warning("hal0.memory.hindsight_unavailable", error=str(exc), fallback="pgvector")
             return PgVectorProvider()
-        return HindsightProvider(client=client)
+        from hal0.memory.hindsight_provider import LemonadeReranker
+
+        reranker = LemonadeReranker(
+            url=str(embed.rerank_url),
+            connect_timeout_s=float(embed.rerank_connect_timeout_s),
+            read_timeout_s=float(embed.rerank_read_timeout_s),
+        )
+        return HindsightProvider(client=client, reranker=reranker)
 
     if engine == "pgvector":
         return PgVectorProvider()

@@ -48,3 +48,28 @@ def test_factory_degrades_to_pgvector_when_hindsight_unavailable():
     with patch("hal0.memory._build_hindsight_client", side_effect=RuntimeError("no daemon")):
         provider = provider_from_config(_cfg("hindsight"))
         assert isinstance(provider, PgVectorProvider)
+
+
+def test_factory_default_engine_is_hindsight_after_cutover():
+    from types import SimpleNamespace
+
+    cfg = SimpleNamespace(
+        memory=SimpleNamespace(
+            embedding=SimpleNamespace(
+                model="m",
+                rerank_enabled=False,
+                rerank_url="http://127.0.0.1:8086",
+                rerank_over_fetch_factor=5,
+                rerank_max_candidates=500,
+                rerank_connect_timeout_s=1.0,
+                rerank_read_timeout_s=8.0,
+            ),
+            graph=SimpleNamespace(enabled=False, route="upstream"),
+        )
+    )
+    with (
+        patch("hal0.memory.HindsightProvider", autospec=True) as mock_cls,
+        patch("hal0.memory._build_hindsight_client", return_value=object()),
+    ):
+        provider_from_config(cfg)
+        assert mock_cls.called

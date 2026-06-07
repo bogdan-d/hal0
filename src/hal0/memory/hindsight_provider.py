@@ -34,6 +34,49 @@ def namespace_to_bank(namespace: str) -> str:
     return namespace.replace(":", "__")
 
 
+class LemonadeReranker:
+    """Async reranker over the hal0 rerank slot (llama.cpp /rerank shape).
+
+    POSTs {model, query, documents} to ``{url}/rerank`` and returns the raw
+    ``results`` list (``[{"index", "relevance_score"}, ...]``) that
+    HindsightProvider._rerank_union maps onto the cross-bank union. Fail-soft:
+    returns [] on any error (slot down/evicted, bad shape, timeout) so recall
+    falls back to fused order. The rerank slot may be dormant; that's fine.
+    """
+
+    def __init__(
+        self,
+        *,
+        url: str = "http://127.0.0.1:8086",
+        model: str = "bge-reranker-v2-m3-q4_k_m",
+        connect_timeout_s: float = 1.0,
+        read_timeout_s: float = 8.0,
+    ) -> None:
+        self._url = str(url or "").rstrip("/")
+        self._model = model
+        self._connect_timeout_s = float(connect_timeout_s)
+        self._read_timeout_s = float(read_timeout_s)
+
+    async def rerank(self, query: str, documents: list[str]) -> list[dict[str, Any]]:
+        if not self._url or not documents:
+            return []
+        import httpx
+
+        payload = {"model": self._model, "query": query, "documents": list(documents)}
+        timeout = httpx.Timeout(
+            connect=self._connect_timeout_s, read=self._read_timeout_s, write=2.0, pool=None
+        )
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                resp = await client.post(f"{self._url}/rerank", json=payload)
+                resp.raise_for_status()
+                body = resp.json()
+        except Exception:
+            return []
+        results = body.get("results") if isinstance(body, dict) else None
+        return results if isinstance(results, list) else []
+
+
 def _now() -> str:
     return datetime.now(UTC).isoformat()
 
@@ -204,7 +247,7 @@ class HindsightProvider(MemoryProvider):
         return (tier, -float(item.get("score") or 0.0))
 
     async def _rerank_union(self, query: str, union: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        if self._reranker is None or len(union) < 2:
+        if self._reranker is None or not self._rerank_enabled or len(union) < 2:
             return union
         try:
             ranked = await self._reranker.rerank(query, [u["text"] for u in union])

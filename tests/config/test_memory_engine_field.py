@@ -8,8 +8,8 @@ from pydantic import ValidationError
 from hal0.config.schema import MemoryConfig
 
 
-def test_engine_defaults_to_cognee():
-    assert MemoryConfig().engine == "cognee"
+def test_engine_defaults_to_hindsight():
+    assert MemoryConfig().engine == "hindsight"
 
 
 def test_engine_accepts_known_engines():
