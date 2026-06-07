@@ -458,7 +458,7 @@ async def run_flm_pull(
     tag: str,
     registry: ModelRegistry,
 ) -> None:
-    """Background-task body: shell ``flm pull <tag>`` in the toolbox image.
+    """Background-task body: shell host ``flm pull <tag>`` (as the hal0 user).
 
     Mirrors :func:`run_pull`'s state machine (queued → running →
     {completed, failed, cancelled}) so the existing SSE / status routes
@@ -475,10 +475,9 @@ async def run_flm_pull(
         and refuses to use mismatched weights. Re-hashing would just
         double-read multi-GB files for the same guarantee.
 
-    Cancellation works via SIGTERM on the docker CLI subprocess — docker
-    propagates that to the container and ``flm pull`` aborts. The partial
-    files are left on disk; FLM's next pull deletes & redownloads them
-    (it checks file sizes against the manifest before reusing).
+    Cancellation works via SIGTERM on the ``flm`` subprocess — it aborts the
+    download. The partial files are left on disk; FLM's next pull deletes &
+    redownloads them (it checks file sizes against the manifest before reusing).
 
     On success the FLM probe cache is reset so the next ``/api/capabilities``
     GET flips this tag's ``downloaded`` flag to True without an api restart.
@@ -487,6 +486,7 @@ async def run_flm_pull(
     # base pull module's import graph (tests pull this module in
     # environments without docker).
     from hal0.providers.flm import (
+        flm_host_spawn_kwargs,
         flm_pull_command,
         flm_served_models,
         reset_flm_catalog_cache,
@@ -520,6 +520,7 @@ async def run_flm_pull(
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
+            **flm_host_spawn_kwargs(),
         )
         assert proc.stdout is not None
         last_emit = time.monotonic()

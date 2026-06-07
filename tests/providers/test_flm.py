@@ -357,3 +357,78 @@ async def test_infer_raises_typed_error_on_upstream_failure(
         with pytest.raises(FLMInferError) as exc:
             await provider.infer(8086, {})
     assert exc.value.code == "dispatch.upstream_failed"
+
+
+# ─── host-flm catalog probe + pull (no docker toolbox) ──────────────────────────
+# Regression: the probe used to run the docker toolbox (FLM v0.9.42) against an
+# empty mount, reporting installed=False for every model so the dashboard hid
+# them. It now runs the host flm binary as the hal0 user against the real cache.
+
+
+def test_probe_uses_host_flm_binary_not_docker() -> None:
+    """_probe_flm_catalog shells the host flm binary, never `docker run`."""
+    import hal0.providers.flm as flm
+
+    captured: dict[str, Any] = {}
+
+    def _fake_run(argv: list[str], **kwargs: Any) -> Any:
+        captured["argv"] = argv
+        captured["kwargs"] = kwargs
+        return MagicMock(returncode=0, stdout=b'{"models": []}')
+
+    with patch("subprocess.run", _fake_run):
+        flm._probe_flm_catalog()
+
+    assert captured["argv"][0] == flm._HOST_FLM_BIN
+    assert captured["argv"][1:] == ["list", "-j"]
+    assert "docker" not in captured["argv"]
+    # HOME is set so flm resolves ~/.config/flm/models to the real cache.
+    assert captured["kwargs"]["env"]["HOME"] == flm._HOST_FLM_HOME
+
+
+def test_probe_strips_warning_preamble_and_reads_installed() -> None:
+    """A leading [WARNING] line must not null the catalog; installed flags survive."""
+    import hal0.providers.flm as flm
+
+    noisy = (
+        b"[WARNING]  Local model version: 0.9.43 > 0.9.42\n"
+        b'{"models": [{"model": "gemma4-it:e4b", "installed": true},'
+        b' {"model": "qwen3:0.6b", "installed": false}]}\n'
+    )
+    with patch("subprocess.run", lambda *a, **k: MagicMock(returncode=0, stdout=noisy)):
+        flm.reset_flm_catalog_cache()
+        out = flm.flm_served_models()
+        flm.reset_flm_catalog_cache()
+
+    by_tag = {m["tag"]: m["installed"] for m in out}
+    assert by_tag == {"gemma4-it:e4b": True, "qwen3:0.6b": False}
+
+
+def test_probe_returns_none_when_binary_missing() -> None:
+    import hal0.providers.flm as flm
+
+    def _boom(*a: Any, **k: Any) -> Any:
+        raise FileNotFoundError
+
+    with patch("subprocess.run", _boom):
+        assert flm._probe_flm_catalog() is None
+
+
+def test_pull_command_is_host_flm_and_real_cache_dir() -> None:
+    import hal0.providers.flm as flm
+
+    argv, host_dir = flm.flm_pull_command("gemma4-it:e4b")
+    assert argv == [flm._HOST_FLM_BIN, "pull", "gemma4-it:e4b"]
+    assert "docker" not in argv
+    assert host_dir == flm._HOST_FLM_MODELS_DIR
+    assert host_dir.endswith("/.config/flm/models")
+
+
+def test_spawn_kwargs_sets_home_and_skips_user_when_not_root() -> None:
+    """As a non-root test runner, HOME is set but user= is omitted (would EPERM)."""
+    import hal0.providers.flm as flm
+
+    with patch("os.geteuid", lambda: 1000):
+        kw = flm.flm_host_spawn_kwargs()
+    assert kw["env"]["HOME"] == flm._HOST_FLM_HOME
+    assert "user" not in kw
