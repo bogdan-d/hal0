@@ -602,6 +602,30 @@ def is_flm_tag(model_id: str) -> bool:
     return any(m["tag"] == model_id for m in flm_served_models())
 
 
+def is_installed_flm_id(model_id: str) -> bool:
+    """True iff ``model_id`` is the ``<tag>-FLM`` id of an INSTALLED FLM model.
+
+    FLM models are lemond-owned and are **never** in hal0's ModelRegistry
+    (see docs/internal/brain-redesign/{model,slot}-shapes-audit-2026-06-07.md):
+    the registry is the source of truth for GGUF/local models only. So the
+    slot-apply registry gate (``routes/slots.py``) wrongly rejects a perfectly
+    loadable FLM model — yet the npu.toml ``[model].default`` config path loads
+    the same id fine, lemond-mediated. This lets slot-apply accept an on-disk
+    FLM model by *provider-resolvability* instead of registry membership.
+
+    ``model_id`` is the lemond-served ``-FLM`` form (``gemma4-it-e4b-FLM``); we
+    match it against the forward transform of each installed probe tag
+    (``gemma4-it:e4b`` → ``gemma4-it-e4b-FLM``), the same map used to synthesise
+    the picker rows in ``routes/models.py``.
+    """
+    if not model_id.endswith("-FLM"):
+        return False
+    return any(
+        m.get("installed") and m["tag"].replace(":", "-") + "-FLM" == model_id
+        for m in flm_served_models()
+    )
+
+
 def flm_pull_command(tag: str) -> tuple[list[str], str]:
     """Return ``(argv, host_models_dir)`` for a host ``flm pull <tag>`` run.
 

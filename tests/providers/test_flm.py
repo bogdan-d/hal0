@@ -432,3 +432,25 @@ def test_spawn_kwargs_sets_home_and_skips_user_when_not_root() -> None:
         kw = flm.flm_host_spawn_kwargs()
     assert kw["env"]["HOME"] == flm._HOST_FLM_HOME
     assert "user" not in kw
+
+
+# ─── is_installed_flm_id (slot-apply provider-resolvability) ─────────────────
+
+
+def test_is_installed_flm_id_matches_installed_tag() -> None:
+    """The <tag>-FLM id of an INSTALLED probe model resolves true."""
+    import hal0.providers.flm as flm
+
+    fake = [
+        {"tag": "gemma4-it:e4b", "installed": True, "capabilities": ["chat"]},
+        {"tag": "qwen3:0.6b", "installed": False, "capabilities": ["chat"]},
+    ]
+    with patch("hal0.providers.flm.flm_served_models", lambda: fake):
+        assert flm.is_installed_flm_id("gemma4-it-e4b-FLM") is True
+        # not installed → false
+        assert flm.is_installed_flm_id("qwen3-0.6b-FLM") is False
+        # unknown tag → false
+        assert flm.is_installed_flm_id("nope-7b-FLM") is False
+        # missing -FLM suffix (a colon tag or GGUF id) → false (fast path)
+        assert flm.is_installed_flm_id("gemma4-it:e4b") is False
+        assert flm.is_installed_flm_id("chadrock-35b-ace-saber") is False
