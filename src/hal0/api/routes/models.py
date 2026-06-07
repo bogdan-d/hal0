@@ -185,6 +185,47 @@ async def list_models(request: Request) -> dict[str, Any]:
                     "type": _classify_type(None, mid),
                 }
             )
+    # Installed FLM/NPU models — surfaced straight from the host-flm probe so
+    # the NPU slot pickers can select any model on disk, not just the one a slot
+    # already defaults to (the composite ``hal0`` upstream advertises only slot
+    # defaults, so without this only the configured npu model appeared). The id
+    # mirrors lemonade's ``<tag>-FLM`` convention so the dashboard maps it to the
+    # npu device; ``capabilities`` + an explicit ``device`` let the slot-swap
+    # popover derive type/device without requiring a registry entry.
+    try:
+        from hal0.providers.flm import flm_served_models
+
+        for fm in flm_served_models():
+            if not fm.get("installed"):
+                continue
+            mid = fm["tag"].replace(":", "-") + "-FLM"
+            if mid in seen:
+                continue
+            seen.add(mid)
+            caps = list(fm.get("capabilities") or [])
+            # FLM chat tags are chat-first even when multimodal (gemma4 also
+            # advertises ``stt``); classify as chat so they land in the chat
+            # pickers instead of under stt by capability precedence.
+            mtype = "chat" if "chat" in caps else _classify_type(caps, mid)
+            data.append(
+                {
+                    "id": mid,
+                    "name": mid,
+                    "object": "model",
+                    "created": now,
+                    "owned_by": "flm",
+                    "upstream": "flm",
+                    "installed": True,
+                    "ns": "pulled",
+                    "type": mtype,
+                    "capabilities": caps,
+                    "device": "npu",
+                }
+            )
+    except Exception:
+        # Probe unavailable (no flm binary / dev host) — skip silently; the
+        # rest of the catalog still renders.
+        pass
     return {"models": data, "count": len(data), "filtered_aliases": filtered}
 
 
