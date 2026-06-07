@@ -33,12 +33,16 @@ try:  # Optional dep — Hermes already pins httpx; this is defence.
 except ImportError:  # pragma: no cover
     httpx = None  # type: ignore[assignment]
 
-DEFAULT_BASE_URL = "http://127.0.0.1:8080/mcp/memory"
+# hal0-api base. The plugin talks the REST front door (/api/memory/*) — the
+# streamable-HTTP /mcp/memory mount needs an MCP session handshake this thin
+# client does not implement (returns 405 to bare tools/call POSTs). Same
+# HindsightProvider underneath either transport (P2-1 unified them).
+DEFAULT_BASE_URL = "http://127.0.0.1:8080"
 DEFAULT_AGENT_ID = "hermes-agent"
 
 
 class Hal0MemoryProvider(MemoryProvider):
-    """Memory provider backed by hal0's Cognee-backed memory MCP.
+    """Memory provider backed by hal0's shared brain (Hindsight) via REST.
 
     Lifecycle:
 
@@ -86,8 +90,14 @@ class Hal0MemoryProvider(MemoryProvider):
         # Allow env override of base_url / agent_id for power users.
         import os
 
-        self._base_url = os.environ.get("HAL0_MCP_MEMORY_URL", self._base_url)
+        self._base_url = os.environ.get("HAL0_MEMORY_API_URL", self._base_url)
         self._agent_id = os.environ.get("HAL0_AGENT_ID", self._agent_id)
+
+    def is_available(self) -> bool:
+        # Required by the upstream MemoryProvider ABC. The provider is
+        # configured whenever the plugin is loaded; transient transport
+        # failures are handled per-call (fail-soft), so advertise available.
+        return True
 
     def system_prompt_block(self) -> str:
         return (
@@ -98,7 +108,11 @@ class Hal0MemoryProvider(MemoryProvider):
         )
 
     def prefetch(self, query: str, **_: Any) -> str:
-        result = self._call_mcp("memory_search", {"query": query, "limit": 5})
+        # Hindsight-preferred recall: token-budgeted, observation hierarchy.
+        result = self._call_mcp(
+            "memory_recall",
+            {"query": query, "max_tokens": 2048, "types": ["observation", "world"]},
+        )
         items = result.get("items") if isinstance(result, dict) else None
         if not items:
             return ""
@@ -140,26 +154,35 @@ class Hal0MemoryProvider(MemoryProvider):
 
     # ── HTTP transport ──────────────────────────────────────────────────
 
+    # Map the legacy tool names to the REST front door (/api/memory/*). The
+    # server resolves the namespace from X-hal0-Agent + X-hal0-Private:1 — we
+    # never send a ``dataset`` key (#317 contract).
+    _ROUTES = {
+        "memory_add": ("POST", "/api/memory/add"),
+        "memory_search": ("POST", "/api/memory/search"),
+        "memory_recall": ("POST", "/api/memory/recall"),
+        "memory_list": ("GET", "/api/memory/list"),
+        "memory_delete": ("POST", "/api/memory/delete"),
+    }
+
     def _call_mcp(self, tool: str, args: dict[str, Any]) -> dict[str, Any]:
+        # Name kept for call-site compatibility; transport is REST, not MCP.
         if httpx is None:
             return {"status": "error", "error": "httpx not available"}
+        method, path = self._ROUTES.get(tool, ("POST", f"/api/memory/{tool}"))
         headers = {
             "X-hal0-Agent": self._agent_id,
             "X-hal0-Private": "1",
             "Content-Type": "application/json",
         }
-        # Streamable-HTTP MCP transport uses JSON-RPC over POST.
-        body = {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "tools/call",
-            "params": {"name": tool, "arguments": args},
-        }
+        url = self._base_url.rstrip("/") + path
         try:
-            resp = httpx.post(self._base_url, headers=headers, json=body, timeout=30.0)
+            if method == "GET":
+                resp = httpx.get(url, headers=headers, params=args, timeout=30.0)
+            else:
+                resp = httpx.post(url, headers=headers, json=args, timeout=30.0)
             resp.raise_for_status()
             data = resp.json()
         except Exception as exc:
             return {"status": "error", "error": str(exc)}
-        result = data.get("result") if isinstance(data, dict) else None
-        return result if isinstance(result, dict) else {"status": "ok", "raw": data}
+        return data if isinstance(data, dict) else {"status": "ok", "raw": data}
