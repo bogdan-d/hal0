@@ -27,7 +27,7 @@ def migrate_cognee_to_hindsight_dryrun(*, cognee_dir: str | Path) -> dict[str, A
         return {"rows_total": 0, "rows_mapped": 0, "rows_unmapped": 0, "noop": True}
     mapped = 0
     for row in rows:
-        bank = namespace_to_bank(row["dataset"])
+        bank = namespace_to_bank(row["dataset"]) if row["dataset"] else ""
         if bank:
             mapped += 1
     return {
