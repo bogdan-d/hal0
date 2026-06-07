@@ -56,6 +56,21 @@ class FakeHindsightClient:
         self._facts_by_bank[bank_id] = [f for f in facts if f["document_id"] != document_id]
         return {"memory_units_deleted": before - len(self._facts_by_bank[bank_id])}
 
+    async def list_memories(self, *, bank_id, limit=50, offset=0, types=None, query=None):
+        raw = list(self._facts_by_bank.get(bank_id, []))
+        # Expose stored facts in the list-endpoint shape: id falls back to document_id.
+        items = [
+            {
+                "id": f.get("id") or f.get("document_id"),
+                "text": f.get("text", ""),
+                "fact_type": f.get("fact_type", "observation"),
+                "mentioned_at": f.get("mentioned_at"),
+                "tags": list(f.get("tags") or []),
+            }
+            for f in raw
+        ]
+        return {"items": items, "total": len(items), "limit": limit, "offset": offset}
+
 
 def test_namespace_to_bank_mapping():
     assert namespace_to_bank("shared") == "shared"
@@ -160,3 +175,34 @@ async def test_lemonade_reranker_failsoft_returns_empty_on_error():
     rr = LemonadeReranker(url="http://127.0.0.1:59999")  # nothing listening
     out = await rr.rerank("q", ["a", "b"])
     assert out == []
+
+
+@pytest.mark.asyncio
+async def test_list_items_fans_out_real_endpoint():
+    """list_items fans out to shared + own private; excludes foreign private."""
+    fake = FakeHindsightClient()
+    # Retain into shared and private__hermes (allowed for client_id=hermes + dataset=shared)
+    await fake.retain(bank_id="shared", content="shared fact", document_id="d-shared", tags=["s"])
+    await fake.retain(
+        bank_id="private__hermes",
+        content="hermes private fact",
+        document_id="d-hermes",
+        tags=["h"],
+    )
+    # Retain into a foreign private bank — must be excluded
+    await fake.retain(
+        bank_id="private__other", content="other agent fact", document_id="d-other", tags=[]
+    )
+
+    p = HindsightProvider(client=fake, client_id="hermes")
+    result = await p.list_items(dataset="shared", client_id="hermes")
+
+    texts = {item["text"] for item in result["items"]}
+    assert "shared fact" in texts
+    assert "hermes private fact" in texts
+    assert "other agent fact" not in texts
+    assert result["next_cursor"] is None
+    # ids come from the list-endpoint shape (id field, not document_id)
+    ids = {item["id"] for item in result["items"]}
+    assert "d-shared" in ids
+    assert "d-hermes" in ids

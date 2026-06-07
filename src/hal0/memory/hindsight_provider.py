@@ -176,13 +176,33 @@ class HindsightProvider(MemoryProvider):
         limit: int = 50,
         client_id: str | None = None,
     ) -> dict[str, Any]:
-        # Hindsight has no flat list; list = recall with an empty-ish broad
-        # query is unreliable, so we surface the documents endpoint per bank.
-        # P1 lists via recall on a wildcard-ish query; refined in P2 if needed.
-        out = await self.recall(
-            query="*", max_tokens=limit * 256, dataset=dataset, client_id=client_id
-        )
-        return {"items": out[:limit], "next_cursor": None}
+        banks = [namespace_to_bank(ns) for ns in self._allowed_namespaces(dataset, client_id)]
+        items: list[dict[str, Any]] = []
+        for bank in banks:
+            if len(items) >= limit:
+                break
+            try:
+                resp = await self._client.list_memories(bank_id=bank, limit=limit, offset=0)
+            except Exception:
+                continue  # fail-soft per bank
+            for fact in resp.get("items", []):
+                items.append(self._list_fact_to_item(fact, bank))
+        return {"items": items[:limit], "next_cursor": None}
+
+    @staticmethod
+    def _list_fact_to_item(fact: dict[str, Any], bank: str) -> dict[str, Any]:
+        """Map a Hindsight /memories/list item to the MemoryItem wire shape."""
+        return {
+            "id": fact.get("id") or fact.get("document_id"),
+            "text": fact.get("text", ""),
+            "timestamp": fact.get("mentioned_at") or fact.get("date") or _now(),
+            "dataset": bank.replace("__", ":"),
+            "tags": list(fact.get("tags") or []),
+            "source": None,
+            "metadata": {},
+            "score": None,
+            "type": fact.get("fact_type"),
+        }
 
     async def delete(self, ids: list[str], *, client_id: str | None = None) -> dict[str, int]:
         deleted = 0

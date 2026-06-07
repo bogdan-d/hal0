@@ -80,6 +80,20 @@ class HindsightRestClient:
         resp.raise_for_status()
         return resp.json()
 
+    async def list_memories(self, *, bank_id, limit=50, offset=0, types=None, query=None):
+        params: dict[str, Any] = {"limit": limit, "offset": offset}
+        if types:
+            params["type"] = types if isinstance(types, str) else ",".join(types)
+        if query:
+            params["q"] = query
+        resp = await self._http.get(
+            f"/v1/default/banks/{bank_id}/memories/list",
+            headers=self._headers(),
+            params=params,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
     async def delete_document(self, *, bank_id, document_id):
         resp = await self._http.request(
             "DELETE",
