@@ -106,16 +106,24 @@ async def test_recall_fans_out_across_allowed_banks_and_merges():
 
 
 @pytest.mark.asyncio
-async def test_recall_merge_precedence_shared_observation_before_private_fact():
+async def test_recall_merge_precedence_tier_overrides_bank_order_and_score():
+    # §4b: a tier-0 item (shared/curated) must rank above a tier-1 raw fact
+    # EVEN WHEN the tier-1 fact iterates first AND scores higher in the
+    # reranker. This is the adversarial layout that isolates _precedence_key:
+    #   - dataset=["agents","shared"] → banks iterate [agents, shared, ...],
+    #     so the tier-1 "agents" fact is fanned in BEFORE the tier-0 shared one.
+    #   - FakeReranker reverses, giving index-0 ("raw", agents) the HIGHER
+    #     score, so a score-only sort would also keep "raw" first.
+    # Only the tier key flips it. A broken impl (bank-order-only OR score-only)
+    # yields out[0]=="raw" and fails this test.
     fake = FakeHindsightClient()
-    # shared observation (curated) must outrank a raw private fact (§4b).
-    fake._facts_by_bank["shared"] = [
-        {"document_id": "o1", "text": "obs", "type": "observation", "tags": []}
+    fake._facts_by_bank["agents"] = [
+        {"document_id": "a1", "text": "raw", "type": "experience", "tags": []}
     ]
-    fake._facts_by_bank["private__hermes"] = [
-        {"document_id": "f1", "text": "raw", "type": "experience", "tags": []}
+    fake._facts_by_bank["shared"] = [
+        {"document_id": "o1", "text": "win", "type": "observation", "tags": []}
     ]
 
     p = HindsightProvider(client=fake, client_id="hermes", reranker=FakeReranker())
-    out = await p.recall("anything", dataset="shared", client_id="hermes")
-    assert out[0]["text"] == "obs"  # observation ranks first
+    out = await p.recall("anything", dataset=["agents", "shared"], client_id="hermes")
+    assert [r["text"] for r in out][:2] == ["win", "raw"]  # tier-0 first despite order+score
