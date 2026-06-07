@@ -354,3 +354,46 @@ def test_inspect_response_is_application_json(
     assert r.headers["content-type"].startswith("application/json")
     # And the body is parseable JSON.
     json.loads(r.content)
+
+
+def test_list_models_surfaces_installed_flm_models(
+    inspect_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Installed FLM models appear in /api/models as npu models so the NPU slot
+    pickers can select any on-disk model, not just the slot default. Multimodal
+    chat tags classify as chat; not-installed tags are omitted."""
+    fake = [
+        {
+            "tag": "gemma4-it:e4b",
+            "capabilities": ["chat", "stt"],  # multimodal — must classify chat
+            "installed": True,
+            "size_bytes": 1,
+            "footprint_gb": 0.0,
+            "family": "gemma4",
+        },
+        {
+            "tag": "embed-gemma:300m",
+            "capabilities": ["embed"],
+            "installed": True,
+            "size_bytes": 1,
+            "footprint_gb": 0.0,
+            "family": "embed-gemma",
+        },
+        {
+            "tag": "qwen3:0.6b",
+            "capabilities": ["chat"],
+            "installed": False,  # not on disk — must be omitted
+            "size_bytes": 1,
+            "footprint_gb": 0.0,
+            "family": "qwen3",
+        },
+    ]
+    monkeypatch.setattr("hal0.providers.flm.flm_served_models", lambda: fake)
+
+    rows = {m["id"]: m for m in inspect_client.get("/api/models").json()["models"]}
+    assert rows["gemma4-it-e4b-FLM"]["device"] == "npu"
+    assert rows["gemma4-it-e4b-FLM"]["type"] == "chat"
+    assert rows["gemma4-it-e4b-FLM"]["installed"] is True
+    assert rows["embed-gemma-300m-FLM"]["type"] == "embed"
+    assert "qwen3-0.6b-FLM" not in rows
