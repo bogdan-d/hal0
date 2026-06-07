@@ -1,10 +1,10 @@
-# hal0-cognee
+# hal0-memory
 
 `MemoryProvider` plugin for the Hermes agent runtime. Wraps the
 hal0-memory REST surface (`/api/memory/*` on hal0-api) so that Hermes's
-durable memory is backed by hal0's embedded Cognee store.
+durable memory is backed by hal0's Hindsight store.
 
-This plugin lives under hal0's repo (`src/hal0/agents/hermes/plugins/memory_cognee/`)
+This plugin lives under hal0's repo (`src/hal0/agents/hermes/plugins/memory_hindsight/`)
 and is vendored into the Hermes plugin tree at provision time by
 `hal0.agents.hermes_provision._phase_install`. It is NOT imported by
 hal0 itself — the upstream `agent.memory_provider` ABC resolves inside
@@ -14,7 +14,7 @@ the hermes-agent venv at runtime.
 
 | Item | Value |
 |---|---|
-| Plugin name | `hal0-cognee` |
+| Plugin name | `hal0-memory` |
 | Kind | `exclusive` (per `MemoryManager` single-provider invariant) |
 | Base URL | `HAL0_MEMORY_BASE` env, defaults `http://127.0.0.1:8080` |
 | Identity | `X-hal0-Agent: $HAL0_AGENT_ID` header (defaults `hermes-agent`) |
@@ -35,7 +35,7 @@ routes the write to `private:<agent_id>`. Sending an explicit
 `installer/agents/hermes/plugins/hal0-memory/__init__.py:117`.
 
 The regression test in
-`tests/agents/hermes_plugins/test_memory_cognee_provider.py` asserts
+`tests/agents/hermes_plugins/test_memory_hindsight_provider.py` asserts
 that no outbound REST payload carries a `dataset` key, locking the
 fix.
 
@@ -43,30 +43,30 @@ fix.
 
 From `agent/memory_provider.py:42`:
 
-* `name` (property) — returns `"hal0-cognee"`.
+* `name` (property) — returns `"hal0-memory"`.
 * `is_available()` — `True` unconditionally (config-only check; no
   network call per ABC docstring).
 * `initialize(session_id, **kwargs)` — opens the async client, honours
   `agent_context` so cron/flush/subagent loops skip writes (the same
   guard honcho and supermemory ship).
 * `system_prompt_block()` — short memory-availability preamble.
-* `prefetch(query, *, session_id)` — best-effort `/api/memory/search`
-  with a 5-item budget; transport failures fall back to empty string.
+* `prefetch(query, *, session_id)` — best-effort `/api/memory/recall`
+  with a 2048-token budget; transport failures fall back to empty string.
 * `sync_turn(user, assistant, *, session_id)` — fire-and-forget
   `/api/memory/add`; honours `_SKIP_WRITE_CONTEXTS`.
 * `get_tool_schemas()` — returns `[]`. Memory tools live on the
   MCP path so they don't double-register against the agent loop.
 * `on_memory_write(action, target, content, metadata=None)` — mirrors
-  the built-in memory tool's writes into hal0-cognee.
+  the built-in memory tool's writes into hal0-memory.
 * `shutdown()` — closes the owned `httpx.AsyncClient`.
 
 ## Integration wiring (PR-3)
 
 PR-3 (hermes_provision overhaul) will:
 
-1. Copy this directory into `$HERMES_HOME/plugins/memory/hal0-cognee/`
+1. Copy this directory into `$HERMES_HOME/plugins/memory/hal0-memory/`
    at `_phase_install` time.
-2. Set `memory.provider = "hal0-cognee"` in `$HERMES_HOME/config.yaml`.
+2. Set `memory.provider = "hal0-memory"` in `$HERMES_HOME/config.yaml`.
 3. Drop the retired `installer/agents/hermes/plugins/hal0-memory/`
    stub.
 

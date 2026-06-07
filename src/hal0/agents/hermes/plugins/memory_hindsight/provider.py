@@ -2,15 +2,15 @@
 
 Subclasses the upstream ``agent.memory_provider.MemoryProvider`` ABC.
 The import resolves inside the Hermes venv at runtime — when the
-plugin is loaded out of ``$HERMES_HOME/plugins/memory/hal0-cognee/``.
+plugin is loaded out of ``$HERMES_HOME/plugins/memory/hal0-memory/``.
 For hal0's own unit tests we import a vendored stub so the suite stays
 runnable without the hermes-agent venv on PYTHONPATH.
 
 Design notes
 ------------
 
-* ``hal0-cognee`` is the new plugin name. The retired ``hal0-memory``
-  stub at ``installer/agents/hermes/plugins/hal0-memory/__init__.py``
+* ``hal0-memory`` is the plugin name (renamed from ``hal0-cognee`` in P5H-1).
+  The retired stub at ``installer/agents/hermes/plugins/hal0-memory/__init__.py``
   is replaced by this provider in PR-3.
 * The agent loop's memory hooks (``prefetch``/``sync_turn``) are sync,
   so we wrap async REST calls via ``asyncio.run``. Each call gets its
@@ -66,7 +66,7 @@ logger = logging.getLogger(__name__)
 _SKIP_WRITE_CONTEXTS = frozenset({"cron", "flush", "subagent"})
 
 
-class Hal0CogneeProvider(MemoryProvider):  # type: ignore[misc]
+class Hal0MemoryProvider(MemoryProvider):  # type: ignore[misc]
     """REST-backed memory provider — wraps hal0-memory.
 
     Vendored under hal0's tree so the installer can deploy it into the
@@ -85,7 +85,7 @@ class Hal0CogneeProvider(MemoryProvider):  # type: ignore[misc]
 
     @property
     def name(self) -> str:
-        return "hal0-cognee"
+        return "hal0-memory"
 
     # ── ABC: lifecycle ─────────────────────────────────────────────────
 
@@ -119,7 +119,7 @@ class Hal0CogneeProvider(MemoryProvider):  # type: ignore[misc]
         except RuntimeError:
             # Already running an event loop (Hermes shutting down inside
             # its own loop); fire-and-forget close.
-            logger.debug("hal0-cognee shutdown: nested event loop, skipping aclose")
+            logger.debug("hal0-memory shutdown: nested event loop, skipping aclose")
         finally:
             self._client = None
 
@@ -128,7 +128,7 @@ class Hal0CogneeProvider(MemoryProvider):  # type: ignore[misc]
     def system_prompt_block(self) -> str:
         agent_id = self._client.agent_id if self._client else "hermes-agent"
         return (
-            "You have a durable memory store at hal0-cognee "
+            "You have a durable memory store at hal0-memory "
             f"(private:{agent_id} namespace, resolved server-side). "
             "Use memory_search before asking repeat-questions; "
             "memory_add to persist facts worth recalling across sessions."
@@ -140,10 +140,10 @@ class Hal0CogneeProvider(MemoryProvider):  # type: ignore[misc]
         try:
             result = asyncio.run(self._client.search(query, limit=5))
         except Hal0MemoryClientError as exc:
-            logger.debug("hal0-cognee prefetch transport failure: %s", exc)
+            logger.debug("hal0-memory prefetch transport failure: %s", exc)
             return ""
         except RuntimeError as exc:  # nested loop or other asyncio drift
-            logger.debug("hal0-cognee prefetch asyncio drift: %s", exc)
+            logger.debug("hal0-memory prefetch asyncio drift: %s", exc)
             return ""
 
         items = result.get("items") if isinstance(result, dict) else None
@@ -158,7 +158,7 @@ class Hal0CogneeProvider(MemoryProvider):  # type: ignore[misc]
                 lines.append(f"- {text}")
         if not lines:
             return ""
-        return "## hal0-cognee memory\n" + "\n".join(lines)
+        return "## hal0-memory recall\n" + "\n".join(lines)
 
     def sync_turn(
         self,
@@ -177,9 +177,9 @@ class Hal0CogneeProvider(MemoryProvider):  # type: ignore[misc]
         try:
             asyncio.run(self._client.add(text, tags=["chat", "hermes"]))
         except Hal0MemoryClientError as exc:
-            logger.debug("hal0-cognee sync_turn transport failure: %s", exc)
+            logger.debug("hal0-memory sync_turn transport failure: %s", exc)
         except RuntimeError as exc:
-            logger.debug("hal0-cognee sync_turn asyncio drift: %s", exc)
+            logger.debug("hal0-memory sync_turn asyncio drift: %s", exc)
 
     # ── ABC: tools ─────────────────────────────────────────────────────
 
@@ -199,7 +199,7 @@ class Hal0CogneeProvider(MemoryProvider):  # type: ignore[misc]
         # never reach this branch. Match the upstream ABC contract by
         # returning a JSON-encoded error string.
         return json.dumps(
-            {"status": "error", "error": f"hal0-cognee exposes no tool '{tool_name}'"}
+            {"status": "error", "error": f"hal0-memory exposes no tool '{tool_name}'"}
         )
 
     # ── Optional hook: mirror built-in memory writes ───────────────────
@@ -219,6 +219,6 @@ class Hal0CogneeProvider(MemoryProvider):  # type: ignore[misc]
         try:
             asyncio.run(self._client.add(content, tags=tags, metadata=metadata))
         except Hal0MemoryClientError as exc:
-            logger.debug("hal0-cognee on_memory_write transport failure: %s", exc)
+            logger.debug("hal0-memory on_memory_write transport failure: %s", exc)
         except RuntimeError as exc:
-            logger.debug("hal0-cognee on_memory_write asyncio drift: %s", exc)
+            logger.debug("hal0-memory on_memory_write asyncio drift: %s", exc)

@@ -1,7 +1,7 @@
-"""hal0-cognee — Hermes ``MemoryProvider`` plugin (issue #240 / PR-2).
+"""hal0-memory — Hermes ``MemoryProvider`` plugin (P5H-1 rename from hal0-cognee).
 
 This package is COPIED verbatim into
-``$HERMES_HOME/plugins/memory/hal0-cognee/`` at provision time by
+``$HERMES_HOME/plugins/memory/hal0-memory/`` at provision time by
 ``hal0.agents.hermes_provision._phase_install`` (rework lands in PR-3).
 At runtime it resolves against the hermes-agent venv, where the
 ``agent.memory_provider`` ABC lives.
@@ -13,7 +13,7 @@ Discovery contract (per upstream ``plugins/memory/__init__.py``):
   ``register(ctx)`` callable. We ship both so either discovery path
   works:
 
-  * Re-export ``Hal0CogneeProvider`` so the fallback ``find a subclass``
+  * Re-export ``Hal0MemoryProvider`` so the fallback ``find a subclass``
     branch at ``plugins/memory/__init__.py:_load_provider_from_dir``
     picks it up.
   * Provide ``register(ctx)`` so the preferred path (``_ProviderCollector``)
@@ -25,9 +25,9 @@ Discovery contract (per upstream ``plugins/memory/__init__.py``):
 
 from __future__ import annotations
 
-from .provider import Hal0CogneeProvider
+from .provider import Hal0MemoryProvider
 
-__all__ = ["Hal0CogneeProvider", "register"]
+__all__ = ["Hal0MemoryProvider", "register"]
 
 
 def register(ctx) -> None:  # type: ignore[no-untyped-def]
@@ -37,4 +37,4 @@ def register(ctx) -> None:  # type: ignore[no-untyped-def]
     test double). It exposes ``register_memory_provider(provider)`` per
     ``hermes-agent/plugins/memory/__init__.py:_ProviderCollector:288``.
     """
-    ctx.register_memory_provider(Hal0CogneeProvider())
+    ctx.register_memory_provider(Hal0MemoryProvider())
