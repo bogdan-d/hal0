@@ -10,7 +10,7 @@ from __future__ import annotations
 import httpx
 import pytest
 
-from hal0.agents.hermes.plugins.memory_cognee._client import Hal0MemoryClient
+from hal0.agents.hermes.plugins.memory_hindsight._client import Hal0MemoryClient
 from hal0.api.routes.memory import router
 
 
