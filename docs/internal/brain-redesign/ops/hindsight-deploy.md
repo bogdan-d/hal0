@@ -127,30 +127,37 @@ types?, tags?, budget?, ...}`. Recall response: `{results:[...], trace, entities
 source_facts}`. Retain response: `{success, bank_id, items_count, usage}`.
 → `hindsight_client.py` (53ec956) corrected in follow-up commit.
 
-## ⚠ Carry-forward — MUST handle when executing P2-5 (default flip) / P2-6 (gate on)
+## Carry-forward — status
 
-The plan's P2-5 task ("flip default engine → hindsight") does NOT mention these. Do them
-or the live brain ships broken:
+1. **Reranker wiring — DONE in P2-5 (290ccfe).** Factory's hindsight branch now constructs
+   `LemonadeReranker(url=embed.rerank_url, ...)` and passes it to `HindsightProvider`; the
+   §4b cross-bank UNION merge reranks via it. `_rerank_union` now gates on `_rerank_enabled`
+   so `set_rerank_enabled()` is a real toggle. Fail-soft: rerank down/evicted → `[]` → fused
+   order. Unit-tested (mock-transport + fail-soft). ⚠ **P2-6 ACTIVATION:** the rerank endpoint
+   is currently DORMANT — `:8086` refuses, lemond exposes no `/rerank` route, and the
+   `rerank` slot (`jina-reranker-v1-tiny-en-GGUF`, vulkan) is evicted/unbound (port 0). At
+   gate-on, bring up a llama.cpp-`/rerank` endpoint serving a reranker and point
+   `[memory.embedding] rerank_url` at it (and set `rerank_enabled=true`), THEN confirm §4b
+   rerank actually fires end-to-end (it's only unit-tested so far). Until then recall returns
+   fused (un-reranked) order — functional, just not §4b-ordered.
+   (Scope note: Hindsight's *own* per-bank recall can also rerank server-side via
+   `HINDSIGHT_API_RERANKER_*`; the hal0-side LemonadeReranker reranks the CROSS-BANK union,
+   a different scope — not double-ranking. For single-bank callers it's mildly redundant.)
+2. **Async retain still UNVERIFIED live.** Client sends `async:true` (`hindsight_client.py`);
+   the P1-7 smoke used sync. P2-5 wired the path but didn't exercise async end-to-end against
+   the daemon (the new provider+client code isn't deployed to /opt/hal0 yet — only unit-tested).
+   At the /opt/hal0 code deploy + gate-on, confirm a fire-and-forget retain lands + becomes
+   recallable.
+3. **iGPU eviction risk — RESOLVED 2026-06-07.** Extraction is on the NPU (`gemma3-4b-FLM`).
+   Remaining (minor): NPU extraction shares the NPU with the FLM asr/embed trio; confirm no NPU
+   contention under load at gate-on. Reverting to iGPU `gemma-4-26b-a4b-it` reinstates the risk.
 
-1. **Wire the reranker into the factory — PRECONDITION for P2-5, not a followup.** P2-1 routes
-   boot through `provider_from_config`, which builds `HindsightProvider(client=client)` with
-   `reranker=None`. The moment the default flips to hindsight, the §4b rerank merge (the
-   headline retrieval feature) is DEAD. At P2-5: construct a reranker (lemond's
-   `bge-reranker-v2-m3-q4_k_m`, confirmed present) and pass it into `HindsightProvider`, AND make
-   `set_rerank_enabled` gate on a field `_rerank_union` actually reads (currently it gates on
-   `_reranker is None`, the toggle flag is inert). Verify rerank fires end-to-end before calling
-   P2-5 done. (Note: Hindsight's own recall also reranks server-side via
-   `HINDSIGHT_API_RERANKER_*`; decide whether the §4b merge reranks the cross-bank UNION on the
-   hal0 side, or delegates — don't double-rerank blindly.)
-2. **Async retain is UNVERIFIED.** The P1-7 smoke used `async:false` (sync). The shipped client
-   (`hindsight_client.py`, 997c1ec) sends `async:true` so `add()` doesn't block ~60-90s on
-   extraction. Correct design, but the queued-extraction path was never exercised live — confirm
-   a fire-and-forget retain actually lands + becomes recallable before relying on it at P2-5.
-3. **iGPU eviction risk — RESOLVED 2026-06-07.** Extraction moved to the NPU
-   (`gemma3-4b-FLM`), so it no longer competes with the 35B primary on the iGPU. Remaining
-   (minor): NPU extraction shares the NPU with the FLM asr/embed trio + any NPU primary use;
-   confirm no NPU contention under load at gate-on. If reverting to iGPU `gemma-4-26b-a4b-it`,
-   the original eviction risk returns.
+## ⚠ Not yet deployed to the runtime
+
+P0–P2 code (incl. the P2-5 default flip + reranker) lives on `feat/hindsight-memory`, NOT in
+`/opt/hal0` (runtime runs old code). The hindsight-api **daemon** IS deployed. Activating the
+brain (P2-6) requires: deploy the branch code to /opt/hal0 (rebuild ui/dist per
+`hal0_ct105_deploy_rebuilds_ui`) + flip `HAL0_MEMORY_ENABLED=1` + bring up rerank (item 1).
 
 ## Rollback
 
