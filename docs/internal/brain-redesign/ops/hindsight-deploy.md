@@ -112,6 +112,32 @@ types?, tags?, budget?, ...}`. Recall response: `{results:[...], trace, entities
 source_facts}`. Retain response: `{success, bank_id, items_count, usage}`.
 → `hindsight_client.py` (53ec956) corrected in follow-up commit.
 
+## ⚠ Carry-forward — MUST handle when executing P2-5 (default flip) / P2-6 (gate on)
+
+The plan's P2-5 task ("flip default engine → hindsight") does NOT mention these. Do them
+or the live brain ships broken:
+
+1. **Wire the reranker into the factory — PRECONDITION for P2-5, not a followup.** P2-1 routes
+   boot through `provider_from_config`, which builds `HindsightProvider(client=client)` with
+   `reranker=None`. The moment the default flips to hindsight, the §4b rerank merge (the
+   headline retrieval feature) is DEAD. At P2-5: construct a reranker (lemond's
+   `bge-reranker-v2-m3-q4_k_m`, confirmed present) and pass it into `HindsightProvider`, AND make
+   `set_rerank_enabled` gate on a field `_rerank_union` actually reads (currently it gates on
+   `_reranker is None`, the toggle flag is inert). Verify rerank fires end-to-end before calling
+   P2-5 done. (Note: Hindsight's own recall also reranks server-side via
+   `HINDSIGHT_API_RERANKER_*`; decide whether the §4b merge reranks the cross-bank UNION on the
+   hal0 side, or delegates — don't double-rerank blindly.)
+2. **Async retain is UNVERIFIED.** The P1-7 smoke used `async:false` (sync). The shipped client
+   (`hindsight_client.py`, 997c1ec) sends `async:true` so `add()` doesn't block ~60-90s on
+   extraction. Correct design, but the queued-extraction path was never exercised live — confirm
+   a fire-and-forget retain actually lands + becomes recallable before relying on it at P2-5.
+3. **gemma-26b extraction vs the primary model — P2-6 eviction risk.** Extraction +
+   background consolidation load `gemma-4-26b-a4b-it-q4kxl` on lemond. Under lemond's
+   serialized-load + nuclear-evict policy (`hal0_lemonade_gotchas`), a consolidation cycle could
+   evict the user-facing 35B primary mid-chat. Verify coexistence (both resident in GTT, no
+   evict) under load before/at gate-on, or pin slots / use a lighter extraction model
+   (`gemma-4-12b-it`, 6.9GB).
+
 ## Rollback
 
 `systemctl disable --now hindsight-api && systemctl mask hindsight-api`. Default engine is
