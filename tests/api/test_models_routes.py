@@ -392,8 +392,16 @@ def test_list_models_surfaces_installed_flm_models(
     monkeypatch.setattr("hal0.providers.flm.flm_served_models", lambda: fake)
 
     rows = {m["id"]: m for m in inspect_client.get("/api/models").json()["models"]}
-    assert rows["gemma4-it-e4b-FLM"]["device"] == "npu"
-    assert rows["gemma4-it-e4b-FLM"]["type"] == "chat"
-    assert rows["gemma4-it-e4b-FLM"]["installed"] is True
-    assert rows["embed-gemma-300m-FLM"]["type"] == "embed"
+    g4 = rows["gemma4-it-e4b-FLM"]
+    # FLM-seed shape the NPU slot pickers (slots.jsx isFlmModel) gate on.
+    assert g4["device"] == "npu"
+    assert g4["backend"] == "flm"
+    assert g4["upstream"] == "npu"
+    assert g4["installed"] is True
+    # dispatcher vocab (chat→llm), chat-first for the multimodal tag.
+    assert g4["type"] == "llm"
+    assert g4["capability"] == "chat"
+    # embed model → dispatcher "embedding".
+    assert rows["embed-gemma-300m-FLM"]["type"] == "embedding"
+    # not-installed FLM tag omitted.
     assert "qwen3-0.6b-FLM" not in rows

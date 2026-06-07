@@ -95,6 +95,20 @@ _CAPABILITY_TO_TYPE: dict[str, str] = {
 # the lowest-priority fallback so genuinely non-chat models surface.
 _TYPE_PRIORITY: tuple[str, ...] = ("rerank", "embed", "stt", "tts", "img", "chat")
 
+# FLM capability → dispatcher-vocab slot type. The NPU slot pickers
+# (ui/dash/slots.jsx ``modelSlotType``) speak the dispatcher vocabulary
+# (llm/embedding/transcription), NOT the W7 ``_CAPABILITY_TO_TYPE`` vocab, so
+# probe-sourced FLM rows must carry these values to be selectable.
+_FLM_DISPATCH_TYPE: dict[str, str] = {
+    "chat": "llm",
+    "embed": "embedding",
+    "stt": "transcription",
+    "asr": "transcription",
+    "rerank": "reranking",
+    "tts": "tts",
+    "image": "image",
+}
+
 
 def _classify_type(capabilities: Any, model_id: str = "") -> str:
     """Return the primary modality bucket for a model.
@@ -204,9 +218,14 @@ async def list_models(request: Request) -> dict[str, Any]:
             seen.add(mid)
             caps = list(fm.get("capabilities") or [])
             # FLM chat tags are chat-first even when multimodal (gemma4 also
-            # advertises ``stt``); classify as chat so they land in the chat
-            # pickers instead of under stt by capability precedence.
-            mtype = "chat" if "chat" in caps else _classify_type(caps, mid)
+            # advertises ``stt``); pick chat as the primary role so they land
+            # in the NPU chat picker, not under stt.
+            primary = "chat" if "chat" in caps else (caps[0] if caps else "chat")
+            # The NPU slot pickers (ui/dash/slots.jsx) gate on the FLM-seed
+            # shape: ``isFlmModel`` needs backend=="flm" / upstream=="npu", and
+            # ``modelSlotType`` needs the DISPATCHER vocabulary (chat→llm,
+            # embed→embedding, stt→transcription) — not the W7 type vocab. Match
+            # that shape exactly so probe-sourced models are selectable.
             data.append(
                 {
                     "id": mid,
@@ -214,10 +233,12 @@ async def list_models(request: Request) -> dict[str, Any]:
                     "object": "model",
                     "created": now,
                     "owned_by": "flm",
-                    "upstream": "flm",
+                    "upstream": "npu",
+                    "backend": "flm",
                     "installed": True,
                     "ns": "pulled",
-                    "type": mtype,
+                    "type": _FLM_DISPATCH_TYPE.get(primary, "llm"),
+                    "capability": primary,
                     "capabilities": caps,
                     "device": "npu",
                 }
