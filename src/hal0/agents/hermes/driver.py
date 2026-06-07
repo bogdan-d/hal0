@@ -52,7 +52,7 @@ def _installer_script_path() -> Path:
     # parents[0]=hermes, [1]=agents, [2]=hal0, [3]=src, [4]=repo root.
     # Bumped by one when driver.py moved from src/hal0/agents/hermes.py
     # to src/hal0/agents/hermes/driver.py to make room for the vendored
-    # plugin tree (memory_cognee etc.).
+    # plugin tree (memory_hindsight etc.).
     repo_root = Path(__file__).resolve().parents[4]
     return repo_root / _INSTALLER_SCRIPT_REL
 
