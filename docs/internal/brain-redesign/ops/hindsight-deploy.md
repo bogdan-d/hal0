@@ -70,15 +70,47 @@ a P2 call, not part of this deploy.
   healthy. Cosmetic; silence later by pinning intra-op thread count if desired.
 - No CUDA errors (FORCE_CPU + no NVIDIA device → clean CPU path), no tracebacks.
 
-## [Q5'] FLM extraction schema gap
+## [Q5'] FLM extraction schema gap — RESOLVED (official, no patch)
 
-FLM ignores `response_format` (no grammar enforcement) → small models can free-form the
-fact-extraction output. Resolve the **official** way if it surfaces at P1-7, in order:
-(a) grammar/schema-constrained extraction via lemond if available,
-(b) a larger instruct model honoring `{"facts":[...]}`,
-(c) if a shim is unavoidable, file upstream + pin the version — do NOT carry the spike's
-unversioned in-tree wrap-patch.
-Status: _deferred until P1-7 retain→extract exercises it._
+Surfaced at the P1-7 retain smoke: `qwen3-it-4b-FLM` (NPU) ignores `response_format` and
+returns a bare JSON **list**; Hindsight's `fact_extraction` rejects it
+(`LLM returned non-dict JSON ... list`, 3× retry → `RuntimeError: Fact extraction failed`),
+~63s/attempt. There is NO official toggle in 0.7.2 (the spike patched `fact_extraction.py` —
+we do NOT carry that unversioned patch).
+
+**Official fix (ladder option b):** point the extraction LLM at a grammar-capable GGUF
+**instruct (non-reasoning)** model on lemond. Verified live:
+- `gemma-4-26b-a4b-it-q4kxl` → returns `{"facts":[...]}` dict ✅ (MoE a4b ≈4B active, fast; 16GB fits GTT)
+- `qwen3.5-4b-q4kxl` (reasoning) → empty content ✗ (reasoning models fail extraction, per spike)
+- `qwen3-it-4b-FLM` (NPU) → bare list ✗
+
+→ unit sets `HINDSIGHT_API_LLM_MODEL=gemma-4-26b-a4b-it-q4kxl`. Lighter alt to evaluate:
+`gemma-4-12b-it` (6.9GB, instruct).
+
+## Recall sanity (P1-7, recorded not gated)
+
+Live end-to-end on bank `smoketest` (deleted after):
+- RETAIN `POST /v1/default/banks/{bank}/memories` `{items:[{content,document_id}]}` →
+  `{success:true, items_count:1, usage:{...}}`, ~74s incl. gemma load.
+- RECALL `POST /v1/default/banks/{bank}/memories/recall` `{query,max_tokens}` → 0.7s,
+  `results` = 2 facts, both on-topic:
+  - "The hal0 memory engine was swapped from Cognee to Hindsight in version 0.5."
+  - "hal0 performs inference on a Strix Halo iGPU via Lemonade."
+
+## ⚠ Real 0.7.2 API paths (differ from plan + the P1-5 client — MUST fix before P2-5)
+
+Discovered via the live `/openapi.json`:
+| op | P1-5 client (WRONG) | real 0.7.2 |
+|---|---|---|
+| retain | `POST .../{bank}/retain` `{content,...}` | `POST .../{bank}/memories` `{items:[MemoryItem]}` |
+| recall | `POST .../{bank}/recall` | `POST .../{bank}/memories/recall` |
+| delete | `DELETE .../{bank}/documents/{id}` | ✅ same |
+
+MemoryItem: `{content* , document_id?, tags?, metadata?{str:str}, context?, timestamp?, ...}`.
+RetainRequest: `{items:[MemoryItem], async?, document_tags?}`. RecallRequest: `{query*, max_tokens?,
+types?, tags?, budget?, ...}`. Recall response: `{results:[...], trace, entities, chunks,
+source_facts}`. Retain response: `{success, bank_id, items_count, usage}`.
+→ `hindsight_client.py` (53ec956) corrected in follow-up commit.
 
 ## Rollback
 

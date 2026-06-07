@@ -28,10 +28,15 @@ Environment=HF_HOME=/var/lib/hal0/memory/hindsight/hf-cache
 # A NON-EMPTY key is required even for no-auth lemond (spike gotcha #1).
 Environment=HINDSIGHT_API_LLM_PROVIDER=openai
 Environment=HINDSIGHT_API_LLM_BASE_URL=http://127.0.0.1:13305/v1
-Environment=HINDSIGHT_API_LLM_MODEL=qwen3-it-4b-FLM
+# [Q5'] RESOLVED the official way (NO in-tree wrap-patch): the NPU model
+# qwen3-it-4b-FLM ignores response_format and returns a bare JSON *list*, which
+# Hindsight's fact_extraction rejects ("non-dict JSON: list"). Use a grammar-
+# capable GGUF *instruct* (non-reasoning) model on lemond instead — it honors
+# response_format and emits {"facts":[...]}. Verified live: gemma-4-26b-a4b-it
+# returns a dict; qwen3.5-4b (reasoning) returned empty.
+Environment=HINDSIGHT_API_LLM_MODEL=gemma-4-26b-a4b-it-q4kxl
 Environment=HINDSIGHT_API_LLM_API_KEY=lemonade-local-noauth
-# NPU extraction is slow (~45-90s/extract, async); raise the LLM timeout so
-# fact extraction doesn't abort mid-call (spike model finding).
+# Generous timeout: first call includes lemond model load (~38s observed).
 Environment=HINDSIGHT_API_LLM_TIMEOUT=180
 
 # Embeddings + reranker are LOCAL (bundled BGE 384-d + MiniLM cross-encoder) —
