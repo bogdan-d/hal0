@@ -188,3 +188,44 @@ No `[memory].engine` pin → schema default `hindsight` wins.
 
 `systemctl disable --now hindsight-api && systemctl mask hindsight-api`. Default engine is
 still Cognee; the Hindsight data root is isolated under `/var/lib/hal0/memory/hindsight`.
+
+## P5-H — Hermes convergence: IN PROGRESS (blocked on stub rewrite)
+
+Code (P5H-1/2, PR #604): src plugin renamed `memory_cognee`→`memory_hindsight`,
+`Hal0CogneeProvider`→`Hal0MemoryProvider`, `prefetch`→`recall` (/api/memory/recall). Unit-tested.
+
+P5H-MIG: recorded — spike `hermes` bank abandoned (5 test rows / 40 failed retains), start fresh.
+
+### ⚠ BLOCKER found by verify-before-destroy (do NOT teardown until resolved)
+The LIVE Hermes plugin is the vendored stub at
+`/var/lib/hal0/.hermes/plugins/memory/hal0-memory/__init__.py` (source:
+`installer/agents/hermes/plugins/hal0-memory/__init__.py`) — NOT the src package. It is
+**doubly broken** against current hal0-api:
+1. **Missing `is_available`** — upstream `agent.memory_provider.MemoryProvider` ABC now requires
+   `{get_tool_schemas, initialize, is_available, name}`; the stub lacks `is_available` → can't
+   instantiate → flipping `provider: hal0-memory` leaves Hermes with NO memory provider.
+2. **MCP transport 405** — stub's `_call_mcp` does a bare JSON-RPC `tools/call` POST to
+   `/mcp/memory`; the current streamable-HTTP mount returns 405 (needs the MCP initialize/session
+   handshake). Verified with + without `Accept: text/event-stream`.
+It never surfaced because Hermes was on `provider: hindsight` (local_embedded) — the stub was
+deployed but never loaded.
+
+### Fix path (the real reconciliation)
+Rewrite the installer stub to the WORKING REST path (verified end-to-end this session):
+- add `def is_available(self) -> bool: return True`;
+- replace `_call_mcp` (MCP→REST): `prefetch`→`POST /api/memory/recall {query,max_tokens,types}`,
+  `sync_turn`→`POST /api/memory/add {text,tags}`, keeping headers `X-hal0-Agent` + `X-hal0-Private:1`
+  (no `dataset` — #317). (The src `memory_hindsight/_client.py` is the reference REST client.)
+Then redeploy the stub to `$HERMES_HOME/plugins/memory/hal0-memory/` (re-provision or copy),
+verify it loads + `prefetch` returns an existing shared-bank fact, THEN flip provider + verify a
+real turn, THEN teardown.
+
+### Verify-before-destroy log (this session)
+- Flipped `provider: hindsight→hal0-memory`, restarted → stub fails `is_available` → **REVERTED**
+  to `provider: hindsight` (known-good restored, backup `config.yaml.bak-pre-p5h-flip-*`).
+- ⚠ **Teardown safety (stale-plan trap):** :5432 postgres (pid 192259) is the PLATFORM brain's
+  pg0 (`/var/lib/hal0/memory/hindsight/.pg0`, parent = P1-6 daemon 192123) — NOT the spike's.
+  Plan's "`:5432` expect empty" is INVERTED: after teardown :5432 must STILL show the platform pg.
+  KEEP `/var/lib/hal0/memory/hindsight/*`. DESTROY only `/var/lib/hal0/.pg0` (spike, 61M, NOT
+  running) + hindsight-* in `/var/lib/hal0/venvs/hermes/` (NOT the platform `.venv`). The pip
+  uninstall is the fatal trap — both venvs have `hindsight-api`; use the exact `…/venvs/hermes/bin/pip`.
