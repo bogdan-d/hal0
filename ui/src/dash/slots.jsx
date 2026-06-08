@@ -17,6 +17,7 @@ import {
 import { useModels } from '@/api/hooks/useModels'
 import { useLemonadeConfig, useLemonadeConfigSet } from '@/api/hooks/useLemonadeConfig'
 import { MemoryMap } from './memory-map'
+import { slotIndicatorFromPhase, isSlotLive } from './slot-status.js'
 
 const { useState: useStateS } = React;
 
@@ -60,6 +61,18 @@ function _formatAgo(deltaMs) {
 }
 
 function slotIndicator(slot, now = Date.now()) {
+  // N1 (container branch): delegate container slots to the unified helper.
+  // Lemond slots continue through the original logic below so all existing
+  // tests remain green with no changes to their expected cls/label/tooltip.
+  //
+  // Detection: runtime="container" (from TOML / normalizeSlot) OR
+  // container_status present (backend always emits this for container slots
+  // even before `runtime` is included in as_dict serialisation).
+  const runtime = String(slot?.runtime || "lemonade");
+  if (runtime === "container" || slot?.container_status != null) {
+    return slotIndicatorFromPhase(slot, now);
+  }
+
   const state = String(slot?.state || "offline");
   const lemo = String(slot?.lemonade_state || "");
   const enabled = slot?.enabled !== false;
@@ -183,7 +196,7 @@ function IndicatorDot({ slot }) {
 
 // Expose for window-scope JSX (legacy pattern in this codebase) + tests.
 if (typeof window !== "undefined") {
-  Object.assign(window, { slotIndicator, IndicatorDot, RECENTLY_LIVE_MS });
+  Object.assign(window, { slotIndicator, IndicatorDot, RECENTLY_LIVE_MS, isSlotLive });
 }
 
 // ─── Mini sparkline for slot card ───
@@ -221,11 +234,30 @@ function SlotCard({
   const enabled = slot.enabled !== false;
   // Lifecycle phase drives which action buttons render (design 2026-06-04):
   // running (loaded/serving) -> Stop+Restart; off (not loaded) -> Start;
-  // transitional (warming/pulling/unloading) -> actions disabled.
-  const lemoState = String(slot?.lemonade_state || "");
-  const slotRunning = lemoState === "loaded" || lemoState === "ready" || state === "serving" || state === "ready";
-  const slotTransitional = state === "warming" || state === "starting" || state === "pulling" || state === "unloading";
-  const phase = slotTransitional ? "transitional" : slotRunning ? "running" : "off";
+  // transitional (warming/pulling/unloading/starting) -> actions disabled.
+  //
+  // N1: container slots project from container_status; lemond slots use the
+  // original lemonade_state / state logic so button behavior is unchanged.
+  // Detect container runtime: prefer the explicit `runtime` field (set by
+  // slot TOML / normalizeSlot default). Also gate on container_status != null
+  // as a fallback signal — the live /api/slots response always emits
+  // container_status for container slots even if the `runtime` field is not
+  // yet included in the serialised payload (see slot manager as_dict()).
+  // #658 backend task: ensure `runtime`, `image`, `profile` are emitted.
+  const isContainer = slot.runtime === "container" || slot.container_status != null;
+  let phase;
+  if (isContainer) {
+    const cs = String(slot?.container_status || "stopped");
+    const health = !!slot?.container_health;
+    const cRunning = cs === "running" && health;
+    const cTransitional = cs === "starting" || cs === "pulling" || (cs === "running" && !health);
+    phase = cTransitional ? "transitional" : cRunning ? "running" : "off";
+  } else {
+    const lemoState = String(slot?.lemonade_state || "");
+    const slotRunning = lemoState === "loaded" || lemoState === "ready" || state === "serving" || state === "ready";
+    const slotTransitional = state === "warming" || state === "starting" || state === "pulling" || state === "unloading";
+    phase = slotTransitional ? "transitional" : slotRunning ? "running" : "off";
+  }
   const isLlm = type === "llm";
 
   // Only render chips backed by a real slot-payload field. Dead chips
@@ -243,12 +275,21 @@ function SlotCard({
     v === null || v === undefined || v === "" ? fallback : v;
 
   const metricsRow = (() => {
-    if (type === "llm") return [
-      { l: "tok/s",  v: num(metrics.toks, 0), u: "", spark: slot.spark },
-      { l: "ttft",   v: metrics.ttft ? metrics.ttft : "—", u: metrics.ttft ? "ms" : "" },
-      { l: "ctx",    v: num(metrics.ctx, "—"), u: "" },
-      { l: "kv",     v: metrics.kv === null || metrics.kv === undefined ? "—" : metrics.kv, u: metrics.kv === null || metrics.kv === undefined ? "" : "%", dim: metrics.kv === null || metrics.kv === undefined },
-    ];
+    if (type === "llm") {
+      // For container slots: show live tok/s vs profile bench reference if available
+      // (e.g. "48 / ~52 tok/s" so a degraded container is obvious).
+      const benchToks = typeof slot?.bench_toks_per_sec === "number"
+        ? slot.bench_toks_per_sec : null;
+      const toksDisplay = isContainer && benchToks
+        ? `${num(metrics.toks, 0)} / ~${Math.round(benchToks)}`
+        : num(metrics.toks, 0);
+      return [
+        { l: "tok/s", v: toksDisplay, u: "", spark: slot.spark },
+        { l: "ttft",  v: metrics.ttft ? metrics.ttft : "—", u: metrics.ttft ? "ms" : "" },
+        { l: "ctx",   v: num(metrics.ctx, "—"), u: "" },
+        { l: "kv",    v: metrics.kv === null || metrics.kv === undefined ? "—" : metrics.kv, u: metrics.kv === null || metrics.kv === undefined ? "" : "%", dim: metrics.kv === null || metrics.kv === undefined },
+      ];
+    }
     return [];
   })();
 
@@ -263,7 +304,12 @@ function SlotCard({
           {isDefault && <div className="default-badge">★ default</div>}
           {coresident && <span className="chip" style={{color: "var(--dev-npu)", borderColor: "rgba(200,150,255,0.30)", background: "rgba(200,150,255,0.06)"}}>coresident</span>}
           {/* C3: enabled toggle — stays full-opacity + interactive even when
-              the card is faded, so a disabled slot can be re-enabled. */}
+              the card is faded, so a disabled slot can be re-enabled.
+              A11y: the hidden <input type=checkbox> is the focusable AT
+              surface (role=checkbox + aria-label). The visible track span
+              is aria-hidden so AT doesn't announce it twice. NpuSwitch
+              pattern: focus-visible ring is handled in dashboard.css via
+              :focus-visible on the hidden input. */}
           <label
             className="slot-enable-toggle"
             title={enabled ? "Disable slot" : "Enable slot"}
@@ -274,6 +320,7 @@ function SlotCard({
               checked={enabled}
               disabled={!!busy}
               onChange={() => onToggleEnabled && onToggleEnabled(!enabled)}
+              aria-label={enabled ? "Disable slot" : "Enable slot"}
             />
             <span className="slot-enable-track" aria-hidden="true" />
           </label>
@@ -293,19 +340,52 @@ function SlotCard({
       </div>
       <div className="slot-chips">
         <span className="chip">{type}</span>
-        <span className={"chip dev-" + (device || "cpu").replace("gpu-", "")}>{device}</span>
-        {cpuOnly && <span className="chip">[CPU]</span>}
-        {/* Backend mismatch (ADR-0022): amber chip surfaces the ACTUAL
-            runtime backend when it differs from the declared one. Render
-            only on the backend-computed flag + a present actual_backend. */}
-        {slot.backend_mismatch && slot.actual_backend && (
-          <span
-            className={"chip dev-" + String(slot.actual_backend)}
-            style={{borderColor: "var(--warn-line)", background: "var(--warn-soft)"}}
-            title={`Declared ${slot.declared_backend || device} but running ${slot.actual_backend} — switch backend to reload`}
-          >
-            {slot.actual_backend} <span style={{color: "var(--warn)", marginLeft: 4}}>≠ declared</span>
+        {/* N5: runtime micro-tag distinguishes container from lemond so
+            operators understand why model-swap is a cold restart vs hot. */}
+        {isContainer && (
+          <span className="chip slot-runtime-tag" title="Container runtime — model swap requires restart">
+            container
           </span>
+        )}
+        {/* Container: image-tag chip (replaces device chip + backend mismatch block).
+            Show the image tag truncated; full ref on hover.
+            NOTE: `image` and `profile` are TOML fields that as_dict() does not
+            yet serialise in /api/slots — tracked in #658 (backend: emit runtime
+            + image + profile in slot serialisation). The chip degrades gracefully
+            to "no image" until that lands. container_status is always present. */}
+        {isContainer ? (() => {
+          const imgFull = slot.image || slot.profile || null;
+          const imgShort = imgFull
+            ? imgFull.split("/").pop() // last path segment (tag after last /)
+            : null;
+          return imgShort ? (
+            <span
+              className="chip slot-image-tag mono"
+              title={imgFull}
+              style={{maxWidth: 160, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap"}}
+            >{imgShort}</span>
+          ) : (
+            <span className="chip dim" title="Image/profile not yet emitted by backend (#658)">
+              {slot.profile ? `profile:${slot.profile}` : "no image"}
+            </span>
+          );
+        })() : (
+          <>
+            <span className={"chip dev-" + (device || "cpu").replace("gpu-", "")}>{device}</span>
+            {cpuOnly && <span className="chip">[CPU]</span>}
+            {/* Backend mismatch (ADR-0022): amber chip surfaces the ACTUAL
+                runtime backend when it differs from the declared one. Render
+                only on the backend-computed flag + a present actual_backend. */}
+            {slot.backend_mismatch && slot.actual_backend && (
+              <span
+                className={"chip dev-" + String(slot.actual_backend)}
+                style={{borderColor: "var(--warn-line)", background: "var(--warn-soft)"}}
+                title={`Declared ${slot.declared_backend || device} but running ${slot.actual_backend} — switch backend to reload`}
+              >
+                {slot.actual_backend} <span style={{color: "var(--warn)", marginLeft: 4}}>≠ declared</span>
+              </span>
+            )}
+          </>
         )}
         {(() => {
           const ind = slotIndicator(slot);
@@ -331,7 +411,9 @@ function SlotCard({
           ))}
         </div>
       )}
-      <div className="slot-actions">
+      {/* N3: touch-action:manipulation prevents 300ms tap-delay on mobile
+          while keeping pan/pinch-to-zoom intact (no `touch-action: none`). */}
+      <div className="slot-actions" style={{touchAction: "manipulation"}}>
         {/* C3: a disabled slot has no running child to Start/Stop/Restart —
             hide the lifecycle buttons; the card's toggle is the way back on. */}
         {!enabled ? (

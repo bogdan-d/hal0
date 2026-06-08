@@ -15,6 +15,7 @@ import { useHardware } from '@/api/hooks/useHardware'
 import { useBackends } from '@/api/hooks/useBackends'
 import { useModels } from '@/api/hooks/useModels'
 import { ENDPOINTS } from '@/api/endpoints'
+import { stateChipClassForSlot } from './slot-status.js'
 
 // Full static device list — shown as fallback when /api/backends hasn't
 // loaded yet or returns empty. Never render an empty device dropdown.
@@ -36,12 +37,32 @@ const { useState: useStateSM, useEffect: useEffectSM, useRef: useRefSM } = React
 // Map a slot lifecycle state to a chip color class.
 //   online/ready/serving → green (ok); starting → amber (warn);
 //   error → red (err); offline/empty/anything else → neutral grey (base chip).
-function stateChipClass(state) {
-  const s = String(state || "").toLowerCase();
-  if (["ready", "online", "loaded", "serving", "running"].includes(s)) return "chip ok";
-  if (["starting", "loading", "pending", "stopping"].includes(s)) return "chip warn";
-  if (["error", "failed", "broken"].includes(s)) return "chip err";
-  return "chip"; // offline / empty / unconfigured → neutral grey
+//
+// N1: accepts either a state string (lemond path, unchanged) or a full slot
+// object. When given a slot object, delegates to stateChipClassForSlot()
+// from slot-status.js which handles container runtime correctly via
+// slotPhase(). The primitive string overload is kept for call sites that
+// only have the state string — its behaviour is unchanged.
+function stateChipClass(stateOrSlot) {
+  // Duck-type: if it's a string, keep original behaviour (lemond path).
+  if (typeof stateOrSlot === "string" || stateOrSlot == null) {
+    // STRING path = lemond, byte-identical to origin/main. Do NOT add
+    // warming/pulling/crashed here — that recolored lemond state strips
+    // (e.g. state="warming" must stay grey at the EditSlotDrawer strip).
+    // Container chips route through the slot-OBJECT overload only.
+    const s = String(stateOrSlot || "").toLowerCase();
+    if (["ready", "online", "loaded", "serving", "running"].includes(s)) return "chip ok";
+    if (["starting", "loading", "pending", "stopping"].includes(s)) return "chip warn";
+    if (["error", "failed", "broken"].includes(s)) return "chip err";
+    return "chip"; // offline / warming / empty / unconfigured → neutral grey
+  }
+  // Full slot object: delegate to the shared N1 helper.
+  // stateChipClassForSlot returns null for lemond slots (sentinel),
+  // in which case we fall back to the original string-based path.
+  const slot = stateOrSlot;
+  const fromPhase = stateChipClassForSlot(slot);
+  if (fromPhase !== null) return fromPhase;
+  return stateChipClass(slot.state);
 }
 
 // Map /api/models registry rows → the shape this file's swap popover and
@@ -869,6 +890,8 @@ function InlineSwapPopover({ slot, open, onClose, onPick }) {
   const modelsQuery = useModels();
   const hwQuery = useHardware();
   if (!open) return null;
+
+  const isContainer = slot.runtime === "container";
   const ramFreeGb = hwQuery.data?.ram?.free ?? 0;
   const compatible = (modelsQuery.data ?? [])
     .map(normalizeApiModel)
@@ -878,9 +901,40 @@ function InlineSwapPopover({ slot, open, onClose, onPick }) {
       // don't offer them when swapping a non-rocm slot.
       !(Array.isArray(m.tags) && m.tags.includes("rocmfp4") && slot.backend !== "rocm")
     );
+
+  // N2: container swap = cold systemctl restart (NOT lemond hot /v1/load).
+  // Intercept onPick for container slots: show a confirm toast and fire
+  // the same onPick (which drives restart), so the parent card drives to
+  // "starting" state immediately. The parent's onSwapPick calls useSlotSwap
+  // which triggers a restart for container slots server-side.
+  const handlePick = (m) => {
+    if (isContainer) {
+      const name = slot.name;
+      const label = m.longName || m.id;
+      window.__hal0Toast && window.__hal0Toast(
+        `Restarting ${name} to load ${label} — ~model-load seconds`,
+        "info"
+      );
+    }
+    onPick(m);
+    onClose();
+  };
+
   return (
     <div className="swap-pop" onClick={e => e.stopPropagation()}>
-      <div className="swap-pop-h">Swap model · type {slot.type}</div>
+      {/* N2: container cold-restart notice in popover header */}
+      <div className="swap-pop-h">
+        Swap model · type {slot.type}
+        {isContainer && (
+          <span
+            className="chip"
+            style={{marginLeft: 8, fontSize: 9, color: "var(--warn)", borderColor: "var(--warn-line)", background: "var(--warn-soft)"}}
+            title="Container runtime — model swap requires a container restart (~model-load seconds)"
+          >
+            · cold restart
+          </span>
+        )}
+      </div>
       {compatible.map(m => {
         const isCur = slot.model_id === m.id;
         const fits = ramFreeGb > parseSizeGB(m.size);
@@ -892,7 +946,7 @@ function InlineSwapPopover({ slot, open, onClose, onPick }) {
           <div
             key={m.id}
             className={"swap-pop-item" + (isCur ? " cur" : "")}
-            onClick={() => { onPick(m); onClose(); }}
+            onClick={() => handlePick(m)}
           >
             <div className="nm">
               {m.longName}
@@ -904,7 +958,7 @@ function InlineSwapPopover({ slot, open, onClose, onPick }) {
               type="button"
               className="swap-arrow"
               aria-label={`Load ${m.longName || m.id}`}
-              onClick={e => { e.stopPropagation(); onPick(m); onClose(); }}
+              onClick={e => { e.stopPropagation(); handlePick(m); }}
             >{Icons.chevR}</button>
           </div>
         );
