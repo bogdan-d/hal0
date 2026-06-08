@@ -32,6 +32,10 @@ from hal0.slots.state import SlotError
 if TYPE_CHECKING:
     from hal0.hardware.probe import HardwareInfo
 
+# Container-name prefix matches the convention in providers/container.py:
+# ``ExecStop = <runtime> stop -t 20 hal0-slot-<name>``.
+_CONTAINER_NAME_PREFIX = "hal0-slot-"
+
 
 # NOTE: We code against ``hal0.hardware.probe.HardwareInfo`` as the contract
 # even though the probe itself is currently a stub (raises NotImplementedError).
@@ -131,6 +135,79 @@ def _ctx_tokens_for(model_meta: dict[str, Any] | None) -> int:
     return _DEFAULT_CTX_TOKENS
 
 
+async def _container_cgroup_mem_bytes(slot_name: str) -> int:
+    """Cgroup-wide ``memory.current`` for the podman/docker container backing *slot_name*.
+
+    Container name convention: ``hal0-slot-<slot_name>`` (matches the
+    ``ExecStop`` line written by :mod:`hal0.providers.container`).
+
+    Resolution path:
+      1. Detect runtime (podman → docker) via the same logic as
+         :func:`hal0.providers.container._container_runtime`.
+      2. Run ``<runtime> inspect -f {{.State.Pid}} hal0-slot-<name>``
+         to get the container init PID.
+      3. Read ``/proc/<pid>/cgroup`` for the cgroupv2 unified path.
+      4. Read ``/sys/fs/cgroup/<path>/memory.current``.
+
+    Returns 0 on any error so the caller can fall back gracefully —
+    a missing/stopped container is not exceptional; it just means the
+    slot is not backed by a container runtime.
+
+    The returned value includes model weights + KV-cache + runtime
+    overhead as measured by the cgroup; callers MUST NOT add an
+    additional KV estimate on top.
+    """
+    import shutil
+
+    # Resolve the container runtime binary (podman preferred over docker).
+    runtime = None
+    for candidate in ("podman", "docker"):
+        found = shutil.which(candidate)
+        if found:
+            runtime = found
+            break
+    if runtime is None:
+        return 0
+
+    container_name = f"{_CONTAINER_NAME_PREFIX}{slot_name}"
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            runtime,
+            "inspect",
+            "-f",
+            "{{.State.Pid}}",
+            container_name,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=1.5)
+    except (TimeoutError, FileNotFoundError, OSError):
+        return 0
+    if proc.returncode != 0:
+        return 0
+    try:
+        pid = int(out.decode("utf-8", errors="replace").strip() or 0)
+    except ValueError:
+        pid = 0
+    if pid <= 0:
+        return 0
+    try:
+        with open(f"/proc/{pid}/cgroup", encoding="utf-8") as f:
+            cg_line = f.readline().strip()
+    except OSError:
+        return 0
+    # cgroupv2 unified hierarchy line: "0::/system.slice/podman-<id>.scope"
+    if "::" not in cg_line:
+        return 0
+    cg_rel = cg_line.split("::", 1)[1].lstrip("/")
+    try:
+        with open(f"/sys/fs/cgroup/{cg_rel}/memory.current", encoding="utf-8") as f:
+            return int(f.read().strip() or 0)
+    except (OSError, ValueError):
+        return 0
+
+
 async def build_per_slot(
     slots: list[Any],
     *,
@@ -145,10 +222,24 @@ async def build_per_slot(
         {slot_name: {"vram_mb", "ram_mb", "mem_mb", "state", "model_id"}}
 
     where ``mem_mb`` (== ``vram_mb`` on UMA) is the best-estimate resident
-    footprint: model file size (from the registry, or the FLM footprint
-    for NPU tags) plus a coarse KV-cache estimate scaled by the model's
-    context window. A loaded 25B Q5 model therefore reports ~tens of GB
-    rather than 0 — the number the dashboard memory map needs.
+    footprint.  Three attribution paths, in priority order:
+
+    1. **NPU / FLM slots**: FLM catalog footprint_gb (includes runtime + KV).
+    2. **Container slots** (podman ``hal0-slot-<name>``): ``max`` of the
+       live cgroup ``memory.current`` and the registry file-size + KV
+       estimate.  The ``max`` guards against Strix Halo (UMA) under-report:
+       model weights live in GTT (system RAM via amdgpu/TTM) and are often
+       NOT charged to the process cgroup, so a live container can report a
+       cgroup of only ~2 GB while holding a ~22 GB model.  When the cgroup
+       *does* account for weights it wins (≥ estimate); when it doesn't, the
+       estimate wins — so the figure never under-reports.
+    3. **Lemonade / lemond slots** (fallback): model file size from the
+       registry plus a coarse KV-cache estimate scaled by context window.
+
+    The cgroup probe is attempted for every non-NPU slot and naturally
+    returns 0 for lemond slots (no matching container exists), so the
+    container → lemond fallback is automatic — no explicit runtime-type
+    detection required.
 
     Non-resident slots are omitted so the caller can render them as
     holding no memory. Never raises: a registry miss yields a 0-size row
@@ -196,6 +287,9 @@ async def build_per_slot(
                     }
                     continue
                 model_mb = (entry.get("size_bytes") or 0) / (1024 * 1024)
+        # ── Registry file-size + KV estimate (baseline for ALL non-NPU) ────
+        # Compute the model-file-size + KV estimate up front so it can serve
+        # as a floor for the container cgroup probe below (see path 2).
         if model_mb <= 0 and registry is not None:
             try:
                 m = registry.get(model_id)
@@ -204,7 +298,25 @@ async def build_per_slot(
             except Exception:
                 model_mb = 0.0
         kv_mb = _kv_estimate_mb(_ctx_tokens_for(ctx_meta))
-        resident_mb = round(model_mb + kv_mb, 1)
+        estimate_mb = round(model_mb + kv_mb, 1)
+
+        # ── Container cgroup probe (path 2) ────────────────────────────────
+        # Probe the live podman/docker cgroup.  Returns 0 when no container
+        # named hal0-slot-<name> exists (i.e. for lemond slots), so the probe
+        # is a no-op for the lemond path — no runtime-type detection needed.
+        #
+        # CRITICAL (#672 review): on Strix Halo (UMA) the model WEIGHTS live
+        # in GTT (system RAM via amdgpu/TTM) and are often NOT charged to the
+        # process memory cgroup.  A live container can therefore report a
+        # cgroup of only ~2 GB (runtime/buffers) while holding a ~22 GB model.
+        # Using the cgroup unconditionally would UNDER-report.  So we take the
+        # MAX of the cgroup and the registry estimate:
+        #   • cgroup accurately includes weights → cgroup ≥ estimate → wins.
+        #   • GTT not charged (cgroup too low)   → estimate wins → no under-report.
+        cgroup_bytes = await _container_cgroup_mem_bytes(s.name)
+        cgroup_mb = round(cgroup_bytes / (1024.0 * 1024.0), 1)
+        resident_mb = max(cgroup_mb, estimate_mb)
+
         out[s.name] = {
             "vram_mb": resident_mb,
             "ram_mb": 0.0,
@@ -353,5 +465,6 @@ class CapacitySnapshot:
 __all__ = [
     "CapacityProbeError",
     "CapacitySnapshot",
+    "_container_cgroup_mem_bytes",
     "build_per_slot",
 ]
