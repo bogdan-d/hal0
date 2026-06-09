@@ -47,7 +47,7 @@ import httpx
 
 from hal0.config.loader import load_profiles_config
 from hal0.config.schema import ProfileConfig, resolve_profile_flags
-from hal0.providers._gpu import resolve_gpu_group_ids
+from hal0.providers._gpu import resolve_gpu_device_paths, resolve_gpu_group_ids
 from hal0.providers.base import ContainerSpec, Provider
 
 log = logging.getLogger(__name__)
@@ -126,6 +126,9 @@ def _render_unit(
     model_path: str,
     flags_str: str,
     runtime_bin: str | None = None,
+    device_paths: list[str] | None = None,
+    context_size: int | None = None,
+    extra_args: str | None = None,
 ) -> str:
     """Render a complete (non-drop-in) systemd unit for a container slot.
 
@@ -136,11 +139,23 @@ def _render_unit(
     ``runtime_bin``: override the container runtime binary (default: auto-detect
     via :func:`_container_runtime`).  Pass explicitly in tests to avoid
     depending on podman/docker being installed in the test environment.
+
+    ``device_paths``: explicit GPU device nodes to pass via ``--device=``
+    (default: auto-detect via :func:`resolve_gpu_device_paths`). Podman cannot
+    recurse a ``--device=/dev/dri`` directory, so we pass each node explicitly.
+
+    ``context_size``: slot context window → ``--ctx-size``.  Without it the
+    container boots at llama-server's 4096 default regardless of the slot TOML.
+
+    ``extra_args``: ``[server].extra_args`` passthrough, appended after the
+    profile flags so slot-level overrides win.
     """
     runtime = runtime_bin or _container_runtime()
+    devices = device_paths if device_paths is not None else resolve_gpu_device_paths()
     container_name = f"hal0-slot-{slot_name}"
     # Split the profile flags string into tokens for ExecStart quoting.
     flag_tokens = shlex.split(flags_str) if flags_str.strip() else []
+    extra_tokens = shlex.split(extra_args) if extra_args and extra_args.strip() else []
 
     # Build the container run argv list.
     argv: list[str] = [
@@ -148,9 +163,10 @@ def _render_unit(
         "run",
         "--rm",
         f"--name={container_name}",
-        "--device=/dev/kfd",
-        "--device=/dev/dri",
     ]
+    # Explicit GPU device nodes (podman won't recurse the /dev/dri directory).
+    for dev in devices:
+        argv.append(f"--device={dev}")
     # Numeric GIDs for video+render groups (ubuntu:24.04 has no group names).
     for gid in resolve_gpu_group_ids():
         argv.append(f"--group-add={gid}")
@@ -172,8 +188,12 @@ def _render_unit(
             model_path,
         ]
     )
-    # Append bench-tuned profile flags.
+    # Slot context window (else llama-server defaults to 4096).
+    if context_size is not None:
+        argv.extend(["--ctx-size", str(context_size)])
+    # Append bench-tuned profile flags, then [server].extra_args (slot wins).
     argv.extend(flag_tokens)
+    argv.extend(extra_tokens)
 
     # ExecStart is a single long line; systemd accepts bare argv tokens.
     exec_start = " ".join(shlex.quote(a) if " " in a else a for a in argv)
@@ -272,7 +292,7 @@ class ContainerProvider(Provider):
                 *flag_tokens,
             ],
             mounts=[(_MODEL_STORE_MOUNT, _MODEL_STORE_MOUNT)],
-            devices=["/dev/kfd", "/dev/dri"],
+            devices=resolve_gpu_device_paths(),
             group_add=[str(g) for g in resolve_gpu_group_ids()],
             security_opt=["apparmor=unconfined", "seccomp=unconfined"],
             port=port,
@@ -341,8 +361,21 @@ class ContainerProvider(Provider):
         flags_str = resolve_profile_flags(profile)
         model_path = _resolve_model_path(model_info)
 
+        model_table = slot_cfg.get("model") or {}
+        context_size = model_table.get("context_size") if isinstance(model_table, dict) else None
+        server_table = slot_cfg.get("server") or {}
+        extra_args = server_table.get("extra_args") if isinstance(server_table, dict) else None
+
         unit_path = self._unit_path(slot_name)
-        unit_text = _render_unit(slot_name, profile.image, port, model_path, flags_str)
+        unit_text = _render_unit(
+            slot_name,
+            profile.image,
+            port,
+            model_path,
+            flags_str,
+            context_size=context_size,
+            extra_args=extra_args,
+        )
 
         log.info(
             "container.unit_write",
@@ -531,6 +564,10 @@ def resolved_command_for_slot(
         model_table.get("default", "") if isinstance(model_table, dict) else str(model_table)
     )
     effective_model = model_path or str(default_model or "")
+    context_size = model_table.get("context_size") if isinstance(model_table, dict) else None
+    server_table = slot_cfg.get("server") or {}
+    extra_args = server_table.get("extra_args") if isinstance(server_table, dict) else None
+    extra_tokens = shlex.split(extra_args) if extra_args and extra_args.strip() else []
 
     argv: list[str] = [
         profile.image,
@@ -541,7 +578,10 @@ def resolved_command_for_slot(
     ]
     if effective_model:
         argv += ["--model", effective_model]
+    if context_size is not None:
+        argv += ["--ctx-size", str(context_size)]
     argv.extend(flag_tokens)
+    argv.extend(extra_tokens)
     return argv
 
 
