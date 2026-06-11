@@ -62,6 +62,7 @@ from typing import Any
 
 import httpx
 
+from hal0.dispatcher._npu_common import is_container_npu_cfg
 from hal0.errors import Hal0Error
 from hal0.lemonade.client import LemonadeClient
 from hal0.lemonade.errors import LemonadeError
@@ -128,12 +129,58 @@ class FLMTrioRouter:
         *,
         http_client: httpx.AsyncClient | None = None,
         timeout_s: float = _DEFAULT_TIMEOUT_S,
+        slot_manager: Any | None = None,
     ) -> None:
         self._lemonade = lemonade_client
         self._http_client = http_client
         self._timeout_s = timeout_s
+        self._slot_manager = slot_manager
 
     # ── discovery ──────────────────────────────────────────────────
+
+    async def _container_npu_url(self) -> str | None:
+        """Return static-port URL for a containerized npu slot, or None.
+
+        Returns non-None only when ALL hold:
+          - slot_manager is wired
+          - "npu" slot config is a containerized NPU slot
+            (see :func:`hal0.dispatcher._npu_common.is_container_npu_cfg`)
+          - slot state is "ready" or "serving" (SERVING is READY with an
+            inference in flight — the container still answers concurrent
+            STT/embed requests)
+
+        Wraps all accessor calls in try/except so a missing config,
+        SlotConfigError, or any accessor bug falls through to the
+        lemond walk without crashing dispatch.
+        """
+        if self._slot_manager is None:
+            return None
+        try:
+            cfg = await self._slot_manager.get_config("npu")
+        except Exception as exc:
+            log.debug(
+                "flm_trio.container_resolve_failed",
+                extra={"error": str(exc), "error_type": type(exc).__name__},
+            )
+            return None
+        if not is_container_npu_cfg(cfg):
+            return None
+        port = cfg.get("port")
+        if not port:
+            return None
+        try:
+            slot = await self._slot_manager.status("npu")
+            # SlotState is a StrEnum — .value is the wire string.
+            state_val = slot.state.value
+        except Exception as exc:
+            log.debug(
+                "flm_trio.container_resolve_failed",
+                extra={"error": str(exc), "error_type": type(exc).__name__},
+            )
+            return None
+        if state_val not in {"ready", "serving"}:
+            return None
+        return f"http://127.0.0.1:{int(port)}"
 
     async def find_flm_chat_backend_url(self) -> str | None:
         """Return the FLM child's ``backend_url`` if one is loaded.
@@ -158,6 +205,14 @@ class FLMTrioRouter:
         at the dispatch site), and bubbling the LemonadeError up here
         would force every call site to repeat the same wrapping.
         """
+        # Phase A: container-first resolution. When the npu slot is a ready
+        # container slot its port is static in slot config — skip the lemond
+        # health walk entirely. Legacy lemond walk stays as fallback (removed
+        # in Phase E).
+        container_url = await self._container_npu_url()
+        if container_url is not None:
+            return container_url
+
         try:
             health = await self._lemonade.health()
         except LemonadeError as exc:

@@ -58,7 +58,12 @@ _IMAGE_FLM_ROOT = "/opt/fastflowlm"
 _DEFAULT_FLM_ROOT = "/opt/hal0/flm-ubuntu"
 # FLM's per-user model cache. Bind-mounted writable so `flm pull` downloads
 # survive container restarts. (Still used by the serving container_spec below.)
-_DEFAULT_FLM_MODELS_DIR = "/var/lib/hal0/flm-models"
+_DEFAULT_FLM_MODELS_DIR = "/var/lib/hal0/.config/flm/models"
+# FLM hardcodes ~/.config/flm/models as its model cache. The container runs
+# as the hal0 user with HOME=/var/lib/hal0, so the cache resolves to this
+# path. The host source must be the SAME directory the host flm binary uses,
+# otherwise flm reports every model as not-installed and hides them from
+# the dashboard.
 
 # ── Host FLM (catalog probe + pull) ─────────────────────────────────────────────
 # The catalog probe and model pulls run the HOST flm binary directly — NOT the
@@ -153,9 +158,18 @@ class FLMProvider(Provider):
         ctx = slot_cfg.get("ctx_size") or slot_cfg.get("defaults", {}).get("context_size", 8192)
         flm_tag = model_info.get("flm_tag") or model_info.get("_model_key") or "qwen3:0.6b"
 
-        defaults = slot_cfg.get("defaults", {})
-        load_asr = "1" if defaults.get("load_asr") else "0"
-        load_embed = "1" if defaults.get("load_embed") else "0"
+        npu_table = slot_cfg.get("npu") or {}
+        defaults = slot_cfg.get("defaults") or {}
+        if slot_cfg.get("npu") is not None:
+            # [npu] table is PRIMARY when present — explicit asr=false must
+            # win even if stale legacy defaults say otherwise.
+            load_asr = "1" if npu_table.get("asr") else "0"
+            load_embed = "1" if npu_table.get("embed") else "0"
+        else:
+            # Legacy lemond-era fallback (removed in Phase E): truthy check,
+            # same semantics as before the [npu] table existed.
+            load_asr = "1" if defaults.get("load_asr") else "0"
+            load_embed = "1" if defaults.get("load_embed") else "0"
 
         return {
             "HAL0_FLM_TAG": str(flm_tag),
@@ -287,15 +301,18 @@ class FLMProvider(Provider):
             # apparmor=unconfined is required in LXC; on bare metal a
             # tailored profile would be tighter but Strix Halo deployments
             # under Proxmox LXC are the primary target.
-            security_opt=["apparmor=unconfined"],
+            # seccomp=unconfined matches the GPU slot rendering so
+            # _render_unit_from_spec doesn't need special-casing here.
+            security_opt=["apparmor=unconfined", "seccomp=unconfined"],
             group_add=[str(render_gid)] if render_gid is not None else [],
             port=port,
             # FLM's /v1/* server needs to be reachable from the dispatcher
             # at 127.0.0.1:<port>. Use port-mapping rather than network=host
             # so multiple slots can coexist with overlapping internal ports.
+            # The renderer derives --publish=127.0.0.1:<port>:<port> from
+            # spec.port declaratively — no hand-rolled "-p" here.
             network_mode="",
             extra_args=[
-                f"-p 127.0.0.1:{port}:{port}",
                 # NPU model weights are pinned in DMA-locked memory; this
                 # is the same flag haloai's systemd unit sets.
                 "--ulimit memlock=-1",
