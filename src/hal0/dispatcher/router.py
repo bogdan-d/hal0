@@ -8,7 +8,7 @@ dispatch error and leaves slot management to the caller.
 Resolution order (PLAN.md §3, ported from haloai ``lib/dispatcher.py``):
 
   1. **registry** — exact :class:`ModelRegistry` binding for the requested
-     model id (or path-default for ``/embeddings`` and ``/rerank``).  If
+     model id (or path-default for ``/embeddings``, ``/rerank``, and ``/rerankings``).  If
      the bound upstream is online, forward there.
   2. **passthrough** — pick any upstream whose cached ``/v1/models``
      already advertises the requested model id.
@@ -157,8 +157,24 @@ _RECOVERABLE_TRANSPORT_ERRORS = (
 # Mirrors haloai lib/dispatcher.py:_DEFAULT_MODEL etc.
 _DEFAULT_MODEL = "chat"
 _EMBED_DEFAULT = "embed"
-_RERANK_DEFAULT = "embed"
+# Phase C: /rerank paths now route to a dedicated rerank slot (vulkan llama-
+# server with --reranking, port 8083). Previously this pointed at "embed".
+_RERANK_DEFAULT = "rerank"
 _TTS_DEFAULT = "tts"
+
+# Outgoing upstream path rewrites applied before forwarding.
+# Key: incoming /v1/* path (as-is from the client).
+# Value: replacement path to use in the upstream URL.
+#
+# /v1/rerankings → /v1/rerank
+#   hal0's public reranking route is /v1/rerankings (OpenAI-compat shape).
+#   llama-server's native reranking endpoint is POST /rerank (not /rerankings).
+#   The embed slot never served /v1/rerankings — this rewrite only fires for
+#   the dispatcher-selected rerank upstream; the lemonade fall-through
+#   (/api/routes/lemonade_proxy) is NOT touched by this table.
+_UPSTREAM_PATH_REWRITES: dict[str, str] = {
+    "/v1/rerankings": "/v1/rerank",
+}
 
 
 # ── Typed errors ──────────────────────────────────────────────────────────────
@@ -717,12 +733,10 @@ class Dispatcher:
         swallowed so the subsequent ready-check, not this helper, decides
         the client-facing outcome.
         """
-        from hal0.slots.state import SlotState
-
         assert self._slot_manager is not None  # narrowed by forward()
         slot_name = call.slot_name
-        current = self._slot_manager._current_state(slot_name)
-        if current in (SlotState.READY, SlotState.SERVING, SlotState.IDLE):
+        # Ready-set: READY | SERVING | IDLE — single source per #696.
+        if self._slot_manager.is_ready_for_dispatch(slot_name):
             # Model is already loaded under whatever backend it loaded with;
             # nothing to do. (A declared≠actual drift is surfaced by the
             # status enrichment, not corrected mid-request.)
@@ -779,20 +793,19 @@ class Dispatcher:
     def _check_slot_ready_for_dispatch(self, call: UpstreamCall) -> None:
         """Raise :class:`SlotLoading` if the target slot isn't ready to serve.
 
-        Ready set: ``READY``, ``SERVING``, ``IDLE``.  Any other state means
+        Ready set: ``READY``, ``SERVING``, ``IDLE`` (per #696 — single source
+        in :meth:`SlotManager.is_ready_for_dispatch`).  Any other state means
         the slot is mid-lifecycle (``OFFLINE``, ``PULLING``, ``STARTING``,
         ``WARMING``, ``UNLOADING``, ``ERROR``) and forwarding would either
         ConnectError or get a raw 503 from llama-server's "still loading"
         gate.  We raise a typed error here so the middleware can emit a
         structured envelope plus a ``Retry-After`` header.
         """
-        from hal0.slots.state import SlotState
-
         assert self._slot_manager is not None  # narrowed by caller
-        current = self._slot_manager._current_state(call.slot_name)
-        if current in (SlotState.READY, SlotState.SERVING, SlotState.IDLE):
+        if self._slot_manager.is_ready_for_dispatch(call.slot_name):
             return
 
+        current = self._slot_manager.state(call.slot_name)
         raise SlotLoading(
             f"slot {call.slot_name!r} is {current.value} — not ready to serve",
             details=self._build_loading_response(call, current),
@@ -1257,9 +1270,16 @@ def _join_url(upstream_url: str, request_path: str) -> str:
     Upstream URLs end in ``/v1`` by convention (per upstreams.toml).  The
     incoming request path is ``/v1/chat/completions`` etc., so we strip
     the leading ``/v1`` before joining to avoid ``/v1/v1/...``.
+
+    Before joining, applies ``_UPSTREAM_PATH_REWRITES`` so that e.g.
+    ``/v1/rerankings`` is rewritten to ``/v1/rerank`` for llama-server
+    backends (which serve POST ``/rerank`` natively, not ``/rerankings``).
     """
+    # Apply path rewrites before stripping /v1 — rewrites operate on the full
+    # incoming path so both the key and value already carry the /v1 prefix.
+    effective_path = _UPSTREAM_PATH_REWRITES.get(request_path, request_path)
     base = upstream_url.rstrip("/")
-    suffix = request_path[3:] if request_path.startswith("/v1") else request_path
+    suffix = effective_path[3:] if effective_path.startswith("/v1") else effective_path
     if not suffix.startswith("/"):
         suffix = "/" + suffix
     return base + suffix

@@ -591,27 +591,43 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
         "image": "ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server",
         "flags": "-fa on -ctk q8_0 -ctv q8_0 -b 512 -ub 512 --parallel 1 --threads 8 --no-mmap",
         "mtp": False,
+        "device_class": "gpu",
     },
     "dense-mtp-rocmfp4": {
         "image": "ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server",
         "flags": "-fa on -ctk q8_0 -ctv q8_0 -b 512 -ub 512 --parallel 1 --threads 8 --no-mmap",
         "mtp": True,
+        "device_class": "gpu",
     },
     "vulkan-std": {
         "image": "ghcr.io/hal0ai/amd-strix-halo-toolboxes:vulkan-radv-server",
         "flags": "-fa on -b 512 -ub 512 --parallel 1 --threads 8 --no-mmap",
         "mtp": False,
+        "device_class": "gpu",
     },
     "flm-npu": {
         "image": "ghcr.io/hal0ai/hal0-toolbox-flm:v1",
         "flags": "",
         "mtp": False,
+        "device_class": "npu",
     },
     "kokoro-cpu": {
         "image": "ghcr.io/hal0ai/hal0-toolbox-kokoro:v1",
         "flags": "--model_path /mnt/ai-models/local/kokoro-v1/kokoro-onnx",
         "mtp": False,
+        "device_class": "cpu",
     },
+}
+
+#: Preselect map for the create-modal device picker and Phase E
+#: lemonade-migration defaults.  Keys are ``DeviceLiteral`` values (gpu-rocm,
+#: gpu-vulkan, cpu, npu); values are seed profile names that best represent
+#: each device class.
+DEVICE_DEFAULT_PROFILES: dict[str, str] = {
+    "gpu-rocm": "moe-rocmfp4",
+    "gpu-vulkan": "vulkan-std",
+    "cpu": "kokoro-cpu",
+    "npu": "flm-npu",
 }
 
 
@@ -642,6 +658,14 @@ class ProfileConfig(BaseModel):
         description=(
             "When true, the MTP draft-speculation bundle is appended to ``flags`` "
             "at resolve time (see ``resolve_profile_flags()``)."
+        ),
+    )
+    device_class: Literal["gpu", "cpu", "npu", "img"] = Field(
+        default="gpu",
+        description=(
+            "Device class this profile targets.  Drives drawer profile filtering "
+            "and create-modal device defaults.  ``'img'`` is reserved for Phase D "
+            "(ComfyUI image-generation slots) and is not yet used."
         ),
     )
 
@@ -1404,8 +1428,10 @@ class MemoryEmbeddingConfig(BaseModel):
         wrapper calls ``rerank_url`` after vector retrieval and reorders
         candidates by relevance score. Failures fall through to the
         original vector ordering — never block memory_search.
-      - ``rerank_url`` points at hal0's built-in rerank slot (port 8086
-        per auto-memory ``hal0-rerank-slot-wiring``).
+      - ``rerank_url`` points at hal0's built-in rerank container slot
+        (port 8083, seeded by ``installer/etc-hal0/slots/rerank.toml``).
+        The old value 8086 was the retired embed-rerank combined slot;
+        ``hal0.toml`` overrides take precedence over this default.
 
     G3 (pin embedding model) deliberately ships the *existing* default
     so users who do not flip the toggle see no behavioral change. Future
@@ -1434,12 +1460,13 @@ class MemoryEmbeddingConfig(BaseModel):
         ),
     )
     rerank_url: str = Field(
-        default="http://127.0.0.1:8086",
+        default="http://127.0.0.1:8083",
         description=(
             "Base URL of the llama.cpp rerank endpoint. The wrapper "
             "POSTs to ``{rerank_url}/rerank`` with "
             "``{model, query, documents}`` per llama.cpp's reranking "
-            "protocol. Defaults to hal0's bundled embed-rerank slot."
+            "protocol. Defaults to hal0's bundled rerank container slot "
+            "(port 8083). hal0.toml overrides win."
         ),
     )
     rerank_over_fetch_factor: int = Field(
@@ -1663,6 +1690,7 @@ __all__ = [
     "CAPABILITIES_SCHEMA_VERSION_LEGACY",
     "CURRENT_SCHEMA_VERSION",
     "DEFAULT_DEVICE",
+    "DEVICE_DEFAULT_PROFILES",
     "MTP_FLAG_BUNDLE",
     "SEED_PROFILES",
     "AgentAuthConfig",
