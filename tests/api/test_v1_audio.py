@@ -74,22 +74,35 @@ def _seed_stt_upstream(client: TestClient, port: int = 8089) -> None:
     _pin_slot_ready(client)
 
 
-def _seed_tts_upstream(client: TestClient, port: int = 8090) -> None:
-    """Register a fake TTS slot the dispatcher's legacy fallback will land on.
+def _seed_tts_upstream(client: TestClient, port: int = 8084) -> None:
+    """Register the TTS upstream EXACTLY as production does: a container remote.
 
-    Same fallthrough logic as STT — the dispatcher routes unknown ``model``
-    ids to the ``chat`` slot, so we register there.
+    POST /v1/audio/speech is path-routed to the ``tts`` slot (B4).  The kokoro
+    container registers via ``SlotManager._register_container_upstream`` as
+    ``kind="remote"`` with ``slot_name="tts"`` — the path-pin rules in
+    ``hal0.dispatcher.proxy`` accept that container-backed remote (C1 fix), so
+    tests must exercise the same shape rather than a kind="slot" stand-in.
+
+    The container readiness gate in ``Dispatcher.forward`` probes systemctl +
+    /health for container remotes; no real unit exists under test, so we stub
+    ``container_readiness_check`` to report ready.
     """
     client.app.state.upstreams.upsert(
         Upstream(
-            name="chat",
-            kind="slot",
+            name="tts",
+            kind="remote",
             url=f"http://127.0.0.1:{port}/v1",
-            slot_name="chat",
+            slot_name="tts",  # container-backed marker (#656)
             auth_style="none",
+            warmup_strategy="none",
+            advertise_models=True,
         )
     )
-    _pin_slot_ready(client)
+
+    async def _ready(_slot_name: str) -> tuple[bool, str]:
+        return True, "ready"
+
+    client.app.state.dispatcher._slot_manager.container_readiness_check = _ready
 
 
 def _install_mock_transport(client: TestClient, handler: httpx.MockTransport | object) -> None:
@@ -282,6 +295,45 @@ def test_v1_audio_speech_happy_path(client: TestClient) -> None:
     assert r.status_code == 200, r.text
     assert r.content == fake_wav
     assert r.headers["content-type"].startswith("audio/wav")
+
+
+def test_v1_audio_speech_kokoro_v1_reaches_tts_upstream(client: TestClient) -> None:
+    """model='kokoro-v1' on /audio/speech must reach the tts CONTAINER remote.
+
+    Kokoro-v1 is the client-facing model id but the container advertises
+    'kokoro', so every model-based path (Step 0 preempt, registry,
+    passthrough) misses.  The legacy path-pin must resolve the
+    kind="remote" container upstream (C1) — exercised through the REAL
+    dispatch chain: route → dispatcher.dispatch → forward.
+    """
+    _seed_tts_upstream(client, port=8084)
+
+    fake_wav = b"RIFF\x24\x00\x00\x00WAVEfmt " + b"\x00" * 32
+
+    captured: dict[str, object] = {}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        captured["url"] = str(req.url)
+        return httpx.Response(
+            200,
+            content=fake_wav,
+            headers={"content-type": "audio/wav"},
+        )
+
+    _install_mock_transport(client, handler)
+
+    r = client.post(
+        "/v1/audio/speech",
+        json={"model": "kokoro-v1", "input": "hello world", "voice": "af_bella"},
+    )
+
+    assert r.status_code == 200, r.text
+    assert r.content == fake_wav
+    # The forward MUST target the tts container remote's port — not the
+    # lemonade gateway (13305) and not the chat slot.
+    assert captured.get("url") is not None, "handler never called — dispatch failed"
+    assert "127.0.0.1:8084" in str(captured["url"]), captured["url"]
+    assert str(captured["url"]).endswith("/audio/speech")
 
 
 # ── Sanity: the scrubber leaves non-audio routes alone ────────────────────────

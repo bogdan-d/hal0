@@ -45,8 +45,10 @@ from typing import Any
 
 import httpx
 
-from hal0.config.loader import load_profiles_config
-from hal0.config.schema import ProfileConfig, resolve_profile_flags
+# Aliased to the old private name so existing test patch targets
+# (``hal0.providers.container._resolve_profile``) keep working.
+from hal0.config.loader import resolve_profile as _resolve_profile
+from hal0.config.schema import resolve_profile_flags
 from hal0.providers._gpu import resolve_gpu_device_paths, resolve_gpu_group_ids
 from hal0.providers.base import ContainerSpec, Provider
 
@@ -88,19 +90,6 @@ def _container_runtime() -> str:
 _HEALTH_POLL_INTERVAL_S = 2.0
 _HEALTH_TIMEOUT_S = 180.0
 _HEALTH_REQUEST_TIMEOUT_S = 3.0
-
-
-def _resolve_profile(profile_name: str) -> ProfileConfig:
-    """Load profiles.toml and return the named profile.
-
-    Raises:
-        KeyError: If the profile name is not in the catalog.
-    """
-    catalog = load_profiles_config()
-    if profile_name not in catalog.profile:
-        available = sorted(catalog.profile.keys())
-        raise KeyError(f"profile {profile_name!r} not found in catalog; available: {available}")
-    return catalog.profile[profile_name]
 
 
 def _resolve_model_path(model_info: dict[str, Any]) -> str:
@@ -318,6 +307,25 @@ def _render_unit_from_spec(
     return _unit_skeleton(slot_name, runtime, exec_start)
 
 
+def _spec_provider_for(slot_cfg: dict[str, Any]) -> Any | None:
+    """Spec-building provider for non-llama container slots, or None.
+
+    llama-server slots (GPU profiles) use the flag-bundle _render_unit path.
+    FLM (NPU) and Kokoro (CPU TTS) know their own argv; they build a
+    ContainerSpec rendered by _render_unit_from_spec. ComfyUI joins in
+    Phase D.
+    """
+    if str(slot_cfg.get("device", "")) == "npu":
+        from hal0.providers.flm import FLMProvider
+
+        return FLMProvider()
+    if str(slot_cfg.get("type", "")) == "tts" or str(slot_cfg.get("profile", "")) == "kokoro-cpu":
+        from hal0.providers.kokoro import KokoroProvider
+
+        return KokoroProvider()
+    return None
+
+
 class ContainerProvider(Provider):
     """Podman-container-per-slot inference backend.
 
@@ -408,6 +416,11 @@ class ContainerProvider(Provider):
         """Probe GET /health on the container port.
 
         For llama-server slots /health returns 200 when ready.
+        kokoro-server returns 200 with ``{"model_loaded": false}`` while
+        weights are still loading (multi-minute on auto-download) — when the
+        body is JSON and carries a ``model_loaded`` key, ok is gated on
+        ``model_loaded is True``. Bodies without the key (llama-server) keep
+        the plain-200 behavior.
         FLM containers have no /health endpoint — they return 404 there.
         When /health returns a non-connection error (e.g. 404), fall back to
         GET /v1/models; 200 there means the server is up and healthy.
@@ -421,6 +434,16 @@ class ContainerProvider(Provider):
             async with httpx.AsyncClient(timeout=_HEALTH_REQUEST_TIMEOUT_S) as client:
                 resp = await client.get(health_url)
                 if resp.status_code == 200:
+                    try:
+                        body = resp.json()
+                    except ValueError:
+                        body = None
+                    if isinstance(body, dict) and "model_loaded" in body:
+                        loaded = body.get("model_loaded") is True
+                        return {
+                            "ok": loaded,
+                            "status": "healthy" if loaded else "loading",
+                        }
                     return {"ok": True, "status": "healthy"}
                 # Non-200 (e.g. 404 from FLM) → try /v1/models fallback.
                 models_resp = await client.get(models_url)
@@ -482,30 +505,32 @@ class ContainerProvider(Provider):
         asyncio.to_thread-friendly path — SlotManager awaits the slot spawn
         via ``await self._spawn_locked(...)``).
 
-        NPU branch: when ``slot_cfg["device"] == "npu"``, delegates to
-        :class:`~hal0.providers.flm.FLMProvider` for the :class:`ContainerSpec`
-        and renders the unit via :func:`_render_unit_from_spec` (generic
-        spec-rendered path). All other devices use the llama-server path.
+        Spec-provider dispatch: :func:`_spec_provider_for` maps NPU→FLM and
+        TTS/kokoro-cpu→Kokoro slots to their respective providers, which build a
+        :class:`ContainerSpec` rendered by :func:`_render_unit_from_spec`.
+        GPU/llama-server slots fall through to the flag-bundle :func:`_render_unit`
+        path.
         """
         slot_name: str = str(slot_cfg.get("name", ""))
 
-        # ── NPU branch (FLM container) ─────────────────────────────────────────
-        if str(slot_cfg.get("device", "")) == "npu":
-            from hal0.providers.flm import FLMProvider
+        # ── Spec-provider dispatch (NPU/FLM, TTS/Kokoro, …) ───────────────────
+        spec_provider = _spec_provider_for(slot_cfg)
+        if spec_provider is not None:
+            # Loud-fail for NPU slots only: a missing FLM tag must not silently
+            # fall through to FLM's legacy default (kept in build_env for the
+            # lemonade path until Phase E). Kokoro is self-managed and needs no
+            # registry tag — the tag check fires ONLY when device == "npu".
+            if str(slot_cfg.get("device", "")) == "npu":
+                model_table = slot_cfg.get("model") or {}
+                tag = (
+                    model_info.get("flm_tag")
+                    or model_info.get("_model_key")
+                    or (model_table.get("default") if isinstance(model_table, dict) else None)
+                )
+                if not tag:
+                    raise ValueError("npu slot has no FLM model tag — set [model].default")
 
-            # Loud-fail parity with the GPU path's _resolve_model_path: a
-            # missing tag must not silently fall through to FLM's legacy
-            # default (kept in build_env for the lemonade path until Phase E).
-            model_table = slot_cfg.get("model") or {}
-            tag = (
-                model_info.get("flm_tag")
-                or model_info.get("_model_key")
-                or (model_table.get("default") if isinstance(model_table, dict) else None)
-            )
-            if not tag:
-                raise ValueError("npu slot has no FLM model tag — set [model].default")
-
-            spec = FLMProvider().container_spec(slot_cfg, model_info)
+            spec = spec_provider.container_spec(slot_cfg, model_info)
             unit_text = _render_unit_from_spec(
                 slot_name,
                 spec,
@@ -777,6 +802,7 @@ def resolved_command_for_slot(
 __all__ = [
     "ContainerProvider",
     "_render_unit_from_spec",
+    "_spec_provider_for",
     "container_provider",
     "resolved_command_for_slot",
 ]
