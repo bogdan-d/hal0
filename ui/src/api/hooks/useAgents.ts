@@ -32,8 +32,8 @@
 // path are swallowed — we don't want to drown the console on every
 // 5s tick.
 
-import { useQuery, type UseQueryResult } from '@tanstack/react-query'
-import { apiGet, Hal0Error } from '../client'
+import { useMutation, useQuery, useQueryClient, type UseQueryResult } from '@tanstack/react-query'
+import { apiGet, apiPost, apiPut, Hal0Error } from '../client'
 import { ENDPOINTS } from '../endpoints'
 
 // ── Types ──────────────────────────────────────────────────────────
@@ -403,6 +403,83 @@ export function useSidebarAgentRollup(): SidebarAgentRollup {
     mcpPip: mcp.data ?? { state: 'unknown', servers: [] },
     loading: agents.isLoading,
   }
+}
+
+// ── /api/agent/approvals — full list (for ApprovalModal) ───────────────────
+
+export function useApprovalList(): UseQueryResult<ApprovalList> {
+  return useQuery<ApprovalList>({
+    queryKey: ['agents', 'approvals', 'list'],
+    queryFn: async () => {
+      try {
+        const body = await apiGet<ApprovalList>(ENDPOINTS.agentApprovals)
+        return { approvals: Array.isArray(body?.approvals) ? body.approvals : [] }
+      } catch (err) {
+        if (_isMissing(err)) {
+          _warnMissing(ENDPOINTS.agentApprovals, err)
+          return { approvals: [] }
+        }
+        throw err
+      }
+    },
+    refetchInterval: SIDEBAR_POLL_MS,
+    refetchOnWindowFocus: true,
+  })
+}
+
+export function useApproveApproval() {
+  const qc = useQueryClient()
+  return useMutation({
+    // TODO endpoints.ts (ui-sweep-b owns) — inline paths for now
+    mutationFn: (id: string) =>
+      apiPost<unknown>(`/api/agent/approvals/${encodeURIComponent(id)}/approve`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['agents', 'approvals'] }),
+  })
+}
+
+export function useDenyApproval() {
+  const qc = useQueryClient()
+  return useMutation({
+    // TODO endpoints.ts (ui-sweep-b owns) — inline paths for now
+    mutationFn: (id: string) =>
+      apiPost<unknown>(`/api/agent/approvals/${encodeURIComponent(id)}/deny`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['agents', 'approvals'] }),
+  })
+}
+
+// ── Persona update mutation ──────────────────────────────────────────────────
+// PUT /api/agents/{id}/personas/{pid} — built by backend-dev (#task7).
+// 404 degrades gracefully: hook throws so the modal can show an error toast.
+
+// Partial-patch body for PUT /api/agents/{id}/personas/{pid} (PR #736).
+// id is immutable; all other fields are optional.
+export interface PersonaUpdateBody {
+  display_name?: string
+  summary?: string
+  system_prompt?: string
+  tools_allowed?: string[]
+  memory_namespace?: string
+  preferred_upstream?: string
+  preferred_model?: string
+  approval?: {
+    default_policy?: string
+    auto_approve?: string[]
+    require_approval?: string[]
+  }
+}
+
+export function usePersonaUpdate(agentId: string) {
+  const qc = useQueryClient()
+  return useMutation({
+    // Contract: PUT /api/agents/{id}/personas/{pid} → 200 full persona detail
+    // TODO endpoints.ts (ui-sweep-b owns) — inline path for now
+    mutationFn: ({ pid, body }: { pid: string; body: PersonaUpdateBody }) =>
+      apiPut<unknown>(
+        `/api/agents/${encodeURIComponent(agentId)}/personas/${encodeURIComponent(pid)}`,
+        body as unknown as Record<string, unknown>,
+      ),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['agents', 'personas', agentId] }),
+  })
 }
 
 // ── /api/agents/persona-enums ────────────────────────────────────────
