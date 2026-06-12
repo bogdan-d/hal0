@@ -2,7 +2,8 @@
 
 The OmniRouter only talks to two collaborators in production:
 
-  * :class:`SlotManager` — for ``iter_configs`` + ``route_for_request``.
+  * :class:`SlotManager` — for ``iter_configs``, ``loaded_slot`` and
+    ``resolve_for_request``.
   * hal0-api's own ``/v1`` HTTP surface — for ``/v1/chat/completions``
     and the seven other tool endpoints.
 
@@ -25,8 +26,8 @@ class FakeSlotManager(SlotManagerLike):
     """Tiny stub that satisfies :class:`SlotManagerLike`.
 
     Tests build it with a list of slot config dicts; ``iter_configs``
-    just returns the list and ``route_for_request`` replays the
-    routing logic from the real ``SlotManager.route_for_request``
+    just returns the list and ``resolve_for_request`` replays the
+    routing logic from the real ``SlotManager.resolve_for_request``
     (type match + default + label filter + enabled fall-through).
     """
 
@@ -35,6 +36,12 @@ class FakeSlotManager(SlotManagerLike):
 
     async def iter_configs(self) -> list[dict[str, Any]]:
         return list(self._configs)
+
+    async def loaded_slot(self, name: str) -> LoadedSlot | None:
+        cfg = next((c for c in self._configs if c.get("name") == name), None)
+        if cfg is None:
+            return None
+        return _loaded_slot_from_config(cfg)
 
     async def route_for_request(
         self,

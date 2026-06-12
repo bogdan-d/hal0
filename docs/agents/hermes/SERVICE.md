@@ -115,21 +115,18 @@ the watchdog after 60s and systemd restarts us.
 
 ## Failure modes you'll actually hit
 
-### Lemonade unload deadlock (`hal0_lemonade_unload_gpu_cleanup_hang`)
+### Inference unavailable (`hal0-api` not serving `/v1`)
 
-`hal0-lemonade.service` has a known GPU-cleanup-after-unload hang where
-NRestarts stays 0, the port stays open, and `/api/v1/health` times out
-forever. The unit is intentionally wired with `Wants=hal0-lemonade.service`
-(NOT `Requires=` or `BindsTo=`) so this failure mode doesn't pin the
-agent in a permanently-broken "active (running)" state.
-
-When you see chat failing but `systemctl status hal0-agent@hermes`
-green, check lemonade first:
+Hermes reaches inference through `HAL0_INFERENCE_BASE` (default
+`http://127.0.0.1:8080`), which is the hal0-api gateway that fronts
+the container-runtime inference slots. When chat fails but
+`systemctl status hal0-agent@hermes` is green, check that hal0-api is
+serving and that at least one inference slot is ready:
 
 ```bash
-ss -tlnp | grep 13305          # port still listening?
-curl -fsS http://127.0.0.1:13305/api/v1/health  # times out?
-systemctl restart hal0-lemonade  # instant fix
+curl -fsS http://127.0.0.1:8080/api/status   # hal0-api up?
+hal0 slot list                                # any slot READY?
+systemctl restart hal0-api                   # restart hal0-api if down
 ```
 
 ### `hermes binary not found`
@@ -152,12 +149,13 @@ ss -tlnp | grep 9119
 hal0-agent hermes stop   # SIGTERMs by venv + agent id; ignores other dashboards
 ```
 
-### `:13305` lemonade not reachable from the agent
+### Inference base not reachable from the agent
 
-The agent's `HAL0_LEMONADE_BASE` env is wrong (overridden in
-`/etc/hal0/agents/hermes.env`) or lemonade is bound to a different port.
-The default (`127.0.0.1:13305`) matches `installer/install.sh`'s
-lemonade bind — only override if you know why.
+The agent's `HAL0_INFERENCE_BASE` env is wrong (overridden in
+`/etc/hal0/agents/hermes.env`) or hal0-api is bound to a different
+port/address. The default (`http://127.0.0.1:8080`) matches the
+hal0-api bind in `installer/install.sh` — only override if you have
+a non-standard layout.
 
 ## Customising the unit
 

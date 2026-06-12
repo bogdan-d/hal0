@@ -15,33 +15,28 @@
 
 hal0 turns a Linux box — ideally a Ryzen AI Max+ 395 with 128 GB of
 unified memory — into a polished, OpenAI-compatible inference appliance.
-A unified runtime, hardware-aware slots, prewired chat UI, signed
-self-update. One command installs the lot.
+Hardware-aware slots, prewired chat UI, signed self-update. One command
+installs the lot.
 
-It is not another llama-server wrapper. v0.2 ships **AMD's Lemonade
-Server as the unified inference runtime** behind a thin hal0 capability
-layer. Every workload — chat, embed, rerank, STT, TTS, image gen —
-runs as a real, named slot in `capabilities.toml`; the API surface
-covers the full OpenAI-compatible matrix; the dashboard is for
-operating the box, with a built-in chat page for smoke-tests.
+Every inference workload runs as its own **podman container** under a
+`hal0-slot@<name>.service` unit. `hal0-api` on `:8080` is the sole
+control plane — it owns slot state machines, dispatches OpenAI-compatible
+`/v1/*` requests to the right slot port, and serves the dashboard. No
+shared inference daemon; no extra process to babysit.
 
 ```sh
 curl -fsSL https://hal0.dev/install.sh | bash
 ```
 
-> **Status:** **v0.3.2-alpha.1** — first release on the Lemonade runtime.
-> Six per-modality toolbox containers, the `hal0-slot@.service` template,
-> and the legacy Provider stack all retired in favour of one
-> `hal0-lemonade.service` supervising a single `lemond` daemon. v0.1.x
-> installs do **not** auto-upgrade — see
-> [https://hal0.dev/docs/v0.2-upgrade](https://hal0.dev/docs/v0.2-upgrade) for the back-up + wipe
-> + reinstall procedure and the `hal0 registry import` recovery path.
-> First run lands a **bundle picker** (`hal0-Lite` / `Default` / `Pro` /
-> `Max` + `LMX-Omni-52B-Halo`) — `capabilities.toml` ships empty by
-> design, no silent default. Expect rough edges: APIs may shift, KV%
-> for GPU slots reads `—` in v0.2 (see [ADR-0008
-> §Costs](./docs/internal/adr/0008-lemonade-adoption.md)), and we don't
-> promise upgrade compatibility across `0.2.x` tags. See
+> **Status:** **v0.3.2-alpha.1** — container-runtime era. Each slot
+> (`chat`, `embed`, `rerank`, `stt`, `tts`, `img`, NPU trio) runs as
+> a dedicated podman container (`hal0-slot@<name>.service`). Slot
+> definitions live in `/etc/hal0/slots/<name>.toml`; backend profiles
+> in `/etc/hal0/profiles.toml`; the model catalog is
+> `registry.toml` — the single source of truth for every HuggingFace
+> coordinate and SHA-256 digest. First run lands a **bundle picker**
+> (`hal0-Lite` / `Default` / `Pro` / `Max` + `LMX-Omni-52B-Halo`) —
+> `capabilities.toml` ships empty by design, no silent default. See
 > [`PLAN.md`](./PLAN.md) §1 for what ships now and the path to v1.0.
 
 ## Why hal0
@@ -58,27 +53,29 @@ device — opt-in even at Pro/Max tier, packing three model roles into
 one process via the FLM trio (see below). 128 GB Ryzen AI Max+ 395 is
 the reference deployment — not a hopeful port.
 
-**One inference runtime, six modalities.** Lemonade Server's per-type
-LRU policy lets chat, embed, rerank, STT, TTS, and image generation
-share one process pool. Concurrent chat + embed + image on Strix Halo
-measured at 1.10s wall-clock under spike #2 with zero evictions; chat
-+ embed alone sustains the same ~258 tok/s baseline the v0.1 toolbox
-stack hit, with `--parallel 1 --threads N` mandatory in the daemon
-config to keep the Vulkan dispatch from oversubscribing CPU cores
-(memory: `hal0_lemonade_threads_deadlock`).
+**One control plane, six modalities, dedicated containers.** Each
+slot runs in isolation — chat, embed, rerank, STT, TTS, and image
+generation each get their own podman container with its own image,
+flags, port, and lifecycle. Concurrent workloads don't share a process
+pool; they share only the GPU through the arbiter. Slot state is
+persisted to `/var/lib/hal0/slots/<name>/state.json` and streamed via
+SSE. Chat + embed alone sustains ~258 tok/s on Strix Halo at the
+reference ROCm FP4 loadout.
 
 **NPU multi-role via the FLM trio.** On Strix Halo with FastFlowLM
-installed, a single `flm serve` process hosts chat + transcription +
-embedding concurrently on the one AMDXDNA hardware context — ~2 GB
-NPU memory, gemma3:1b at 40 tok/s + Whisper-V3-Turbo + Embedding-Gemma
-all coresident. hal0 exposes this as three slots (`agent`, `stt-npu`,
-`embed-npu`) that all back the same FLM child via direct port dispatch.
-See [ADR-0009](./docs/internal/adr/0009-flm-trio-npu-packing.md) for
-why.
+installed, a single FLM process inside the `hal0-toolbox-flm` container
+hosts chat + transcription + embedding concurrently on the one AMDXDNA
+hardware context — ~2 GB NPU memory, gemma3:1b at 40 tok/s +
+Whisper-V3-Turbo + Embedding-Gemma all coresident. hal0 exposes this
+as three slots (`agent`, `stt-npu`, `embed-npu`); the `npu.toml`
+`[npu]` table toggles ASR and embed. The host-side FLM `.deb` is
+installed for device-sanity probes only — inference runs in the
+container. See [ADR-0009](./docs/internal/adr/0009-flm-trio-npu-packing.md)
+for why.
 
 **Dispatcher with single-flight + OmniRouter tool-calling.** Registry-aware
 routing across local slots *and* external upstreams (OpenRouter,
-Anthropic, OpenAI, custom). v0.2 adds a client-side OmniRouter loop:
+Anthropic, OpenAI, custom). The client-side OmniRouter loop provides
 8 OpenAI tool-calling tools (image generation/editing, TTS,
 transcription, vision, embed, rerank, route_to_chat) dispatched
 through hal0 from any chat slot whose model carries the `tool-calling`
@@ -99,17 +96,19 @@ be evicted out from under a streaming request.
   image edits, models. Drop-in for any OpenAI SDK; point your client
   at `http://localhost:8080/v1` and go.
 - **Slots** — each named target in `capabilities.toml` carries a
-  Lemonade-vocab `type` (`llm | embedding | reranking | transcription
-  | tts | image`), a `device` (`gpu-rocm | gpu-vulkan | cpu | npu`), a
-  `model`, plus `enabled` and optional `default`. Six seeded slots
-  (`primary`, `embed`, `rerank`, `stt`, `tts`, `img`) plus three NPU
-  slots (`agent`, `stt-npu`, `embed-npu`) when FastFlowLM is installed.
+  `type` (`llm | embedding | reranking | transcription | tts | image`),
+  a `device` (`gpu-rocm | gpu-vulkan | cpu | npu | img`), a `model`,
+  plus `enabled` and optional `default`. Six seeded slots (`chat`,
+  `embed`, `rerank`, `stt`, `tts`, `img`) plus three NPU slots
+  (`npu`, `stt-npu`, `embed-npu`) when FastFlowLM is installed.
   User-added slots via `hal0 slot create NAME --type TYPE --model MODEL`.
-- **Lemonade as the unified runtime** — one `lemond` process,
-  loopback-only on `:13305`, supervised by `hal0-lemonade.service`.
-  Cache + config at `/var/lib/hal0/lemonade/`. The hal0 capability
-  layer is the only user-facing inference surface; Lemonade is
-  treated as an internal runtime, never exposed off-box.
+  Slots refer to a **profile** in `/etc/hal0/profiles.toml` that pins
+  the container image + flag bundle for that backend.
+- **Container runtime** — each slot runs as its own podman container
+  under `hal0-slot@<name>.service`. `hal0-api` on `:8080` is the
+  control plane; slot containers bind loopback ports (8081–8099 + fixed
+  seeds). No shared inference daemon. See
+  [docs/operate/container-runtime.md](./docs/operate/container-runtime.md).
 - **Bundle picker on first run** — `capabilities.toml` ships empty by
   design. The dashboard's first load surfaces four hardware-anchored
   tiers (`hal0-Lite` ≥16 GB / `Default` ≥32 GB / `Pro` ≥64 GB / `Max`
@@ -126,13 +125,12 @@ be evicted out from under a streaming request.
 - **Dashboard** — React 18 + Vite UI for slot/model management,
   hardware-aware configuration, live logs, system health, and a
   built-in chat page (with popout window + reasoning toggle).
-  SSE-backed status + log tail. Lemonade `/logs/stream` folded into
-  the Journal panel. Settings → Lemonade admin panel surfaces the
-  daemon's `/internal/config` for inspection. Dark by default.
+  SSE-backed status + log tail. Journal panel streams per-slot
+  container logs via journald. Dark by default.
   The slots page splits into Inference | Image Gen tabs: the Image-Gen
-  tab operates a containerized ComfyUI generation engine (live GTT/RAM
-  gauges, queue depth, model inventory) with a gated inference ⇄
-  generation iGPU switchover behind a blast-radius confirm.
+  tab operates the ComfyUI container (live GTT/RAM gauges, queue
+  depth, model inventory) with a gated inference ⇄ generation iGPU
+  switchover behind a blast-radius confirm.
 - **OpenWebUI prewired** — chat at `:3001`, zero config. The installer
   writes `openwebui.env` pointing at the local hal0 API.
 - **OmniRouter (8 tools)** — `generate_image`, `edit_image`,
@@ -140,8 +138,8 @@ be evicted out from under a streaming request.
   `embed_text`, `rerank_documents`, `route_to_chat`. Dispatched
   client-side from chat slots; dynamically filtered per request.
 - **Image generation, day one** — `POST /v1/images/generations` via
-  `sd-cpp` (Lemonade-bundled). Bundle manifests pre-pick SDXL Turbo /
-  Flux-2-Klein-9B as fits the tier.
+  ComfyUI in the `img` slot container (ROCm). Bundle manifests
+  pre-pick SDXL Turbo / Flux-2-Klein-9B as fits the tier.
 - **First-run wizard + bundle picker** — bundle pick (or "Skip —
   configure manually") → models download in background.
 - **Atomic self-update with rollback** — `hal0 update --channel
@@ -152,9 +150,7 @@ be evicted out from under a streaming request.
   off `/var/lib/hal0/models`). The bootstrap fetches the release
   manifest, sha256-verifies the tarball, cosign-verifies the signature
   against the workflow OIDC identity, then hands off to
-  [`installer/install.sh`](./installer/install.sh). v0.1.x installs
-  are detected and refused with explicit backup/wipe instructions
-  (see [https://hal0.dev/docs/v0.2-upgrade](https://hal0.dev/docs/v0.2-upgrade)).
+  [`installer/install.sh`](./installer/install.sh).
 - **One-line Proxmox VE install** — on a Proxmox host, `bash -c "$(curl
   -fsSL https://raw.githubusercontent.com/Hal0ai/hal0/main/scripts/proxmox-ve/hal0.sh)"`
   creates an unprivileged Debian 13 LXC and runs the standard bootstrap
@@ -163,7 +159,7 @@ be evicted out from under a streaming request.
   — Strix Halo passthrough still requires the privileged-LXC recipe.
   See [`scripts/proxmox-ve/README.md`](./scripts/proxmox-ve/README.md).
 
-### Bundled agents (v0.2)
+### Bundled agents
 
 hal0 ships **two MCP servers** and **one bundled agent app**. The MCP
 servers (`/mcp/admin` for slot / model / capability / config / hardware
@@ -172,40 +168,38 @@ reachable by any MCP-speaking client — Claude Code, future RAG
 services, external scripts. The bundled agent is single-pick at install:
 `pi-coder` (CLI shape, installed from `Hal0ai/pi-mono` fork via
 `@earendil-works/pi-coding-agent` on npm) or `Hermes-Agent` (service
-shape, installed via the hal0-owned `hal0-hermes` wrapper around
-upstream `hermes`). Pick one via the first-run wizard or `hal0 agent install
-<name>`; swap atomically with `--switch`. Capital-D destructive MCP
-calls (`model_pull`, `slot_delete`, `config_write`, etc.) gate through
-a header bell + inbox modal in the dashboard, with CLI parity via
+shape, installed via the hal0-owned `hal0-hermes` wrapper; connects to
+`hal0-api` via `HAL0_INFERENCE_BASE=http://127.0.0.1:8080`). Pick one
+via the first-run wizard or `hal0 agent install <name>`; swap
+atomically with `--switch`. Capital-D destructive MCP calls
+(`model_pull`, `slot_delete`, `config_write`, etc.) gate through a
+header bell + inbox modal in the dashboard, with CLI parity via
 `hal0 agent approvals {list,approve,deny}`. See
 [docs/mcp/overview.md](./docs/mcp/overview.md) and
 [docs/agents/overview.md](./docs/agents/overview.md).
 
 ## Backends
 
-v0.2 routes every inference workload through Lemonade Server. The
-table below lists the Lemonade recipe each capability uses, plus the
-hardware device it targets.
+Each capability runs in its own container, supervised by
+`hal0-slot@<name>.service`. The profile in `/etc/hal0/profiles.toml`
+pins the container image and flag bundle for each backend.
 
-| Capability    | Lemonade recipe        | Device                  | Notes                                                       |
-|---------------|------------------------|-------------------------|-------------------------------------------------------------|
-| chat + embed + rerank | `llamacpp`     | Vulkan / ROCm / CPU     | `--parallel 1 --threads N` mandatory in `lemond` config     |
-| chat + STT + embed (NPU) | `flm:npu`   | AMD XDNA (opt-in)       | FLM trio: one process, `--asr 1 --embed 1`, ~2 GB NPU mem  |
-| transcription | `whisper.cpp`          | Vulkan / CPU            | Replaces v0.1 Moonshine for the CPU/GPU path                |
-| TTS           | `kokoro:cpu`           | CPU                     | `[CPU]` chip + tooltip in dashboard; GPU TTS deferred to v0.3 |
-| image         | `sd-cpp`               | ROCm / Vulkan           | SD Turbo / Flux-2-Klein-9B selectable per bundle tier       |
+| Capability               | Profile / image                  | Device              | Notes                                                        |
+|--------------------------|----------------------------------|---------------------|--------------------------------------------------------------|
+| chat + embed + rerank    | `moe-rocmfp4` / `dense-mtp-rocmfp4` / `vulkan-std` | ROCm / Vulkan / CPU | ROCm FP4 fork baked into the image; MTP via `--spec-type draft-mtp` |
+| chat + STT + embed (NPU) | `flm-npu` (`hal0-toolbox-flm`)  | AMD XDNA (opt-in)   | FLM trio: one container, `[npu] asr/embed` toggles, ~2 GB NPU mem |
+| transcription            | whisper.cpp in toolbox image     | Vulkan / CPU        | `stt` slot                                                   |
+| TTS                      | `kokoro-cpu` (`hal0-toolbox-kokoro`) | CPU             | `[CPU]` chip + tooltip in dashboard                          |
+| image                    | `comfyui` (`hal0-toolbox-comfyui`) | ROCm              | Exclusive GPU via arbiter; SD Turbo / Flux-2-Klein-9B        |
 
-The NPU path is opt-in: a FastFlowLM `.deb` install (manual on Linux —
-the Lemonade auto-installer is Windows-only as of v0.2) unlocks the
-three FLM slots. With FLM present, the bundle picker's Pro and Max
-tiers surface the trio as a toggle; the trio only auto-enables when a
-bundled agent is being installed in the same first-run flow.
+The NPU path is opt-in: the installer places a FastFlowLM `.deb` on
+the host for device-sanity probes (`flm validate`); inference runs
+inside the `hal0-toolbox-flm` container image. With FLM present, the
+bundle picker's Pro and Max tiers surface the trio as a toggle.
 
-The hal0 toolbox containers (`hal0-toolbox-vulkan` / `rocm` / `flm` /
-`moonshine` / `kokoro` / `comfyui`) and the `hal0-slot@.service`
-template that supervised them are retired. v0.2's `lemond` daemon
-takes their place. See [ADR-0008](./docs/internal/adr/0008-lemonade-adoption.md)
-for the migration rationale.
+For the container-runtime operator reference — service layout, slot
+TOML fields, profiles, GPU arbiter, and day-2 commands — see
+[docs/operate/container-runtime.md](./docs/operate/container-runtime.md).
 
 ## Hardware
 
@@ -217,29 +211,33 @@ are not in scope for v1.
 |-----------------|---------------------------------------------------------------------------|--------|
 | **First-class** | AMD Ryzen AI Max+ 395 ("Strix Halo") with iGPU + XDNA NPU + 128 GB unified | Reference deployment. All published perf numbers come from this box. |
 | **First-class** | AMD Ryzen AI Max 385 / 390 with 64 GB unified                              | Same path; small + mid tiers fit, 70B Q4 with shorter context. |
-| **Supported**   | NVIDIA RTX 30/40/50 (10–32 GB)                                            | CUDA-backed `llamacpp` via Lemonade. Same slot lifecycle, dedicated VRAM instead of UMA. |
-| **Supported**   | AMD Radeon RX 7000 / discrete (16–24 GB)                                  | ROCm via Lemonade's `llamacpp` recipe; Vulkan fallback. |
-| **Fallback**    | CPU-only x86_64                                                            | Lemonade's CPU path. Usable for tiny models / smoke tests, not the headline experience. |
+| **Supported**   | NVIDIA RTX 30/40/50 (10–32 GB)                                            | CUDA-backed llama-server in the `vulkan-std` container profile. Same slot lifecycle, dedicated VRAM instead of UMA. |
+| **Supported**   | AMD Radeon RX 7000 / discrete (16–24 GB)                                  | ROCm or Vulkan container profiles; same `hal0-slot@<name>` lifecycle. |
+| **Fallback**    | CPU-only x86_64                                                            | `vulkan-std` profile, CPU path. Usable for tiny models / smoke tests, not the headline experience. |
 
 ## Project layout
 
 ```
 hal0/
-├── src/hal0/         # Python package (FastAPI API + capability layer + Lemonade client + CLI)
-│   ├── lemonade/     # HTTP client + catalog_sync + metrics_shim + log_proxy
+├── src/hal0/         # Python package (FastAPI API + capability layer + ContainerProvider + CLI)
+│   ├── providers/    # ContainerProvider, FLMProvider, ComfyUI, etc.
+│   ├── slots/        # slot manager, state machine, GpuArbiter
 │   └── omni_router/  # client-side tool-calling loop + tool definitions
-├── ui/               # React 18 + TypeScript + Vite + Tailwind 4 dashboard (v3, in flight)
+├── ui/               # React 18 + TypeScript + Vite + Tailwind 4 dashboard (v3)
 ├── ui-vue.bak/       # v0.2.1 Vue 3 dashboard preserved verbatim for reference
-├── installer/        # install.sh (writes /var/lib/hal0/lemonade/config.json + hal0-lemonade.service)
+├── installer/        # install.sh (writes /etc/hal0/, systemd units, hal0-api.service)
+│   ├── etc-hal0/     # seed slot TOMLs + profiles.toml
+│   └── systemd/      # hal0-agent@ template units
 ├── tests/            # pytest suite (α unit, β integration, γ release-gate)
 ├── docs/             # user docs (mirror of hal0.dev/docs); dev docs under docs/internal/
-└── PLAN.md           # roadmap (current cut: v0.2; path to v1.0)
+└── PLAN.md           # roadmap + history
 ```
 
-Models live under `/var/lib/hal0/models/<recipe>/<capability>/` — the
-canonical app-visible tree Lemonade's `extra_models_dir` points at.
-Per-leaf symlinks redirect to `/mnt/ai-models/` when a separate
-storage volume is in use. See PLAN.md §6.1 for the layout.
+The model catalog lives at `/var/lib/hal0/registry/registry.toml` —
+the single source of truth for HuggingFace coordinates, SHA-256
+digests, and curated filenames. Per-leaf symlinks under the models
+directory redirect to `/mnt/ai-models/` when a separate storage
+volume is in use.
 
 ## Quick start (development)
 
@@ -259,10 +257,25 @@ The API lives at `http://127.0.0.1:8080`, the dashboard at the Vite dev
 server URL (usually `http://127.0.0.1:5173`).
 
 Run `hal0 doctor` any time to re-check pre-flight (systemd / python /
-disk / ports). `hal0 model pull <ref>` streams models from Hugging Face
-into the registry under the `user.*` namespace, and `hal0 uninstall
-[--keep-data]` tears down a running install (thin wrapper over
-`installer/uninstall.sh`).
+disk / ports / NPU probe). `hal0 model pull <ref>` streams models from
+Hugging Face into `registry.toml` under the `user.*` namespace, and
+`hal0 uninstall [--keep-data]` tears down a running install (thin
+wrapper over `installer/uninstall.sh`).
+
+Useful day-2 commands:
+
+```sh
+# service status
+systemctl status hal0-api
+systemctl list-units 'hal0-slot@*'
+
+# logs
+journalctl -fu hal0-api
+journalctl -fu 'hal0-slot@*'
+
+# restart a wedged slot container
+systemctl restart hal0-slot@chat
+```
 
 ### Auth posture
 
@@ -296,43 +309,42 @@ VM installs leave the panel off and the dashboard stays quiet.
 No dates — items are direction. The closer to the left, the closer to
 running on your box. Full version at [hal0.dev/roadmap](https://hal0.dev/roadmap).
 
-### Shipped (v0.2)
+### Shipped (v0.3 / container runtime)
 
-- **Lemonade Server unified inference runtime** — six per-modality
-  toolbox containers + the `hal0-slot@.service` template retire;
-  `hal0-lemonade.service` supervises one `lemond` daemon
+- **Per-slot podman containers** — every inference workload runs in
+  its own `hal0-slot@<name>.service` container; `ContainerProvider` +
+  `profiles.toml` replace the old single-daemon model
+  (epic #652, extraction #687, PRs #688–#726)
+- **GpuArbiter exclusive image mode** — ComfyUI gets the iGPU to
+  itself; LLM GPU slots pause and resume automatically
+- **NPU trio via `hal0-toolbox-flm` container** — FLM trio now runs
+  containerised; host FLM `.deb` is probe-only
+- **`registry.toml` as sole model catalog** — no secondary runtime
+  catalog to sync; `hal0 model` commands and the dashboard are the
+  only safe edit paths
+- **Slot-state Prometheus + EventBus journal** — per-slot observability
+  via journald (`hal0-slot@<name>`) and the dashboard Journal panel
 - **FLM trio NPU packing** — chat + ASR + embed coresident on one
-  AMDXDNA hardware context via `--asr 1 --embed 1`
+  AMDXDNA hardware context; toggle via `[npu]` in the slot TOML
 - **OmniRouter client-side tool-calling** — 8 tools, dynamic
   per-request filtering, `route_to_chat` cross-slot delegation
 - **First-run bundle picker** — `hal0-Lite` / `Default` / `Pro` /
   `Max` + `LMX-Omni-52B-Halo`, hardware-anchored, no silent default
-- **Per-type LRU concurrency** — six type budgets (LLM, embedding,
-  reranking, transcription, tts, image), nuclear-evict only on
-  unrecognised load errors
-- **Settings → Lemonade admin panel** — `/internal/config` snapshot +
-  `/internal/set` atomic config writes
-- **Journal panel** — Lemonade `/logs/stream` folded into Logs tab
-- **Metrics shim** — per-slot TTFT + tok/s + prompt_tokens via
-  `/v1/stats`; FLM-native KV% on NPU slots
-- **`hal0 registry import`** — one-shot v0.1.x → v0.2 registry
-  recovery from the backup tarball
-- Carried forward from v0.1.x: OpenAI-compatible `/v1/*`, portable
-  hardware probe, capability slots overlay + orchestrator, dispatcher
-  with single-flight + cold-cache prefetch, bundled OpenWebUI on
-  `:3001`, auth (password + tokens) in FastAPI, cosign-keyless
-  self-update with rollback, bundled agents (pi-coder / Hermes-Agent)
-  + MCP admin + Cognee memory MCP
+- **`hal0 registry import`** — one-shot v0.1.x → v0.3 registry
+  recovery from a backup tarball
+- Carried forward: OpenAI-compatible `/v1/*`, portable hardware
+  probe, capability slots + orchestrator, dispatcher with
+  single-flight + cold-cache prefetch, bundled OpenWebUI on `:3001`,
+  cosign-keyless self-update with rollback, bundled agents
+  (pi-coder / Hermes-Agent) + MCP admin + Cognee memory MCP
 
-### Soon (v0.3)
+### Soon
 
 - **GPU-accelerated TTS** — kokoro-vulkan or successor; closes the
   `[CPU]` chip on the voice slot card
-- **KV% for GPU slots** — Lemonade upstream or hal0-built llama-server
-  swap-in; v0.2 ships `—`
-- **Phase 8 polish + advanced memory** — Cognee graph + Memify pipeline
-  enabled, MCP client side of hal0 (agents reach external MCP servers),
-  federated memory across local + remote sources
+- **Advanced memory** — Cognee graph + Memify pipeline enabled, MCP
+  client side of hal0 (agents reach external MCP servers), federated
+  memory across local + remote sources
 - **Benchmarks & presets UI** — in-dashboard tok/s + latency runs,
   plus curated loadout presets you can flash onto a fresh install
 - **AUR PKGBUILD & Ubuntu PPA** — native distro packages on top of
@@ -349,8 +361,8 @@ running on your box. Full version at [hal0.dev/roadmap](https://hal0.dev/roadmap
   warm base model without unloading the underlying weights
 - **Per-model rate limits & budgets** — cost-style accounting for
   local inference — cap a chatty agent without taking the whole box down
-- **Voice mode end-to-end** — Lemonade's `/realtime` WebSocket +
-  agent loop stitched into a hands-free streaming conversation
+- **Voice mode end-to-end** — agent loop stitched into a hands-free
+  streaming conversation
 - **ChatOps adapters** — Slack and Matrix bridges as extensions —
   talk to hal0 from the rooms you already live in
 

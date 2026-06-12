@@ -215,6 +215,32 @@ async def test_route_to_chat_happy_path() -> None:
 
 
 @pytest.mark.asyncio
+async def test_route_to_chat_dispatch_uses_loaded_slots_not_raw_configs() -> None:
+    class NoRawConfigManager(FakeSlotManager):
+        async def iter_configs(self):  # pragma: no cover
+            raise AssertionError("route_to_chat dispatch must use loaded_slot")
+
+    slots = [
+        make_slot("primary", type="llm", model="agent", labels=("tool-calling",)),
+        make_slot("coder", type="llm", model="qwen-coder", labels=()),
+    ]
+
+    async def chat_completion(body: dict[str, Any]) -> dict[str, Any]:
+        assert body["model"] == "qwen-coder"
+        return {"choices": [{"message": {"content": "ok"}}]}
+
+    ctx = DispatchContext(
+        slot_manager=NoRawConfigManager(slots),
+        http_client=make_http_client(lambda _: httpx.Response(200, json={})),
+        api_base_url="http://test",
+        caller_slot_name="primary",
+        chat_completion=chat_completion,
+    )
+    result = await dispatch_tool(ctx, "route_to_chat", {"target": "coder", "prompt": "x"})
+    assert result == {"content": "ok"}
+
+
+@pytest.mark.asyncio
 async def test_route_to_chat_target_not_found() -> None:
     slots = [
         make_slot("primary", type="llm", model="agent", labels=("tool-calling",)),

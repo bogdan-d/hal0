@@ -20,12 +20,19 @@ cache the heavy work upstream.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any
 
 from hal0.config.loader import load_hardware_info
+from hal0.config.schema import DEVICE_DEFAULT_PROFILES
+from hal0.errors import Hal0Error
+from hal0.model_fit import evaluate_model_fit
+from hal0.profiles import ProfileCatalog, ResolvedProfile
 from hal0.registry.curated import CURATED, CuratedModel, HaloaiModel
 from hal0.registry.store import ModelRegistry
+
+log = logging.getLogger(__name__)
 
 # ── Capability → child mappings ───────────────────────────────────────────────
 
@@ -68,6 +75,17 @@ _RUNTIME_TO_HOST_BACKENDS: dict[str, tuple[str, ...]] = {
     "kokoro": ("gpu-vulkan", "cpu"),
     "vibevoice": ("gpu-vulkan", "cpu"),
     "comfyui": ("gpu-vulkan",),
+}
+
+_CAPABILITY_TO_SLOT_TYPE: dict[str, str] = {
+    "chat": "llm",
+    "embed": "embedding",
+    "rerank": "reranking",
+    "stt": "transcription",
+    "asr": "transcription",
+    "tts": "tts",
+    "image": "image",
+    "vision": "llm",
 }
 
 
@@ -552,6 +570,73 @@ def _flat_rows_for_capability(
     return rows
 
 
+def _profile_for_fit(capability: str, device: str) -> ResolvedProfile | None:
+    """Infer the profile implied by a picker backend.
+
+    Mirrors CapabilityOrchestrator's conservative inference so picker and
+    apply use the same model/profile/slot compatibility rules until the
+    selection schema carries an explicit profile.
+    """
+    profile_name: str | None = None
+    if device == "npu":
+        profile_name = DEVICE_DEFAULT_PROFILES.get("npu")
+    elif device in {"gpu-rocm", "gpu-vulkan"}:
+        profile_name = DEVICE_DEFAULT_PROFILES.get(device)
+    elif capability == "tts":
+        profile_name = "kokoro-cpu"
+    elif capability == "image":
+        profile_name = "comfyui"
+    if not profile_name:
+        return None
+    try:
+        return ProfileCatalog().resolve(profile_name)
+    except Hal0Error:
+        log.warning(
+            "capability.catalog.profile_fit_skipped profile=%s capability=%s device=%s",
+            profile_name,
+            capability,
+            device,
+        )
+        return None
+
+
+def _row_with_model_fit(
+    capability: str,
+    row: dict[str, Any],
+    *,
+    registry: ModelRegistry | None = None,
+) -> dict[str, Any] | None:
+    slot_type = _CAPABILITY_TO_SLOT_TYPE.get(capability)
+    if slot_type is None:
+        return row
+    backend_id = str(row.get("backend") or "")
+    profile = _profile_for_fit(capability, backend_id)
+    registry_for_fit = None
+    if registry is not None:
+        try:
+            if registry.has(str(row["id"])):
+                registry_for_fit = registry
+        except Exception:
+            registry_for_fit = None
+    fit = evaluate_model_fit(
+        model_id=str(row["id"]),
+        slot_type=slot_type,
+        device=backend_id,
+        profile=profile,
+        registry=registry_for_fit,
+        capabilities=row.get("capabilities"),
+    )
+    if not fit.allowed:
+        return None
+    fitted = dict(row)
+    fitted["fit_status"] = fit.status
+    fitted["fit_reasons"] = list(fit.reasons)
+    if profile is not None:
+        fitted["profile"] = profile.name
+        fitted["runtime_family"] = profile.runtime_family
+    return fitted
+
+
 def models_for_capability(
     capability: str,
     *,
@@ -586,7 +671,12 @@ def models_for_capability(
     Backends preserve the order produced by :func:`_flat_rows_for_capability`
     (llama.cpp fan-out first, FLM/NPU appended).
     """
-    flat = _flat_rows_for_capability(capability, registry=registry)
+    flat = [
+        fitted
+        for row in _flat_rows_for_capability(capability, registry=registry)
+        for fitted in [_row_with_model_fit(capability, row, registry=registry)]
+        if fitted is not None
+    ]
     grouped: dict[str, dict[str, Any]] = {}
     order: list[str] = []
     for row in flat:
@@ -613,6 +703,10 @@ def models_for_capability(
                 "provider": row["provider"],
                 "downloaded": row["downloaded"],
                 "pullable": row["pullable"],
+                "fit_status": row.get("fit_status", "allowed"),
+                "fit_reasons": list(row.get("fit_reasons", [])),
+                "profile": row.get("profile"),
+                "runtime_family": row.get("runtime_family"),
             }
         )
     return [grouped[rid] for rid in order]

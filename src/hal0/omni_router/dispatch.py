@@ -7,8 +7,8 @@ Each of the eight tools has a coroutine in this module that:
      crash the loop and abandon the user, so the safer path is to
      return a structured ``{"error": ...}`` tool_result and let the
      LLM apologise).
-  2. Uses the injected ``SlotManagerLike`` to pick the target slot
-     name via ``route_for_request`` (matching what
+  2. Uses the injected ``SlotManagerLike`` to pick the typed target slot
+     via ``resolve_for_request`` (matching what
      :mod:`hal0.omni_router.filter` decided was eligible).
   3. Calls the appropriate hal0 ``/v1/*`` endpoint with the
      target slot's model and the tool's arguments.
@@ -51,8 +51,8 @@ import httpx
 from hal0.omni_router.filter import SlotManagerLike
 from hal0.omni_router.route_to_chat import (
     DELEGATION_DEPTH,
-    build_delegation_messages,
-    validate_delegation,
+    build_delegation_messages_for_slot,
+    validate_delegation_slots,
 )
 from hal0.omni_router.tools import ToolDefinition, tools_by_name
 
@@ -330,32 +330,29 @@ async def handle_route_to_chat(ctx: DispatchContext, args: Mapping[str, Any]) ->
     if ctx.chat_completion is None:
         return {"error": "route_to_chat has no chat_completion callback configured"}
 
-    configs = await ctx.slot_manager.iter_configs()
+    target_name = str(args["target"])
+    caller_slot = await ctx.slot_manager.loaded_slot(ctx.caller_slot_name)
+    target_slot = await ctx.slot_manager.loaded_slot(target_name)
     current_depth = DELEGATION_DEPTH.get()
-    rejection = validate_delegation(
-        configs,
+    rejection = validate_delegation_slots(
+        caller_slot,
+        target_slot,
         caller_slot_name=ctx.caller_slot_name,
-        target=str(args["target"]),
+        target=target_name,
         current_depth=current_depth,
     )
     if rejection is not None:
         return {"error": rejection}
 
-    target_cfg = next((c for c in configs if c.get("name") == args["target"]), None)
-    assert target_cfg is not None  # validate_delegation guaranteed this
+    assert target_slot is not None  # validate_delegation_slots guaranteed this
 
-    messages = build_delegation_messages(
-        target_cfg,
+    messages = build_delegation_messages_for_slot(
+        target_slot,
         prompt=str(args["prompt"]),
         context=str(args["context"]) if args.get("context") else None,
     )
-    # target_cfg is a CONFIG DICT (iter_configs shape), not a LoadedSlot —
-    # resolve the model id with the dict-shaped helper, else the body
-    # carries model="" and the gateway can't route the delegation.
-    from hal0.omni_router.route_to_chat import _model_of
-
     body = {
-        "model": _model_of(target_cfg),
+        "model": _model_id_of(target_slot),
         "messages": messages,
     }
     token = DELEGATION_DEPTH.set(current_depth + 1)

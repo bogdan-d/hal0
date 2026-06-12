@@ -50,7 +50,11 @@ async def test_caller_with_tool_calling_but_no_other_slots_returns_empty() -> No
 
 @pytest.mark.asyncio
 async def test_image_slot_present_enables_generate_image() -> None:
-    mgr = FakeSlotManager(
+    class NoLegacyRouteManager(FakeSlotManager):
+        async def route_for_request(self, *args, **kwargs):  # pragma: no cover
+            raise AssertionError("active_tools_for must use resolve_for_request")
+
+    mgr = NoLegacyRouteManager(
         [
             _caller_with_tools_label(),
             make_slot("img", type="image", model="sdxl", labels=("image",)),
