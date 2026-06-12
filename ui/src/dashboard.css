@@ -3119,3 +3119,130 @@ select.npu-sel {
   word-break: break-all;
   margin-top: 2px;
 }
+
+/* ── Memory view (Hindsight engine surface) ─────────────────────────────── */
+.mem-top {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) 2fr;
+  gap: 12px;
+  margin-bottom: 18px;
+}
+@media (max-width: 900px) { .mem-top { grid-template-columns: 1fr; } }
+.mem-engine { padding: 14px 16px; display: flex; flex-direction: column; gap: 8px; }
+.mem-engine-head { display: flex; align-items: center; gap: 10px; }
+.mem-engine-name { font-size: 14px; color: var(--fg); }
+.mem-engine-meta { font-size: 11px; color: var(--fg-3); display: flex; gap: 6px; align-items: center; }
+.mem-feature-row { display: flex; flex-wrap: wrap; gap: 4px; }
+.mem-ts { padding: 14px 16px; }
+.mem-ts-head { display: flex; justify-content: space-between; align-items: center; font-size: 11px; color: var(--fg-3); margin-bottom: 6px; }
+.mem-ts-periods { display: flex; gap: 4px; }
+.mem-ts-periods .btn.active { color: var(--hal0-accent); border-color: var(--hal0-accent); }
+.mem-ts-svg { width: 100%; height: auto; display: block; }
+.mem-legend { display: flex; gap: 14px; font-size: 10px; color: var(--fg-4); margin-top: 4px; }
+.mem-legend-item { display: inline-flex; align-items: center; gap: 5px; }
+.mem-swatch { width: 8px; height: 8px; border-radius: 2px; display: inline-block; }
+.mem-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 12px;
+}
+.mem-bank-card {
+  background: var(--bg-2);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--rad);
+  padding: 12px 14px;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  transition: border-color 120ms ease;
+}
+.mem-bank-card:hover { border-color: var(--line-strong); }
+.mem-bank-card.selected { border-color: var(--hal0-accent); }
+.mem-bank-head { display: flex; justify-content: space-between; align-items: center; }
+.mem-bank-id { font-size: 12px; color: var(--fg); }
+.mem-bank-badges { display: flex; gap: 4px; }
+.mem-badge {
+  font-size: 10px; padding: 1px 6px; border-radius: 8px;
+  background: var(--bg-3); color: var(--fg-3);
+}
+.mem-badge.warn { background: var(--warn-soft); color: var(--warn); }
+.mem-badge.err { background: var(--err-soft); color: var(--err); }
+.mem-bank-mission { font-size: 11px; color: var(--fg-3); }
+.mem-bank-counts { display: flex; gap: 12px; font-size: 10px; color: var(--fg-3); flex-wrap: wrap; }
+.mem-count { display: inline-flex; align-items: center; gap: 4px; }
+.mem-bank-meta { font-size: 10px; color: var(--fg-4); display: flex; gap: 6px; align-items: center; }
+.mem-detail, .mem-new-bank { margin-top: 16px; padding: 14px 16px; }
+.mem-detail-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+.mem-ops { display: flex; flex-direction: column; gap: 6px; }
+.mem-op-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 6px 8px; background: var(--bg); border: 1px solid var(--line-soft);
+  border-radius: var(--rad-sm); font-size: 11px;
+}
+.mem-op-type { color: var(--fg-2); }
+.mem-op-when { color: var(--fg-4); }
+.mem-op-err { color: var(--err); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 220px; }
+.mem-op-actions { margin-left: auto; display: flex; gap: 4px; }
+.mem-confirm { display: flex; align-items: center; gap: 10px; font-size: 11px; color: var(--fg-2); }
+.mem-danger h2 { color: var(--err); }
+
+/* ── Memory graph explorer ──────────────────────────────────────────────── */
+.mem-tabs { display: flex; gap: 6px; margin-bottom: 14px; }
+.mem-tabs .btn.active, .mem-graph-sources .btn.active { color: var(--hal0-accent); border-color: var(--hal0-accent); }
+.mem-graph-toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
+.mem-graph-sources { display: flex; gap: 4px; }
+.mem-graph-select { width: auto; min-width: 120px; font-size: 11px; }
+.mem-graph-q { width: 180px; font-size: 11px; }
+.mem-graph-mincount { display: inline-flex; align-items: center; gap: 6px; font-size: 10px; color: var(--fg-4); }
+.mem-graph-zoom { margin-left: auto; display: flex; gap: 4px; }
+.mem-graph-meta { font-size: 10px; color: var(--fg-4); margin-bottom: 6px; }
+.mem-graph-stage { position: relative; background: var(--bg); border: 1px solid var(--line-soft); border-radius: var(--rad); }
+.mem-graph-svg { width: 100%; height: auto; display: block; }
+.mem-gnode-g { cursor: pointer; }
+.mem-gnode-lbl { font-size: 9px; fill: var(--fg-4); font-family: var(--jbm); pointer-events: none; }
+.mem-graph-empty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; }
+.mem-graph-detail { margin-top: 12px; padding: 12px 14px; }
+.mem-graph-detail-body { font-size: 11px; color: var(--fg-2); display: flex; flex-direction: column; gap: 6px; }
+.mem-graph-detail-label { color: var(--fg); font-size: 12px; }
+.mem-graph-detail-row { color: var(--fg-4); font-size: 10px; }
+
+/* ── Memory tools ───────────────────────────────────────────────────────── */
+.mem-tools-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+@media (max-width: 1000px) { .mem-tools-grid { grid-template-columns: 1fr; } }
+.mem-tool { padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; }
+.mem-tool-head { font-size: 11px; color: var(--fg-3); display: flex; justify-content: space-between; align-items: center; }
+.mem-tool-row { display: flex; gap: 8px; align-items: center; }
+.mem-tool-row .input { flex: 1; }
+.mem-recall-types { gap: 14px; font-size: 10px; color: var(--fg-4); }
+.mem-type-check { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; }
+.mem-recall-results { display: flex; flex-direction: column; gap: 6px; }
+.mem-recall-row {
+  display: flex; align-items: baseline; gap: 8px; font-size: 12px;
+  padding: 6px 8px; background: var(--bg); border: 1px solid var(--line-soft);
+  border-radius: var(--rad-sm);
+}
+.mem-fact-dot { width: 7px; height: 7px; border-radius: 50%; flex: none; align-self: center; background: var(--fg-5); }
+.mem-fact-dot.world { background: var(--info); }
+.mem-fact-dot.experience { background: var(--hal0-accent); }
+.mem-fact-dot.observation { background: var(--ok); }
+.mem-recall-text { color: var(--fg-2); flex: 1; }
+.mem-recall-meta { font-size: 10px; color: var(--fg-4); flex: none; }
+.mem-reflect-out { background: var(--bg); border: 1px solid var(--line-soft); border-radius: var(--rad-sm); padding: 10px 12px; }
+.mem-reflect-text { font-size: 12px; color: var(--fg-2); line-height: 1.5; }
+.mem-reflect-based { font-size: 10px; color: var(--fg-4); margin-top: 8px; }
+.mem-doc-row, .mem-dir-row {
+  display: flex; align-items: center; gap: 10px; font-size: 11px;
+  padding: 6px 8px; background: var(--bg); border: 1px solid var(--line-soft);
+  border-radius: var(--rad-sm);
+}
+.mem-doc-text { color: var(--fg-2); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mem-doc-meta { font-size: 10px; color: var(--fg-4); flex: none; }
+.mem-mm-row { display: flex; flex-direction: column; gap: 4px; padding: 8px; background: var(--bg); border: 1px solid var(--line-soft); border-radius: var(--rad-sm); }
+.mem-mm-main { display: flex; align-items: center; gap: 8px; }
+.mem-mm-name { font-size: 12px; color: var(--fg); }
+.mem-mm-q { font-size: 10px; color: var(--fg-4); }
+.mem-mm-content { font-size: 11px; color: var(--fg-3); }
+.mem-dir-form { display: flex; gap: 8px; }
+.mem-dir-form .input { flex: 1; }
+.mem-dir-content-preview { flex: 1; color: var(--fg-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
