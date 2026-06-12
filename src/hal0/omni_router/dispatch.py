@@ -2,7 +2,7 @@
 
 Each of the eight tools has a coroutine in this module that:
 
-  1. Validates the tool's argument dict (defensive — Lemonade may have
+  1. Validates the tool's argument dict (defensive — the model may have
      parsed the LLM's tool_call already, but a malformed shape would
      crash the loop and abandon the user, so the safer path is to
      return a structured ``{"error": ...}`` tool_result and let the
@@ -10,7 +10,7 @@ Each of the eight tools has a coroutine in this module that:
   2. Uses the injected ``SlotManagerLike`` to pick the target slot
      name via ``route_for_request`` (matching what
      :mod:`hal0.omni_router.filter` decided was eligible).
-  3. Calls the appropriate Lemonade ``/v1/*`` endpoint with the
+  3. Calls the appropriate hal0 ``/v1/*`` endpoint with the
      target slot's model and the tool's arguments.
   4. Returns a JSON-serialisable dict — the OmniRouter loop encodes it
      into the tool_result message envelope.
@@ -34,7 +34,7 @@ Endpoints (per plan §7.2):
   ``route_to_chat``              internal — see route_to_chat.py
   ============================== =================================
 
-The base URL is Lemonade's loopback URL (``http://127.0.0.1:13305``
+The base URL is hal0-api's own loopback URL (``http://127.0.0.1:8080``
 by default per ADR-0008 §1). PR-19 introduces direct-to-FLM-child
 routing for ``stt-npu``/``embed-npu`` slots; PR-16 sticks to the
 single-URL contract.
@@ -73,7 +73,7 @@ class DispatchContext:
 
     Bundled into one object so individual handler signatures stay
     short. The instance is shared across a single chat-completion
-    loop; tools see the same SlotManager + httpx client + Lemonade
+    loop; tools see the same SlotManager + httpx client + API
     URL throughout.
     """
 
@@ -82,13 +82,13 @@ class DispatchContext:
         *,
         slot_manager: SlotManagerLike,
         http_client: httpx.AsyncClient,
-        lemonade_base_url: str,
+        api_base_url: str,
         caller_slot_name: str,
         chat_completion: ChatCompletionFn | None = None,
     ) -> None:
         self.slot_manager = slot_manager
         self.http_client = http_client
-        self.lemonade_base_url = lemonade_base_url.rstrip("/")
+        self.api_base_url = api_base_url.rstrip("/")
         self.caller_slot_name = caller_slot_name
         # ``chat_completion`` is the callback the OmniRouter loop
         # provides so route_to_chat doesn't need to re-implement the
@@ -117,14 +117,14 @@ def _missing(args: Mapping[str, Any], *required: str) -> str | None:
 async def _route_or_error(
     ctx: DispatchContext,
     tool: ToolDefinition,
-) -> tuple[str | None, dict[str, Any] | None]:
-    """Resolve the target slot name + its config for ``tool``.
+) -> tuple[Any | None, dict[str, Any] | None]:
+    """Resolve the target loaded slot for ``tool``.
 
-    Returns ``(slot_name, slot_cfg)`` on success; ``(None, error_dict)``
-    on routing failure (no eligible slot). The error dict is shaped
-    as a tool_result body so callers can return it directly.
+    Returns ``(loaded_slot, None)`` on success; ``(None, error_dict)`` on
+    routing failure (no eligible slot). The error dict is shaped as a
+    tool_result body so callers can return it directly.
     """
-    target = await ctx.slot_manager.route_for_request(
+    target = await ctx.slot_manager.resolve_for_request(
         tool.target_slot_type,
         required_labels=tool.required_model_labels,
     )
@@ -135,21 +135,14 @@ async def _route_or_error(
                 f"with required labels {list(tool.required_model_labels)!r}"
             )
         }
-    configs = await ctx.slot_manager.iter_configs()
-    cfg = next((c for c in configs if c.get("name") == target), None)
-    if cfg is None:
-        # Race: slot config disappeared between routing + lookup.
-        return None, {"error": f"slot '{target}' vanished mid-dispatch"}
-    return target, cfg
+    return target, None
 
 
-def _model_id_of(cfg: dict[str, Any]) -> str:
-    model = cfg.get("model") or {}
-    if isinstance(model, dict):
-        default = model.get("default", "")
-        if isinstance(default, str) and default:
-            return default
-    return str(cfg.get("name", ""))
+def _model_id_of(slot: Any) -> str:
+    model_id = getattr(slot, "model_id", "")
+    if isinstance(model_id, str) and model_id:
+        return model_id
+    return str(getattr(slot, "name", ""))
 
 
 async def _post_json(
@@ -157,9 +150,9 @@ async def _post_json(
     path: str,
     body: dict[str, Any],
 ) -> dict[str, Any]:
-    """POST JSON to a Lemonade endpoint; return parsed body or an
+    """POST JSON to a hal0 /v1 endpoint; return parsed body or an
     ``{"error": ...}`` envelope. Never raises."""
-    url = f"{ctx.lemonade_base_url}{path}"
+    url = f"{ctx.api_base_url}{path}"
     try:
         resp = await ctx.http_client.post(url, json=body, timeout=_DEFAULT_TOOL_TIMEOUT_S)
     except httpx.TimeoutException:
@@ -196,11 +189,11 @@ async def handle_generate_image(ctx: DispatchContext, args: Mapping[str, Any]) -
     err = _missing(args, "prompt")
     if err is not None:
         return {"error": err}
-    target, cfg_or_err = await _route_or_error(ctx, tools_by_name()["generate_image"])
+    target, err_body = await _route_or_error(ctx, tools_by_name()["generate_image"])
     if target is None:
-        return cfg_or_err or {"error": "no image slot"}
+        return err_body or {"error": "no image slot"}
     body: dict[str, Any] = {
-        "model": _model_id_of(cfg_or_err or {}),
+        "model": _model_id_of(target),
         "prompt": args["prompt"],
     }
     if args.get("size"):
@@ -214,11 +207,11 @@ async def handle_edit_image(ctx: DispatchContext, args: Mapping[str, Any]) -> di
     err = _missing(args, "image", "prompt")
     if err is not None:
         return {"error": err}
-    target, cfg_or_err = await _route_or_error(ctx, tools_by_name()["edit_image"])
+    target, err_body = await _route_or_error(ctx, tools_by_name()["edit_image"])
     if target is None:
-        return cfg_or_err or {"error": "no image-edit slot"}
+        return err_body or {"error": "no image-edit slot"}
     body: dict[str, Any] = {
-        "model": _model_id_of(cfg_or_err or {}),
+        "model": _model_id_of(target),
         "image": args["image"],
         "prompt": args["prompt"],
     }
@@ -231,11 +224,11 @@ async def handle_text_to_speech(ctx: DispatchContext, args: Mapping[str, Any]) -
     err = _missing(args, "input")
     if err is not None:
         return {"error": err}
-    target, cfg_or_err = await _route_or_error(ctx, tools_by_name()["text_to_speech"])
+    target, err_body = await _route_or_error(ctx, tools_by_name()["text_to_speech"])
     if target is None:
-        return cfg_or_err or {"error": "no tts slot"}
+        return err_body or {"error": "no tts slot"}
     body: dict[str, Any] = {
-        "model": _model_id_of(cfg_or_err or {}),
+        "model": _model_id_of(target),
         "input": args["input"],
     }
     if args.get("voice"):
@@ -247,15 +240,15 @@ async def handle_transcribe_audio(ctx: DispatchContext, args: Mapping[str, Any])
     err = _missing(args, "audio")
     if err is not None:
         return {"error": err}
-    target, cfg_or_err = await _route_or_error(ctx, tools_by_name()["transcribe_audio"])
+    target, err_body = await _route_or_error(ctx, tools_by_name()["transcribe_audio"])
     if target is None:
-        return cfg_or_err or {"error": "no transcription slot"}
+        return err_body or {"error": "no transcription slot"}
     body: dict[str, Any] = {
-        "model": _model_id_of(cfg_or_err or {}),
-        # Lemonade's /v1/audio/transcriptions is a multipart endpoint
+        "model": _model_id_of(target),
+        # /v1/audio/transcriptions is a multipart endpoint
         # in the OpenAI contract; tool-call args come in as a JSON
         # blob from the LLM, so PR-16 wraps that as a single-field
-        # JSON body and lets Lemonade's compatibility layer convert.
+        # JSON body and lets the upstream compatibility layer convert.
         # Real binary uploads still go through the dashboard's direct
         # /v1/audio/transcriptions route (PR-14 voice slot).
         "file": args["audio"],
@@ -269,13 +262,13 @@ async def handle_analyze_image(ctx: DispatchContext, args: Mapping[str, Any]) ->
     err = _missing(args, "image", "question")
     if err is not None:
         return {"error": err}
-    target, cfg_or_err = await _route_or_error(ctx, tools_by_name()["analyze_image"])
+    target, err_body = await _route_or_error(ctx, tools_by_name()["analyze_image"])
     if target is None:
-        return cfg_or_err or {"error": "no vision-capable llm slot"}
+        return err_body or {"error": "no vision-capable llm slot"}
     # Vision goes through /v1/chat/completions with an image-URL/data
     # content part in the user message — OpenAI's standard shape.
     body: dict[str, Any] = {
-        "model": _model_id_of(cfg_or_err or {}),
+        "model": _model_id_of(target),
         "messages": [
             {
                 "role": "user",
@@ -296,11 +289,11 @@ async def handle_embed_text(ctx: DispatchContext, args: Mapping[str, Any]) -> di
     err = _missing(args, "input")
     if err is not None:
         return {"error": err}
-    target, cfg_or_err = await _route_or_error(ctx, tools_by_name()["embed_text"])
+    target, err_body = await _route_or_error(ctx, tools_by_name()["embed_text"])
     if target is None:
-        return cfg_or_err or {"error": "no embedding slot"}
+        return err_body or {"error": "no embedding slot"}
     body: dict[str, Any] = {
-        "model": _model_id_of(cfg_or_err or {}),
+        "model": _model_id_of(target),
         "input": args["input"],
     }
     return await _post_json(ctx, "/v1/embeddings", body)
@@ -310,11 +303,11 @@ async def handle_rerank_documents(ctx: DispatchContext, args: Mapping[str, Any])
     err = _missing(args, "query", "documents")
     if err is not None:
         return {"error": err}
-    target, cfg_or_err = await _route_or_error(ctx, tools_by_name()["rerank_documents"])
+    target, err_body = await _route_or_error(ctx, tools_by_name()["rerank_documents"])
     if target is None:
-        return cfg_or_err or {"error": "no reranking slot"}
+        return err_body or {"error": "no reranking slot"}
     body: dict[str, Any] = {
-        "model": _model_id_of(cfg_or_err or {}),
+        "model": _model_id_of(target),
         "query": args["query"],
         "documents": args["documents"],
     }
@@ -356,8 +349,13 @@ async def handle_route_to_chat(ctx: DispatchContext, args: Mapping[str, Any]) ->
         prompt=str(args["prompt"]),
         context=str(args["context"]) if args.get("context") else None,
     )
+    # target_cfg is a CONFIG DICT (iter_configs shape), not a LoadedSlot —
+    # resolve the model id with the dict-shaped helper, else the body
+    # carries model="" and the gateway can't route the delegation.
+    from hal0.omni_router.route_to_chat import _model_of
+
     body = {
-        "model": _model_id_of(target_cfg),
+        "model": _model_of(target_cfg),
         "messages": messages,
     }
     token = DELEGATION_DEPTH.set(current_depth + 1)

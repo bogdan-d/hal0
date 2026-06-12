@@ -8,8 +8,6 @@ Covers:
   - Auto-migration is idempotent (running twice = no-op the second time).
   - ``.v1.bak`` is created exactly once and preserved.
   - Round-trip: write v1 → load → migrates → write v2 → load → no-op.
-  - CLI subcommand prints the diff correctly; ``--apply`` mutates;
-    ``--revert`` restores.
 """
 
 from __future__ import annotations
@@ -20,7 +18,6 @@ from pathlib import Path
 import pytest
 import tomli_w
 from pydantic import ValidationError
-from typer.testing import CliRunner
 
 from hal0.capabilities.config import (
     CAPABILITIES_SCHEMA_VERSION_CURRENT,
@@ -33,7 +30,6 @@ from hal0.capabilities.config import (
     read_schema_version,
     save_capabilities_config,
 )
-from hal0.cli.capabilities_commands import app as capabilities_app
 from hal0.config.schema import (
     BACKEND_TO_DEVICE,
     DEFAULT_DEVICE,
@@ -389,118 +385,82 @@ class TestReadSchemaVersion:
         assert read_schema_version({"schema_version": "bogus"}) == 1
 
 
-# ── CLI: hal0 capabilities migrate-to-lemonade ───────────────────────────────
+# ── Phase E: lemonade runtime/provider migration (#687, spec §9) ──────────────
 
 
-@pytest.fixture
-def runner() -> CliRunner:
-    return CliRunner()
+class TestLemonadeRuntimeMigration:
+    """``runtime="lemonade"`` and ``provider="lemonade"`` no longer exist.
 
+    Legacy TOMLs must still LOAD — coerced to the container runtime with a
+    logged warning — so an upgrade over a pre-Phase-E /etc/hal0 never
+    bricks the API. Profile-less legacy slots get the device-class default
+    profile (DEVICE_DEFAULT_PROFILES); NPU trio alias records (device=npu +
+    type=embedding|transcription) are exempt — the anchor container serves
+    them, so assigning flm-npu would spawn a duplicate FLM container.
+    """
 
-class TestMigrateToLemonadeCLI:
-    def test_no_file_exits_zero(self, tmp_path: Path, runner: CliRunner) -> None:
-        target = tmp_path / "missing.toml"
-        result = runner.invoke(
-            capabilities_app,
-            ["migrate-to-lemonade", "--path", str(target)],
+    def test_runtime_lemonade_coerces_to_container_with_warning(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        with caplog.at_level("WARNING"):
+            s = SlotConfig(name="primary", port=8081, runtime="lemonade")
+        assert s.runtime == "container"
+        assert any(
+            "legacy runtime/provider migrated to container" in r.message for r in caplog.records
         )
-        assert result.exit_code == 0
-        # Rich wraps output; collapse whitespace before the substring assertion.
-        flat = " ".join(result.stdout.split())
-        assert "does not exist" in flat
 
-    def test_already_v2_exits_zero(self, tmp_path: Path, runner: CliRunner) -> None:
-        target = tmp_path / "capabilities.toml"
-        with open(target, "wb") as f:
-            tomli_w.dump({"schema_version": 2, "selections": {}}, f)
-        result = runner.invoke(
-            capabilities_app,
-            ["migrate-to-lemonade", "--path", str(target)],
+    def test_runtime_default_is_container(self) -> None:
+        s = SlotConfig(name="primary", port=8081)
+        assert s.runtime == "container"
+
+    def test_runtime_rejects_unknown_values(self) -> None:
+        with pytest.raises(ValidationError):
+            SlotConfig(name="primary", port=8081, runtime="bogus")
+
+    def test_provider_lemonade_coerces_to_llama_server(self) -> None:
+        s = SlotConfig(name="primary", port=8081, provider="lemonade")
+        assert s.provider == "llama-server"
+
+    def test_provider_default_is_llama_server(self) -> None:
+        s = SlotConfig(name="primary", port=8081)
+        assert s.provider == "llama-server"
+
+    def test_profile_less_legacy_slot_gets_device_class_default(self) -> None:
+        s = SlotConfig(name="chat", port=8081, runtime="lemonade", device="gpu-vulkan")
+        assert s.profile == "vulkan-std"
+
+    def test_profile_less_npu_anchor_gets_flm_npu(self) -> None:
+        s = SlotConfig(name="npu", port=8088, runtime="lemonade", device="npu")
+        assert s.profile == "flm-npu"
+
+    def test_npu_trio_alias_record_keeps_no_profile(self) -> None:
+        s = SlotConfig(
+            name="embed",
+            port=8086,
+            runtime="lemonade",
+            device="npu",
+            type="embedding",
         )
-        assert result.exit_code == 0
-        flat = " ".join(result.stdout.split())
-        assert "already v2" in flat
+        assert s.profile is None
 
-    def test_dry_run_prints_diff_no_write(self, tmp_path: Path, runner: CliRunner) -> None:
-        target = tmp_path / "capabilities.toml"
-        _write_legacy_v1_file(target)
-        before = target.read_bytes()
-
-        result = runner.invoke(
-            capabilities_app,
-            ["migrate-to-lemonade", "--path", str(target)],
+    def test_existing_profile_never_clobbered(self) -> None:
+        s = SlotConfig(
+            name="chat",
+            port=8081,
+            runtime="lemonade",
+            device="gpu-rocm",
+            profile="dense-mtp-rocmfp4",
         )
-        assert result.exit_code == 0
-        # File untouched.
-        assert target.read_bytes() == before
-        # Backup not created on dry-run.
-        assert not capabilities_v1_backup_path(target).exists()
-        # Diff content visible in output.
-        assert "device" in result.stdout
-        assert "schema_version" in result.stdout
+        assert s.profile == "dense-mtp-rocmfp4"
 
-    def test_apply_writes_migration(self, tmp_path: Path, runner: CliRunner) -> None:
-        target = tmp_path / "capabilities.toml"
-        _write_legacy_v1_file(target)
-
-        result = runner.invoke(
-            capabilities_app,
-            ["migrate-to-lemonade", "--path", str(target), "--apply"],
-        )
-        assert result.exit_code == 0
-        # Live file is v2.
-        with open(target, "rb") as f:
-            after = tomllib.load(f)
-        assert after["schema_version"] == 2
-        # Backup exists.
-        assert capabilities_v1_backup_path(target).exists()
-
-    def test_revert_restores_backup(self, tmp_path: Path, runner: CliRunner) -> None:
-        target = tmp_path / "capabilities.toml"
-        _write_legacy_v1_file(target)
-        original_bytes = target.read_bytes()
-
-        # Apply first.
-        runner.invoke(
-            capabilities_app,
-            ["migrate-to-lemonade", "--path", str(target), "--apply"],
-        )
-        assert target.read_bytes() != original_bytes  # migrated
-
-        # Revert.
-        result = runner.invoke(
-            capabilities_app,
-            ["migrate-to-lemonade", "--path", str(target), "--revert"],
-        )
-        assert result.exit_code == 0
-        assert target.read_bytes() == original_bytes
-        # Backup consumed.
-        assert not capabilities_v1_backup_path(target).exists()
-
-    def test_revert_without_backup_errors(self, tmp_path: Path, runner: CliRunner) -> None:
-        target = tmp_path / "capabilities.toml"
-        _write_legacy_v1_file(target)
-        result = runner.invoke(
-            capabilities_app,
-            ["migrate-to-lemonade", "--path", str(target), "--revert"],
-        )
-        assert result.exit_code == 1
-        flat = " ".join(result.stdout.split())
-        assert "no v1 backup" in flat
-
-    def test_apply_and_revert_mutually_exclusive(self, tmp_path: Path, runner: CliRunner) -> None:
-        target = tmp_path / "capabilities.toml"
-        _write_legacy_v1_file(target)
-        result = runner.invoke(
-            capabilities_app,
-            [
-                "migrate-to-lemonade",
-                "--path",
-                str(target),
-                "--apply",
-                "--revert",
-            ],
-        )
-        assert result.exit_code == 2
-        flat = " ".join(result.stdout.split())
-        assert "mutually exclusive" in flat
+    def test_container_slot_untouched_no_warning(self, caplog: pytest.LogCaptureFixture) -> None:
+        with caplog.at_level("WARNING"):
+            s = SlotConfig(
+                name="chat",
+                port=8081,
+                runtime="container",
+                profile="vulkan-std",
+            )
+        assert s.runtime == "container"
+        assert s.profile == "vulkan-std"
+        assert not [r for r in caplog.records if "lemonade" in r.message]

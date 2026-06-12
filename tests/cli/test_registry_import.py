@@ -1,6 +1,6 @@
-"""Tests for ``hal0 registry import`` — PR-21 of v0.2 Lemonade migration.
+"""Tests for ``hal0 registry import`` (v0.2 PR-21).
 
-Covers the behaviour contract from lemonade-adoption-plan §9 + §11 PR-21:
+Covers the behaviour contract from the adoption plan §9 + §11 PR-21:
 
 * Happy path: tarball with ``registry/registry.toml`` → imported, success
   message printed.
@@ -167,7 +167,6 @@ def test_import_happy_path_canonical_layout(tmp_path: Path) -> None:
     assert result.exit_code == 0, result.output
     assert dest.read_bytes() == REGISTRY_PAYLOAD
     # Success guidance must point operators at the next step.
-    assert "hal0 capabilities sync" in result.output
     assert "bundle" in result.output.lower() or "slot add" in result.output
 
 
