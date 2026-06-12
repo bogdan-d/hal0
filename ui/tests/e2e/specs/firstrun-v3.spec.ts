@@ -14,8 +14,24 @@
  * sidesteps the picker → storage → confirm transition so the spec stays
  * focused and avoids the test.fixme multi-step flow.
  */
-import { test, expect } from '../fixtures/apiMock'
+import { test, expect, json } from '../fixtures/apiMock'
 import { installSseHarness, emitSseTyped, waitForSse } from '../fixtures/sseHarness'
+
+// ── Shared mock responses ─────────────────────────────────────────────
+
+/** Minimal /api/install/state response — first_run=true so the wizard shows. */
+const INSTALL_STATE = {
+  first_run: true,
+  has_models: false,
+  has_default_slot: false,
+  openwebui_running: false,
+}
+
+/** Minimal /api/install/curated-models response. */
+const CURATED_MODELS = {
+  models: [],
+  custom_allowed: true,
+}
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
@@ -42,8 +58,19 @@ async function mountProgress(page: any, modelIds: string[]) {
 // ── Tests ─────────────────────────────────────────────────────────────
 
 test.describe('FirstRun v3 (/firstrun)', () => {
+  test.beforeEach(async ({ page }) => {
+    // Wire the /api/install/* endpoints that the FirstRun hooks now call.
+    await page.route('**/api/install/state', (route) => json(route, INSTALL_STATE))
+    await page.route('**/api/install/curated-models', (route) => json(route, CURATED_MODELS))
+    // Return a realistic pick-default response (real curated model id, not bundle id).
+    await page.route('**/api/install/pick-default', (route) =>
+      json(route, { model_id: 'qwen3.5-9b', slot: 'chat', pull_job_id: 'job-001', next: '/api/models/qwen3.5-9b/pull/status' }),
+    )
+    await page.route('**/api/install/complete', (route) => json(route, { first_run: false }))
+  })
+
   test('picker (state 1) renders welcome + tier cards', async ({ page }) => {
-    await page.goto('/#firstrun')
+    await page.goto('/#firstrun', { waitUntil: 'domcontentloaded' })
     await expect(page.locator('.fr-title')).toBeVisible()
     await expect(page.locator('.fr-title')).toContainText('hal0')
     // tier cards (grid layout default)
@@ -54,7 +81,7 @@ test.describe('FirstRun v3 (/firstrun)', () => {
   })
 
   test('host-detected RAM/GPU/NPU segments render', async ({ page }) => {
-    await page.goto('/#firstrun')
+    await page.goto('/#firstrun', { waitUntil: 'domcontentloaded' })
     await expect(page.locator('.fr-detect')).toBeVisible()
     await expect(page.locator('.fr-detect .seg', { hasText: 'RAM' })).toBeVisible()
     await expect(page.locator('.fr-detect .seg', { hasText: 'GPU' })).toBeVisible()
@@ -62,13 +89,77 @@ test.describe('FirstRun v3 (/firstrun)', () => {
   })
 
   test.fixme('clicking a tier transitions to confirm (state 2)', async ({ page }) => {
-    await page.goto('/#firstrun')
+    await page.goto('/#firstrun', { waitUntil: 'domcontentloaded' })
     // tier buttons inside `.unfit` cards are `disabled={!fits}` (firstrun.jsx:108,163);
     // pick the recommended tier — guaranteed to fit per recommendation logic.
     const firstTierBtn = page.locator('.tier-card button:not([disabled])').first()
     await firstTierBtn.click()
     // confirm card header
     await expect(page.locator('.fr-confirm-h')).toBeVisible({ timeout: 5000 })
+  })
+
+  // ── Confirm-step install: real pick-default call ───────────────────
+  //
+  // Pins that the Install button calls POST /api/install/pick-default with
+  // the REAL curated model id (e.g. 'qwen3.5-9b') rather than the bundle
+  // tier string ('default'), which the backend 404s with CuratedModelNotFound.
+  //
+  // Uses FirstRunConfirm mounted directly (window export) to skip the
+  // picker → storage → confirm multi-step navigation.
+
+  test('install button sends real curated model_id to pick-default (not bundle id)', async ({ page }) => {
+    // Capture the pick-default request body to assert the model_id.
+    let capturedBody: { model_id?: string; slot?: string } | null = null
+    await page.route('**/api/install/pick-default', async (route) => {
+      capturedBody = await route.request().postDataJSON()
+      return json(route, {
+        model_id: capturedBody?.model_id ?? 'qwen3.5-9b',
+        slot: 'chat',
+        pull_job_id: 'job-001',
+        next: `/api/models/${capturedBody?.model_id ?? 'qwen3.5-9b'}/pull/status`,
+      })
+    })
+
+    // Navigate first so the dashboard bundle (incl. FirstRunConfirm export)
+    // is loaded and QueryClient is live.
+    await page.goto('/#firstrun', { waitUntil: 'domcontentloaded' })
+    // Mount FirstRunConfirm directly — bypasses picker+storage steps.
+    await page.evaluate(() => {
+      const root = document.getElementById('root') || document.body
+      root.innerHTML = '<div id="fc-test"></div>'
+      const el = document.getElementById('fc-test')!
+      const Comp = (window as any).FirstRunConfirm
+      if (!Comp) throw new Error('FirstRunConfirm not on window — check Object.assign export')
+      const QCP = (window as any).Hal0QueryClientProvider
+      const qc  = (window as any).Hal0QueryClient
+      const R   = (window as any).React
+      ;(window as any).ReactDOM.createRoot(el).render(
+        R.createElement(QCP, { client: qc },
+          R.createElement(Comp, {
+            bundleId: 'default',
+            onBack: () => {},
+            onInstall: () => {},
+          }),
+        ),
+      )
+    })
+
+    // Confirm card should be visible.
+    await expect(page.locator('.fr-confirm-h')).toBeVisible({ timeout: 5_000 })
+
+    // Click Install — triggers useFirstRunInstall.mutateAsync({ bundle: 'default' }).
+    const installBtn = page.locator('button', { hasText: /Install/ })
+    await expect(installBtn).not.toBeDisabled()
+    const [response] = await Promise.all([
+      page.waitForResponse('**/api/install/pick-default', { timeout: 10_000 }),
+      installBtn.click(),
+    ])
+    expect(response.status()).toBe(200)
+
+    // The real curated id for 'default' tier is 'qwen3.5-9b' (BUNDLE_CHAT_MODELS).
+    // If the old buggy code ran, capturedBody.model_id would be 'default' and 404.
+    expect(capturedBody?.model_id).toBe('qwen3.5-9b')
+    expect(capturedBody?.slot).toBe('chat')
   })
 
   // ── Progress pane — live SSE rows ──────────────────────────────────
@@ -91,7 +182,7 @@ test.describe('FirstRun v3 (/firstrun)', () => {
     })
 
     test('empty modelIds shows graceful empty state (no HAL0_DATA mock rows)', async ({ page }) => {
-      await page.goto('/#firstrun')
+      await page.goto('/#firstrun', { waitUntil: 'domcontentloaded' })
       await mountProgress(page, [])
       // Graceful placeholder — NOT the old mock row text.
       await expect(page.locator('.fr-prog-list')).toContainText('Install started')
@@ -102,7 +193,7 @@ test.describe('FirstRun v3 (/firstrun)', () => {
     })
 
     test('modelIds renders one dl-row per model in queued/idle state', async ({ page }) => {
-      await page.goto('/#firstrun')
+      await page.goto('/#firstrun', { waitUntil: 'domcontentloaded' })
       await mountProgress(page, [MODEL_A, MODEL_B])
       // Two rows mounted — one per model ID.
       await expect(page.locator('.fr-prog-list .dl-row')).toHaveCount(2)
@@ -112,7 +203,7 @@ test.describe('FirstRun v3 (/firstrun)', () => {
     })
 
     test('progress SSE event updates bar and pct for a running model', async ({ page }) => {
-      await page.goto('/#firstrun')
+      await page.goto('/#firstrun', { waitUntil: 'domcontentloaded' })
       await mountProgress(page, [MODEL_A])
       // FrDownloadRow calls reattach → opens EventSource for MODEL_A's pull stream.
       await waitForSse(page, `/api/models/${MODEL_A}/pull/stream`, 6_000)
@@ -134,7 +225,7 @@ test.describe('FirstRun v3 (/firstrun)', () => {
     })
 
     test('completed SSE event marks row ok', async ({ page }) => {
-      await page.goto('/#firstrun')
+      await page.goto('/#firstrun', { waitUntil: 'domcontentloaded' })
       await mountProgress(page, [MODEL_A])
       await waitForSse(page, `/api/models/${MODEL_A}/pull/stream`, 6_000)
 
@@ -149,7 +240,7 @@ test.describe('FirstRun v3 (/firstrun)', () => {
     })
 
     test('failed SSE event shows error row with Retry button', async ({ page }) => {
-      await page.goto('/#firstrun')
+      await page.goto('/#firstrun', { waitUntil: 'domcontentloaded' })
       await mountProgress(page, [MODEL_A])
       await waitForSse(page, `/api/models/${MODEL_A}/pull/stream`, 6_000)
 
@@ -164,7 +255,7 @@ test.describe('FirstRun v3 (/firstrun)', () => {
     })
 
     test('multiple models open independent SSE streams', async ({ page }) => {
-      await page.goto('/#firstrun')
+      await page.goto('/#firstrun', { waitUntil: 'domcontentloaded' })
       await mountProgress(page, [MODEL_A, MODEL_B])
       await waitForSse(page, `/api/models/${MODEL_A}/pull/stream`, 6_000)
       await waitForSse(page, `/api/models/${MODEL_B}/pull/stream`, 6_000)

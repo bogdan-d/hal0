@@ -57,7 +57,17 @@ export const ENDPOINTS = {
   // ── Backends ─────────────────────────────────────────────────────
   backends: '/api/backends',
   backend: (id: string) => `/api/backends/${encodeURIComponent(id)}`,
+  // NOTE: backendInstall has no generic backend route. The only install-
+  // like operation available is NPU: POST /api/backends/npu/load (and
+  // /api/backends/npu/unload). The UI flow-modals.jsx BackendInstallModal
+  // should route the NPU case to backendNpuLoad; remove this constant once
+  // ui-sweep-a's BackendInstallModal migration is complete.
   backendInstall: (id: string) => `/api/backends/${encodeURIComponent(id)}/install`,
+  backendNpuLoad: '/api/backends/npu/load',
+  backendNpuUnload: '/api/backends/npu/unload',
+  // Alias spelling used in ui-sweep-a hook files (PR #741 TODOs).
+  backendsNpuLoad: '/api/backends/npu/load',
+  backendsNpuUnload: '/api/backends/npu/unload',
 
   // ── Capabilities ─────────────────────────────────────────────────
   capabilities: '/api/capabilities',
@@ -81,9 +91,12 @@ export const ENDPOINTS = {
   agentPersonaEnums: '/api/agents/persona-enums',
 
   // ── Agents — MCP-client allow-list (ADR-0013) ────────────────────
-  agentMcpClients: '/api/agents/mcp/clients',
+  // Backend: GET /api/mcp/clients (mcp.py:469) — note the prefix is
+  // /api/mcp, NOT /api/agents/mcp.  The original constant had the wrong
+  // prefix which caused the Clients tab to 404 on every real install.
+  agentMcpClients: '/api/mcp/clients',
   agentMcpClient: (name: string) =>
-    `/api/agents/mcp/clients/${encodeURIComponent(name)}`,
+    `/api/mcp/clients/${encodeURIComponent(name)}`,
 
   // ── Agents — bundled lifecycle + sidebar rollup (v0.3 PR-6) ──────
   // `agents` lives in the catalogue block above (one entry, used by
@@ -107,10 +120,22 @@ export const ENDPOINTS = {
   agentActivity: (id: string) =>
     `/api/agents/${encodeURIComponent(id)}/activity`,
   agentApprovals: '/api/agent/approvals',
-  // The path below DOES NOT exist yet in any merged backend PR (the
-  // sidebar component degrades gracefully with "—" + warn). Recorded
-  // here so the wiring is single-place when the route lands.
-  agentMemoryStats: '/api/agents/hermes/memory/stats',
+  // Approval CRUD — list is an alias of agentApprovals; approve/deny are
+  // the action endpoints added by backend-dev task #7 (PR #741 TODOs).
+  agentApprovalsList: '/api/agent/approvals',
+  agentApprovalApprove: (id: string) =>
+    `/api/agent/approvals/${encodeURIComponent(id)}/approve`,
+  agentApprovalDeny: (id: string) =>
+    `/api/agent/approvals/${encodeURIComponent(id)}/deny`,
+  // Memory list endpoint (ADR-0014, PR #736 backend surface).
+  memoryList: '/api/memory/list',
+  // Per-agent memory stats — parameterised by agent id. Previously a
+  // hardcoded "/api/agents/hermes/memory/stats" placeholder; now generic.
+  agentMemoryStats: (id: string) =>
+    `/api/agents/${encodeURIComponent(id)}/memory/stats`,
+  // Persona update — PATCH/PUT /api/agents/{agentId}/personas/{pid}.
+  agentPersonaUpdate: (agentId: string, pid: string) =>
+    `/api/agents/${encodeURIComponent(agentId)}/personas/${encodeURIComponent(pid)}`,
 
   // ── MCP host introspection (issue #206) ──────────────────────────
   // Read-only view of hosted MCP servers, connected clients, the
@@ -187,11 +212,18 @@ export const ENDPOINTS = {
   profiles: '/api/profiles',
   profile: (name: string) => `/api/profiles/${encodeURIComponent(name)}`,
 
-  // Install / FirstRun
+  // Install / FirstRun — all routes are under /api/install/* (installer.py).
+  // The old /api/firstrun/* prefix was a stale artifact; the backend mounts
+  // the router at /api/install (verified in src/hal0/api/routes/installer.py).
   installState: '/api/install/state',
-  firstrunState: '/api/firstrun/state',
-  firstrunCuratedModels: '/api/firstrun/curated-models',
-  firstrunPickDefault: '/api/firstrun/pick-default',
-  firstrunInstall: '/api/firstrun/install',
-  firstrunComplete: '/api/firstrun/complete',
+  installCuratedModels: '/api/install/curated-models',
+  installPickDefault: '/api/install/pick-default',
+  // NOTE: there is no single /api/install/install (bundle-level) endpoint.
+  // The wizard "install" step maps to POST /api/install/pick-default per model.
+  // The hook (useFirstRunInstall) calls pick-default; the UI handles graceful
+  // degradation on any error so progress stage still renders.
+  installComplete: '/api/install/complete',
+  // PUT /api/install/slots/{slot}/model — assign a model to a slot post-pick.
+  installSlotModel: (slot: string) =>
+    `/api/install/slots/${encodeURIComponent(slot)}/model`,
 } as const
