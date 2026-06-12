@@ -18,14 +18,18 @@ OpenWebUI runs as its own systemd unit (`hal0-openwebui.service`).
                                 │ systemctl + HTTP probes
                 ┌───────────────┼───────────────┐
                 ▼               ▼               ▼
-        hal0-slot@primary  hal0-slot@embed   hal0-slot@stt   ...
-        (llama.cpp)        (llama.cpp)       (whispercpp via lemond)
+        hal0-slot@chat   hal0-slot@npu    hal0-slot@img   ...
+        (llama-server    (FLM, NPU trio:  (ComfyUI)
+         container)       chat+asr+embed)
 ```
 
-Each slot is independent: its own port (8081+), its own model, its own
-lifecycle. The API process only owns slot **lifecycle** (load / unload /
-restart) and **routing** (dispatcher → slot → response). It never holds
-a model in its own memory.
+Each slot is independent: its own port, its own model, its own
+lifecycle. Every slot runs as a **podman container** under its
+`hal0-slot@<name>.service` systemd unit (the lemonade `lemond` daemon
+that fronted all slots in v0.2 was removed in the container-switchover
+epic, #687). The API process only owns slot **lifecycle** (load /
+unload / restart) and **routing** (dispatcher → slot → response). It
+never holds a model in its own memory.
 
 ## Module layout
 
@@ -49,11 +53,13 @@ src/hal0/
 │   ├── manager.py             # single-pick install / uninstall
 │   └── mcp_client.py          # MCP client allow-list (ADR-0013)
 ├── cli/agent_shim.py# /usr/local/bin/hal0-agent for hal0-agent@.service
-├── slots/           # slot lifecycle (state machine, unit rendering)
-├── dispatcher/      # routing, single-flight, decision logging
-├── providers/       # backend abstraction (llama_server, flm, comfyui;
-│                    #   slot lifecycle dispatches 100% through lemonade)
-├── lemonade/        # idle driver + metrics shim + log bridge
+├── slots/           # slot lifecycle (state machine, unit rendering,
+│                    #   GpuArbiter, prometheus metrics)
+├── dispatcher/      # routing, single-flight, NPU-trio, decision logging
+├── providers/       # backend abstraction (container, llama_server, flm,
+│                    #   kokoro, comfyui); slot lifecycle dispatches 100%
+│                    #   through ContainerProvider (one podman container
+│                    #   per slot under hal0-slot@<name>.service)
 ├── capabilities/    # UX overlay grouping flat slots into capability
 │                    #   cards (catalog + config + orchestrator);
 │                    #   selections persist in capabilities.toml,
@@ -68,13 +74,16 @@ src/hal0/
 ├── upstreams/       # external LLM providers + composite hal0 upstream
 ├── config/          # pydantic schemas, TOML loader, migrations
 ├── events/          # in-process pub/sub for SSE streams
-├── journal/         # lemond log ring + unified /api/journal feed
-├── memory/          # CogneeWrapper + MemoryRecord
+├── journal/         # shared time helper; /api/journal is the unified
+│                    #   EventBus feed, per-slot logs read from journald
+├── memory/          # Hindsight engine client/provider + MemoryRecord
 ├── mcp/             # hal0-admin + hal0-memory FastMCP servers
 ├── omni_router/     # client-side OpenAI tool-calling loop
 ├── updater/         # self-update (cosign-verified, atomic swap)
 ├── installer/       # first-run wizard backend, hardware probe writer
-├── voice/           # REMOVED in #620 — lemond serves STT/TTS natively
+├── voice/           # emptied in #620 (in-process Moonshine/Kokoro
+│                    #   providers deleted); STT runs in the npu FLM
+│                    #   container, TTS in the kokoro-cpu container
 ├── openwebui/       # companion service env file writer
 └── cli/             # `hal0` Typer CLI (incl. `capabilities migrate`)
 ```
@@ -104,41 +113,59 @@ namespace drift.
 
 ## Key boundaries
 
-- **Slot lifecycle is pure systemd.** The slot manager talks to
-  systemctl + filesystem (env files, unit overrides) + journald. It
-  doesn't import HTTP client code, doesn't know about models other than
-  via the registry, and doesn't make assumptions about backends beyond
-  the provider ABC.
+- **Slot lifecycle is pure systemd + podman.** `SlotManager` talks to
+  systemctl + the filesystem (state.json, unit files) + journald, and
+  dispatches every state-changing call through `ContainerProvider`,
+  which renders and `systemctl restart`s a self-contained
+  `hal0-slot@<name>.service` unit whose `ExecStart` is one
+  `podman run … <image> --model <path> --port <n> <flags>`. It doesn't
+  import the dispatcher, doesn't know about models other than via the
+  registry, and doesn't make assumptions about backends beyond the
+  provider ABC.
 - **Dispatcher is HTTP-only.** It does not start/stop slots. It reads
   slot status from the slot manager and routes requests. If a slot is
   offline, it returns a structured error; restarting is a separate API
   call.
-- **Providers are stateless.** Each provider (`LlamaServerProvider`,
-  `FLMProvider`, `ComfyUIProvider`, `LemonadeProvider`) is a class with
-  `build_env()`, `start_cmd()`, `health()`, `infer()`. They don't hold
-  connection state, don't manage systemd, and don't share globals.
-  One provider per backend type.
+- **Providers are stateless.** Each provider (`ContainerProvider`,
+  `LlamaServerProvider`, `FLMProvider`, `KokoroProvider`,
+  `ComfyUIProvider`) is a class with `build_env()`, `start_cmd()`,
+  `health()`, `infer()` (the container path also adds
+  `load_sync`/`unload_sync`/`status`/`container_spec`). They don't hold
+  connection state, don't share globals, and one instance is shared
+  process-wide. One provider per backend type.
 
-  **Dispatch model (v0.2, ADR-0008):** SlotManager routes 100% through
-  `LemonadeProvider`. The three non-SlotManager callers that bypass this
-  are: `api/routes/v1.py` → `ComfyUIProvider.infer()` (image-gen);
-  `api/routes/hardware.py` → `FLMProvider.flm_served_models()` (NPU
-  footprint probe); `registry/pull.py` → `FLMProvider._probe_flm_catalog()`
-  (FLM model-tag resolution).
+  **Dispatch model (container runtime, #652/#687):** `SlotManager`
+  routes every slot's lifecycle 100% through `ContainerProvider` — one
+  podman container per slot. GPU/llama-server slots render via the
+  flag-bundle path; `_spec_provider_for` hands NPU (FLM), TTS (Kokoro),
+  and image (ComfyUI) slots to their own provider, which builds a
+  `ContainerSpec` rendered into the same unit shape. The profile
+  (`/etc/hal0/profiles.toml`, seeded from `config/schema.SEED_PROFILES`)
+  supplies the container image + bench-tuned flags; the slot TOML
+  supplies model path, `context_size`, and port.
+
+  Request dispatch (separate from lifecycle) flows through hal0-api's
+  `/v1` surface: the `Dispatcher` (registry binding → container-remote
+  preemption → warm-cache passthrough → legacy heuristics), the
+  `NpuTrioRouter` (static-port STT/embed forwarding to the npu
+  container), and the `GpuArbiter` (exclusive llm⇄img GPU groups). The
+  composite `hal0` upstream exists only to aggregate `/v1/models`; it is
+  never a forward target.
 
   `FLMProvider` additionally probes `flm list -j` inside the toolbox image
   to advertise its own model-tag namespace (`share/flm/model_list.json`) —
   it does **not** run arbitrary GGUFs from the registry.
 
-  **STT/TTS dispatch is lemond-only (#620).** The dead local
-  `MoonshineProvider` and `KokoroProvider` implementation classes (the
-  `hal0.voice` package that ran Moonshine/Kokoro in-process) were deleted
-  in #620 — they had no live importers. `moonshine` and `kokoro` **remain
-  valid capability-provider identifiers** in the config/capability layer
-  (`SlotConfig.provider`, `capabilities/config.py`, `capabilities/catalog.py`,
-  the backend/model classification in `api/routes`); the actual STT/TTS
-  inference is served by lemond (whispercpp + kokoro recipes) or the
-  corresponding toolbox image, not by an in-process hal0 provider class.
+  **STT/TTS run in containers, not in-process (#620).** The dead local
+  `MoonshineProvider` / in-process `Kokoro` implementation (the
+  `hal0.voice` package that ran Moonshine/Kokoro in the API process) was
+  deleted in #620 — it had no live importers. `moonshine` and `kokoro`
+  **remain valid capability-provider identifiers** in the
+  config/capability layer (`SlotConfig.provider`, `capabilities/config.py`,
+  `capabilities/catalog.py`, the backend/model classification in
+  `api/routes`); the actual inference is served by the FLM NPU container
+  (`--asr` role of the npu trio) for STT and the `kokoro-cpu` container
+  for TTS, not by an in-process hal0 provider class.
 - **The registry is the only source of truth for "what models exist."**
   Atomic TOML files under `/var/lib/hal0/registry/`. mtime-cached. Slot
   configs reference model IDs from the registry; if a model is deleted,
@@ -234,9 +261,11 @@ surface proxy. Runtime is whatever the bundled upstream does natively.
   via `/var/lib/hal0/state/agents/hermes/provision.json`.
 * **Service** — `hal0-agent@<id>.service` (template; v0.3 instances:
   `hermes` only). Sandboxed (`NoNewPrivileges`, `ProtectSystem=strict`,
-  `ProtectHome=yes`). Type=notify + `WatchdogSec=60`. Soft-link to
-  lemonade (`Wants=`, NOT `Requires=`/`BindsTo=`) so the agent survives
-  a lemonade GPU-cleanup hang.
+  `ProtectHome=yes`). Type=notify + `WatchdogSec=60`. The agent reaches
+  inference over HTTP at `HAL0_INFERENCE_BASE=http://127.0.0.1:8080`
+  (hal0-api, which fronts the per-slot inference containers) — a plain
+  endpoint hint, not a hard systemd dependency, so the agent survives a
+  slot container restart or GPU-cleanup hang.
 * **Chat proxy** — `src/hal0/api/agents/chat_proxy.py`. WS upgrades
   gated by Origin allowlist + HMAC session cookie; outbound carries
   the runtime.json embed token in `Authorization: Bearer …`. Browser

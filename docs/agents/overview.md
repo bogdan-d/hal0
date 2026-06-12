@@ -24,7 +24,7 @@ page it always means the bundled-app sense, never "slot",
 | pi-coder        | Code in repo, **dropped from picker + promo** | CLI | n/a in v0.3 |
 
 pi-coder code stays at `installer/agents/pi-coder.sh` +
-`src/hal0/agents/` for reactivation after the Lemonade UI overhaul.
+`src/hal0/agents/` for reactivation in a future release.
 v0.3 narrows the user-facing bundle to Hermes only — see the
 release-notes for the rationale.
 

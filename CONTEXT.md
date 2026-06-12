@@ -64,38 +64,38 @@ Overloaded THREE ways. Default to sense (3) in hal0 product context.
 
 ## device
 
-Per-slot hardware preference in v0.2. Field on `SlotConfig` replacing v0.1.x's overloaded `backend` field (which mixed providers and backends). Enum: `gpu-rocm` | `gpu-vulkan` | `cpu` | `npu`. Default for new installs: `gpu-rocm`. `LemonadeProvider` maps this to Lemonade's recipe:backend pair internally (e.g. `gpu-rocm` → `llamacpp:rocm`, `npu` → `flm:npu`).
+Per-slot hardware preference. Field on `SlotConfig` replacing v0.1.x's overloaded `backend` field (which mixed providers and backends). Enum: `gpu-rocm` | `gpu-vulkan` | `cpu` | `npu`. Default for new installs: `gpu-rocm`. `model_meta.device_to_backend(device)` maps it to a `(recipe, llamacpp)` pair, and the device selects the container profile (`config/schema.DEVICE_DEFAULT_PROFILES`): `gpu-rocm` → `moe-rocmfp4` (ROCm-FP4 llama-server toolbox), `gpu-vulkan` → `vulkan-std`, `cpu` → `kokoro-cpu`, `npu` → `flm-npu` (the FLM NPU toolbox).
 
-Note: spike data showed `gpu-vulkan` is much slower than `gpu-rocm` for Strix Halo through Lemonade — likely user-facing UI should advise `gpu-rocm` as the recommended default and label `gpu-vulkan` as fallback.
+Note: spike data showed `gpu-vulkan` is much slower than `gpu-rocm` for Strix Halo — the user-facing UI should advise `gpu-rocm` as the recommended default and label `gpu-vulkan` as fallback.
 
 ## slot
 
 A named, configured serving target — e.g. `primary`, `embed`, `stt`, `tts`, `img`, plus optional chat slots (`agent`, future others). NOT a memory or RAG primitive — slots serve inference, memory lives in `/mcp/memory`.
 
-Two sub-senses depending on release:
+**Current runtime (container-per-slot, #652/#687).** A slot is one `hal0-slot@<name>.service` systemd unit whose `ExecStart` is a single `podman run` of the slot's container (llama-server, FLM, Kokoro, or ComfyUI). `SlotManager` dispatches lifecycle (load/unload/swap/status) through `ContainerProvider`; the profile (`/etc/hal0/profiles.toml`) supplies the image + bench-tuned flags, the slot TOML supplies model/port/`context_size`. Slot state (`ready`/`idle`/`serving`) comes from the state machine in `hal0.slots.state`, reconciled against `systemctl is-active` + a `/health` probe on the slot's loopback port. Slot identity persists in `capabilities.toml`; the runtime layer is the per-slot container.
 
-1. **v0.1.x slot (current)** — `hal0-slot@.service` systemd template unit, parameterized by slot name. Owns a process + port + container under a Provider class (PLAN.md §2).
-2. **v0.2 slot (with Lemonade)** — a logical mapping from slot name to ONE Lemonade-loaded model. The per-slot systemd template retires; `lemond` is the single shared process. Slot state (`ready`/`idle`/`serving`) is derived from `/v1/health.loaded[]` by model_name lookup. User-facing UX unchanged. See ADR-0006 (pending).
+(Historical: in v0.2, slots were a logical mapping onto a single shared `lemond` process with no per-slot systemd unit. The lemonade runtime was removed in the container-switchover epic, #687; the per-slot template unit returned, this time wrapping a podman container.)
 
-`SlotManager.start(slot)` in v0.2 calls Lemonade load semantics rather than starting a systemd unit. Slot identity persists in `capabilities.toml` and the user-facing surface; the runtime layer is the Lemonade pool.
+### slot inventory
 
-### slot inventory (v0.2)
+A slot has exactly ONE `type` and ONE loaded model. **Slot identity is a bare name** (e.g., `chat`, `embed`, `rerank`, `agent`) — unique across the whole `capabilities.toml`. The `group` is a field on the slot's selection, used purely for dashboard rollup. `embed` and `rerank` are two separate slots filed under the `embed` group; same for `stt`/`tts` under `voice`. (The seeded `chat` slot was named `primary` in v0.1.x; `primary` is now a back-compat alias for `chat` in `SlotManager.SLOT_ALIASES`.)
 
-A slot has exactly ONE Lemonade `type` and ONE loaded model. **Slot identity is a bare name** (e.g., `primary`, `embed`, `rerank`, `agent`) — unique across the whole `capabilities.toml`. The `group` is a field on the slot's selection, used purely for dashboard rollup. `embed` and `rerank` are two separate slots filed under the `embed` group; same for `stt`/`tts` under `voice`.
+Migration note: the v0.1.x `capabilities.toml` shape `selections.<group>.<slot>` carries the group implicitly in the TOML path. The same TOML path is kept for back-compat but the canonical identity in code is the bare slot name.
 
-Migration note: the v0.1.x `capabilities.toml` shape `selections.<group>.<slot>` carries the group implicitly in the TOML path. v0.2 keeps the same TOML path for back-compat but the canonical identity in code is the bare slot name.
+The seeded set is `SlotManager.SEEDED_SLOTS = (chat, embed, rerank, stt, tts, img, vision, agent)`; the NPU shadow slots `(stt-npu, embed-npu)` (`NPU_SEEDED_SLOTS`) seed only when the FastFlowLM `.deb` is installed.
 
-| Slot | type (Lemonade) | UI group | Default at install |
+| Slot | type | UI group | Default at install |
 |---|---|---|---|
-| `primary` | `llm` | chat | seeded, empty model |
+| `chat` | `llm` | chat | seeded, empty model |
+| `agent` | `llm` | chat | seeded, empty (GPU MoE chat-role sibling of `chat`) |
 | `embed` | `embedding` | embed | seeded, empty |
 | `rerank` | `reranking` | embed | seeded, empty |
 | `stt` | `transcription` | voice | seeded, empty |
-| `tts` | `tts` | voice | seeded, kokoro:cpu only in v0.2 |
-| `img` | `image` | img | seeded, empty |
-| `agent` | `llm` | chat | **only added when a bundled agent installs** — side-effect of Phase 8 |
+| `tts` | `tts` | voice | seeded, empty (kokoro-cpu container) |
+| `img` | `image` | img | seeded, empty (ComfyUI container) |
+| `vision` | `llm` | chat | seeded, empty |
 
-The seeded slots are a **catalog**, not a stack — every selection is empty (`enabled = false`, `model = ""`) until the user picks. v0.2 does not prescribe a model stack at install.
+The seeded slots are a **catalog**, not a stack — every selection is empty (`enabled = false`, `model = ""`) until the user picks. The platform does not prescribe a model stack at install.
 
 ### group
 
@@ -106,7 +106,7 @@ Pure UI rollup in `capabilities.toml` (`selections.<group>.<slot>`). Groups bund
 Beyond the seeded catalog, the user can add named slots via the dashboard (`hal0 slot add NAME --type TYPE --model MODEL`). The new slot:
 
 - Must have a unique kebab-case `name` (not in the reserved seeded set)
-- Must declare a `type` (see "slot type" below) — drives Lemonade per-type LRU and OmniRouter tool routing
+- Must declare a `type` (see "slot type" below) — drives OmniRouter tool routing and (for NPU) the single-context exclusivity rule
 - Picks a `model` from `registry.toml` OR pulls fresh via `/v1/pull` under the `user.*` namespace
 - Lives in `capabilities.toml` under whichever group the user picks (or `selections.custom.<name>` if none chosen)
 
@@ -116,19 +116,19 @@ Removing a user-defined slot is a no-side-effect operation (`hal0 slot remove NA
 
 The Strix Halo NPU enforces ONE AMDXDNA hardware context per host — so only one `flm serve` process can run at a time. **But that one process can host three model roles simultaneously** via FLM's `--asr 1 --embed 1` flags: chat + transcription + embedding. Verified empirically 2026-05-22 (gemma3:1b + Whisper-V3-Turbo + Embedding-Gemma-300M loaded in one FLM process, ~2 GB NPU memory total, chat at 40 tok/s).
 
-hal0 v0.2 leverages this by setting Lemonade's `flm.args = "--asr 1 --embed 1"` config and exposing three NPU slots in `capabilities.toml`:
+hal0 leverages this with the `flm-npu` profile (`flm serve --asr 1 --embed 1`) running in the `npu` slot's container (`hal0-slot@npu`), which answers `/v1/chat/completions`, `/v1/audio/transcriptions`, and `/v1/embeddings` on one static port. Three slot records ride that one container:
 
 | Slot | type | device | Backing |
 |---|---|---|---|
-| `agent` | `llm` | `npu` | the FLM trio's chat model |
-| `stt-npu` | `transcription` | `npu` | the same FLM trio's `--asr` model |
-| `embed-npu` | `embedding` | `npu` | the same FLM trio's `--embed` model |
+| `npu` | `llm` | `npu` | the FLM trio's chat model (the anchor — owns the container) |
+| `stt-npu` | `transcription` | `npu` | the same FLM container's `--asr` model |
+| `embed-npu` | `embedding` | `npu` | the same FLM container's `--embed` model |
 
-**Routing fan-out.** Lemonade only knows about the chat slot; it sees `flm.args` but tracks the chat model as the WrappedServer. hal0's capability dispatcher reads `/v1/health.loaded[].backend_url` for the FLM model and routes `stt-npu`/`embed-npu` requests directly to that same port's `/v1/audio/transcriptions` and `/v1/embeddings` endpoints.
+**Routing fan-out.** The `npu` chat slot routes through its registered upstream like any other slot. The two shadow roles are handled by `NpuTrioRouter` (`dispatcher/npu_trio.py`): when `v1.py`'s gating check detects an enabled `device=npu` transcription/embedding slot, it forwards the request straight to the npu container's static port (read from slot config — no discovery step) at `/v1/audio/transcriptions` / `/v1/embeddings`.
 
-**Coresident constraint.** Loading any one of the three slots starts the FLM trio process. The other two are "available" instantly (no extra load time). Disabling a slot frees its model role at next FLM restart but otherwise the process keeps running.
+**Coresident constraint.** Loading the `npu` chat slot starts the FLM container; the two shadow roles are then available instantly (no extra load time). A model swap on any NPU role is a container restart (single AMDXDNA context — one `flm serve` at a time). `[npu] asr` / `[npu] embed` TOML toggles (orchestrator-owned) decide which shadow roles the container serves.
 
-**Default behavior on install.** When the FLM `.deb` is detected at install time AND a bundled agent is being installed, all three NPU slots (`agent`, `stt-npu`, `embed-npu`) default to `enabled = true` with default trio models (`gemma3:1b`, `whisper-v3-turbo`, `embed-gemma:300m`). Users without FLM installed get no NPU slots at all.
+**Default behavior on install.** The `stt-npu` / `embed-npu` shadow slots seed only when the FastFlowLM `.deb` is detected at install (`NPU_SEEDED_SLOTS`); the `npu` chat anchor is opt-in at Pro+ bundle tier. Users without FLM installed get no NPU slots at all.
 
 **Hard constraints (validated in capabilities.toml):**
 - Only one `device = "npu", type = "llm"` slot can be `enabled = true` at a time. Selecting a different NPU chat means swapping the FLM trio's chat model (slow but supported).
@@ -139,15 +139,14 @@ hal0 v0.2 leverages this by setting Lemonade's `flm.args = "--asr 1 --embed 1"` 
 ## slot type
 
 The discriminator that determines:
-1. **Lemonade per-type LRU budget** — how many of this slot's models can be co-resident.
-2. **OmniRouter tool routing** — which tools dispatch to slots of this type.
-3. **Device constraints** — e.g. `npu`-device slots are exclusive at the runtime layer (Lemonade swaps on every NPU load; only one model occupies the NPU at a time).
+1. **OmniRouter tool routing** — which tools dispatch to slots of this type.
+2. **Device / GPU constraints** — `npu`-device slots are exclusive at the runtime layer (single AMDXDNA context; a model swap is a container restart, only one model on the NPU at a time), and `GpuArbiter` flips the single iGPU between the `llm` and `img` exclusive groups.
 
-v0.2 type vocabulary: `llm`, `embedding`, `reranking`, `transcription`, `tts`, `image`. Mirrors Lemonade's runtime types 1:1 to avoid a translation layer. UI labels are a separate concern (`Chat`/`Embed`/`Rerank`/`STT`/`TTS`/`Image`) rendered by the dashboard, not stored in config.
+Type vocabulary: `llm`, `embedding`, `reranking`, `transcription`, `tts`, `image` (`SlotManager._VALID_SLOT_TYPES`). UI labels are a separate concern (`Chat`/`Embed`/`Rerank`/`STT`/`TTS`/`Image`) rendered by the dashboard, not stored in config.
 
 ## OmniRouter
 
-Client-side OpenAI tool-calling loop, owned by hal0 (not Lemonade). The LLM in a `chat`-type slot is given a JSON tool catalog; it emits `tool_calls`; hal0 dispatches each to the appropriate `/api/v1/*` endpoint and folds the result back into the conversation.
+Client-side OpenAI tool-calling loop, owned by hal0 (it lives in hal0-api, not the inference container). The LLM in a `chat`-type slot is given a JSON tool catalog; it emits `tool_calls`; hal0 dispatches each to the appropriate `/api/v1/*` endpoint and folds the result back into the conversation.
 
 The tool set is per-bundle (a `collection.omni` manifest names which tools the LLM sees). v0.2 ships these 7 tools:
 
@@ -169,19 +168,18 @@ Upstream tools are kept in sync via a checksum-pinned copy of `src/app/src/rende
 
 Bundle-level tool whitelists/blacklists are NOT supported in v0.2 (YAGNI until requested). The set is always derived from slot enablement.
 
-## model namespace (Lemonade)
+## model namespace
 
-Lemonade exposes three namespaces for models. hal0's policy (v0.2):
+`registry.toml` (under `/var/lib/hal0/registry/`) is the **sole** model catalog — there is no second loader process to keep in sync (the lemonade `server_models.json` / `user_models.json` / `extra.*` split was removed with the runtime, #687). Every slot's `--model` path is a registry-backed file under the model store `/mnt/ai-models`.
 
-| Namespace | Lemonade source | hal0 usage |
+The registry tags each row with a namespace bucket (`ns`) the dashboard renders as a badge:
+
+| Bucket | Source | hal0 usage |
 |---|---|---|
-| Registered (no prefix) | `resources/server_models.json` | hal0-curated models. Generated from `registry.toml` by `hal0 registry sync`. Requires `lemond` restart to pick up changes. |
-| `user.*` | `user_models.json` | All on-demand pulls (HF coords or local file imports via the dashboard). Written via `POST /v1/pull`. No restart needed. |
-| `extra.*` | `--extra-models-dir` auto-discovery | **UNUSED.** `extra_models_dir` config points at `/var/lib/hal0/models/` for compatibility but the dir contains only already-registered symlinks. Reasoning: `extra.*` cannot be deleted via API; auto-discovered models default to `["custom"]` label which broke embed/rerank in spike #1. |
+| `blessed` | files laid out under the curated/blessed recipe tree | hal0-curated models seeded into the registry. |
+| `pulled` | on-demand pulls (HF coords or local imports via the dashboard) and upstream-only rows | written through the registry pull path (`registry/pull.py`); no daemon restart needed. |
 
-Dashboard badges: `blessed` (registered) | `pulled` (user.*). No third tier.
-
-Note: spike #2 found the spec's `extra.` prefix wasn't applied to auto-discovered files (bare names observed). Doc-only annotation — hal0 doesn't depend on the prefix because we don't use the namespace.
+No third tier.
 
 ## default slot (per type)
 
@@ -202,7 +200,7 @@ A user-facing label for "which chat slot is currently serving the dashboard chat
 
 ## v0.1.x → v0.2 upgrade
 
-**Clean break, no migration script.** The v0.2 `install.sh` detects v0.1.x state (presence of `/etc/hal0/slots/*.toml` AND absence of `/var/lib/hal0/lemonade/config.json`) and refuses to install. It prints:
+**Clean break, no migration script.** The v0.2 `install.sh` detected v0.1.x state (legacy `/etc/hal0/slots/*.toml` shape without the v0.2 runtime config present) and refused to install. It printed:
 
 ```
 hal0 v0.1.x detected. v0.2 is a breaking change — slot architecture, model layout,
@@ -242,7 +240,7 @@ Notes:
 - `hal0-Max` was originally proposed as `hal0-Halo` but renamed to avoid collision with the vendor-blessed `LMX-Omni-52B-Halo`.
 - The LMX bundle is shown under a "Pre-built kits" section below the tier picker, not as a tier card.
 - `gpt-oss-120b` and other extreme models are intentionally excluded from bundle defaults — power users install them manually via `hal0 model pull`.
-- Bundle definitions live in `/var/lib/hal0/models/collections/omni/<name>.json`. Each is a `collection.omni` Lemonade manifest plus hal0-specific slot-selection metadata.
+- Bundle definitions live in `installer/manifests/omni/<name>.json`. Each carries a `collection.omni` block (the inherited model-kit manifest shape) plus a `hal0` block of slot-selection metadata.
 - hal0 reads `/proc/meminfo` at install; tiers that don't fit are greyed out in the picker with a tooltip explaining why.
 
 ## two-tier scope
@@ -263,7 +261,7 @@ Cognee dataset reserved for agent identity cards. Separate from `shared` (episod
 
 ## Hal0Profile
 
-A hal0-owned Hermes plugin extending `providers.base.ProviderProfile`. Lives at `$HERMES_HOME/plugins/model-providers/hal0/`. Hardcodes the local Lemonade base URL, emits a hal0-distinct `User-Agent`, and is the extension point for Lemonade-specific request shaping (e.g., keep-alive injection). Packaged inside the hal0 wheel, copied into HERMES_HOME by bootstrap. v0.3.
+**Removed (R4 H4).** This was a hal0-owned Hermes model-provider plugin at `$HERMES_HOME/plugins/model-providers/hal0/`. It was deleted because it hardcoded a stale base URL; `hermes_provision` now actively removes the legacy plugin and points Hermes's config at hal0-api directly (`base_url = {HAL0_API_URL}/v1`, derived from the primary chat slot). Inference request shaping happens server-side in hal0-api's `/v1` surface, not in a Hermes-side profile.
 
 ## Hal0MemoryProvider
 
@@ -279,7 +277,7 @@ Pinned to `/var/lib/hal0/agents/hermes/` for hal0-bundled installs (not `~/.herm
 
 ## v0.3
 
-The active milestone (2026-05-23 →). Five interlocking streams: (1) Hermes-Agent first-run bootstrap, (2) React dashboard v3 wired to live data, (3) Lemonade polish (preload+idle, GPU TTS, KV%, `/v1/*` proxy), (4) Admin/auth simplification (ADR-0001 close-out: FastAPI owns auth, Caddy collapsed to TLS-only or removed), (5) Advanced memory + MCP client side (Cognee graph + Memify + federation + per-agent external MCP allow-list). v0.3 ships when all five close. See PLAN.md §1 v0.3 + §15 Phase 10.
+The milestone opened 2026-05-23. Five interlocking streams: (1) Hermes-Agent first-run bootstrap, (2) React dashboard v3 wired to live data, (3) inference-runtime polish (preload+idle, GPU TTS, KV%, `/v1/*` proxy) — at the time this rode on the lemonade runtime, since replaced by the per-slot container runtime (#687), (4) Admin/auth simplification (ADR-0001 close-out: FastAPI owns auth, Caddy collapsed to TLS-only or removed), (5) Advanced memory + MCP client side (memory graph + Memify + federation + per-agent external MCP allow-list). See PLAN.md §1 v0.3 + §15 Phase 10.
 
 ---
 
@@ -325,7 +323,7 @@ The HTTP header hal0-api sets on outbound hops to hermes (and that bundled agent
 
 ## composite hal0 upstream
 
-A single `Upstream(name="hal0", kind="slot", url="http://127.0.0.1:8080/v1", slot_name=None)` registered automatically in the upstream registry (`src/hal0/api/__init__.py::_autoregister_slot_upstreams`). Replaces per-slot autoregistration: Lemonade serialises chat loading on a single port (R4 H2 from MASTER-PLAN), so registering one Upstream per chat slot produced duplicate entries pointing at the same URL. The composite aggregates every chat-capable slot's model id through one `/v1/models` response (5s TTL cache). Explicit `upstreams.toml` entries claiming the name `hal0` win — autoregistration is skipped when overridden.
+A single `Upstream(name="hal0", kind="slot", url="http://127.0.0.1:8080/v1", slot_name=None)` registered automatically in the upstream registry (`src/hal0/api/__init__.py::_autoregister_slot_upstreams`). It aggregates every chat-capable slot's model id through one `/v1/models` response (5s TTL cache) so the dashboard and OpenAI clients see a single model list rather than one entry per slot. It exists **only** for that aggregation: `SlotManager` has no `hal0` entry, so the dispatch readiness gate and SERVING wrap skip it and it is never a forward target — real requests resolve to the concrete slot that owns the model id. Explicit `upstreams.toml` entries claiming the name `hal0` win — autoregistration is skipped when overridden.
 
 ---
 
@@ -371,7 +369,7 @@ The Dispatcher stops knowing the state-cache, the disk fallback, and the enum. E
 
 Stateless module (`src/hal0/slot_view/`, issue #698 / PR #706) that lifts the five enrichment
 concerns previously inline in `api/routes/slots.py:list_slots()` (state serialization,
-Lemonade `/v1/health` enrich + drift detect, container systemctl/port probe, per-slot memory
+config-field enrich, container systemctl/port/image probe + drift detect, per-slot memory
 accounting, metric injection) behind **eager `snapshot() -> list[SlotView]`** (single
 computation, no per-concern composition seam until a second caller justifies one). Takes its
 stores as constructor dependencies — the real set is wider than the four nominal ones
@@ -380,7 +378,7 @@ class docstring) — so tests inject fakes instead of crossing HTTP. The route i
 adapter. Decision held: no per-concern methods — one caller today makes a composable
 enrichment pipeline a hypothetical seam; add `snapshot(include_metrics=...)` only when the
 admin MCP surface actually needs state-without-metrics. Per-concern logic lives as
-module-level functions (`serialize_slot`, `lemonade_enrichment`, `container_enrichment`,
+module-level functions (`serialize_slot`, `config_enrichment`, `container_enrichment`,
 `synthesize_upstream_entries`), each unit-tested with fake stores; helpers shared with
 `get_slot` / `routes/health.py` remain in `slots.py` as request-bound adapters. Candidate 3
 of the 2026-06-11 review. See [[SlotView]].
@@ -388,7 +386,7 @@ of the 2026-06-11 review. See [[SlotView]].
 ## SlotView
 
 The enriched per-slot record `SlotViewAggregator.snapshot()` emits — one slot's state plus its
-Lemonade/container enrichment, memory attribution, and metrics (`SlotMetricsView`), as a typed
+container enrichment, memory attribution, and metrics (`SlotMetricsView`), as a typed
 object (with `to_dict()` for the API shape) rather than the ad-hoc dict previously assembled
 inline in the route. See [[SlotViewAggregator]].
 
@@ -434,7 +432,7 @@ separate readers. Issue #703, grilled 2026-06-12.
 The single home (`src/hal0/model_meta/`, issue #695 / PR #700) for the model-classification
 and device→backend logic previously copy-pasted across `routes/models.py:_classify_type`,
 `routes/slots.py`, `capabilities/orchestrator.py` (four `_canonical_*` helpers), the
-omni-router heuristic, and `providers/lemonade.py`. **Stateless surface, no construction:**
+omni-router heuristic, and the provider layer. **Stateless surface, no construction:**
 `classify(model_id) -> slot type` and `device_to_backend(device) -> (recipe, llamacpp)` are
 pure; **`is_resolvable(model_id, registry) -> bool` takes the registry explicitly** (it needs
 registry membership + FLM-catalog presence via `is_installed_flm_id`) so the module stays
