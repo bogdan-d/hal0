@@ -15,8 +15,8 @@ request will simply ship no tools. The "set changes mid-conversation"
 language in plan §7.3 is handled here by the fact that this function
 is called every request.
 
-Pure-async + dependency-injected against ``SlotManager.iter_configs``
-+ ``route_for_request`` so unit tests can drive matrix scenarios
+Pure-async + dependency-injected against ``SlotManager.iter_configs``,
+``loaded_slot`` and ``resolve_for_request`` so unit tests can drive matrix scenarios
 without standing up a full SlotManager.
 """
 
@@ -39,12 +39,7 @@ class SlotManagerLike(Protocol):
 
     async def iter_configs(self) -> list[dict[str, Any]]: ...
 
-    async def route_for_request(
-        self,
-        slot_type: str,
-        *,
-        required_labels: tuple[str, ...] = (),
-    ) -> str | None: ...
+    async def loaded_slot(self, name: str) -> Any | None: ...
 
     async def resolve_for_request(
         self,
@@ -62,9 +57,9 @@ def chat_slot_has_tool_calling(cfg: dict[str, Any]) -> bool:
     what other slots are configured. The LLM has no opinion on the
     tools because it never sees them.
 
-    Label extraction goes through :func:`hal0.model_meta.labels_of` —
-    the same source ``SlotManager.route_for_request`` uses — so the
-    filter's decision always matches what routing will pick.
+    Kept as the dict-shaped compatibility helper for route-to-chat peer
+    scans; normal routing uses ``LoadedSlot.labels`` via
+    ``SlotManager.resolve_for_request``.
     """
     return "tool-calling" in labels_of(cfg)
 
@@ -88,14 +83,14 @@ async def active_tools_for(
         caller slot lacks ``tool-calling``, or when no other slot
         satisfies any tool's constraints.
     """
-    configs = await slot_manager.iter_configs()
-    caller_cfg = next((c for c in configs if c.get("name") == chat_slot_name), None)
-    if caller_cfg is None:
+    caller = await slot_manager.loaded_slot(chat_slot_name)
+    if caller is None:
         # Caller slot vanished mid-flight — fail closed.
         return []
-    if not chat_slot_has_tool_calling(caller_cfg):
+    if "tool-calling" not in caller.labels:
         return []
 
+    configs = await slot_manager.iter_configs()
     active: list[ToolDefinition] = []
     for tool in tools:
         if tool.name == "route_to_chat":
@@ -114,8 +109,8 @@ async def active_tools_for(
                 active.append(tool)
             continue
 
-        # Standard tools: ask SlotManager for routing.
-        target = await slot_manager.route_for_request(
+        # Standard tools: ask SlotManager for the typed routing result.
+        target = await slot_manager.resolve_for_request(
             tool.target_slot_type,
             required_labels=tool.required_model_labels,
         )

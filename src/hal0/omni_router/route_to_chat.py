@@ -88,6 +88,22 @@ def _system_prompt_of(cfg: dict[str, Any]) -> str:
     return ""
 
 
+def _build_delegation_messages(
+    *,
+    system_prompt: str,
+    prompt: str,
+    context: str | None,
+) -> list[dict[str, str]]:
+    messages: list[dict[str, str]] = []
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
+    user_content = prompt
+    if context:
+        user_content = f"{prompt}\n\nContext:\n{context}"
+    messages.append({"role": "user", "content": user_content})
+    return messages
+
+
 def build_delegation_messages(
     target_cfg: dict[str, Any],
     *,
@@ -103,15 +119,26 @@ def build_delegation_messages(
     no ``system_prompt`` (rather than sending an empty-string system,
     which some backends treat as "blank persona").
     """
-    messages: list[dict[str, str]] = []
-    system = _system_prompt_of(target_cfg)
-    if system:
-        messages.append({"role": "system", "content": system})
-    user_content = prompt
-    if context:
-        user_content = f"{prompt}\n\nContext:\n{context}"
-    messages.append({"role": "user", "content": user_content})
-    return messages
+    return _build_delegation_messages(
+        system_prompt=_system_prompt_of(target_cfg),
+        prompt=prompt,
+        context=context,
+    )
+
+
+def build_delegation_messages_for_slot(
+    target_slot: Any,
+    *,
+    prompt: str,
+    context: str | None,
+) -> list[dict[str, str]]:
+    """Build delegation messages from a typed ``LoadedSlot`` view."""
+    system_prompt = getattr(target_slot, "system_prompt", "")
+    return _build_delegation_messages(
+        system_prompt=system_prompt if isinstance(system_prompt, str) else "",
+        prompt=prompt,
+        context=context,
+    )
 
 
 def validate_delegation(
@@ -155,9 +182,46 @@ def validate_delegation(
     return None
 
 
+def validate_delegation_slots(
+    caller_slot: Any | None,
+    target_slot: Any | None,
+    *,
+    caller_slot_name: str,
+    target: str,
+    current_depth: int,
+) -> str | None:
+    """Run route_to_chat guardrails against typed ``LoadedSlot`` views."""
+    if current_depth >= MAX_DELEGATION_DEPTH:
+        return f"route_to_chat refused: maximum delegation depth ({MAX_DELEGATION_DEPTH}) reached"
+
+    if (
+        target_slot is None
+        or getattr(target_slot, "slot_type", None) != "llm"
+        or getattr(target_slot, "enabled", True) is False
+    ):
+        return f"slot '{target}' not enabled"
+
+    if target == caller_slot_name:
+        return f"route_to_chat refused: cannot delegate to self ('{target}')"
+
+    if (
+        caller_slot is not None
+        and getattr(caller_slot, "device", None) == "npu"
+        and getattr(target_slot, "device", None) == "npu"
+    ):
+        return (
+            "route_to_chat refused: NPU↔NPU delegation would force "
+            "an FLM swap; pick a non-NPU target"
+        )
+
+    return None
+
+
 __all__ = [
     "DELEGATION_DEPTH",
     "MAX_DELEGATION_DEPTH",
     "build_delegation_messages",
+    "build_delegation_messages_for_slot",
     "validate_delegation",
+    "validate_delegation_slots",
 ]
