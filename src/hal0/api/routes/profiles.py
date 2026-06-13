@@ -48,6 +48,10 @@ class ProfileBody(BaseModel):
         default="gpu",
         description="Device class this profile targets.",
     )
+    backend: Literal["rocm", "vulkan"] | None = Field(
+        default=None,
+        description="GPU runtime (rocm|vulkan); None for non-GPU profiles.",
+    )
     cloned_from: str | None = Field(
         default=None,
         description="Provenance: profile this one was cloned from (informational).",
@@ -80,6 +84,10 @@ class ProfileUpdateBody(BaseModel):
         default=None,
         description="Device class this profile targets.",
     )
+    backend: Literal["rocm", "vulkan"] | None = Field(
+        default=None,
+        description="GPU runtime (rocm|vulkan); None for non-GPU profiles.",
+    )
 
     @field_validator("image")
     @classmethod
@@ -99,7 +107,7 @@ def list_profiles() -> list[dict[str, Any]]:
     Each item shape::
 
         {
-            "name":           "moe-rocmfp4",
+            "name":           "rocm",
             "image":          "ghcr.io/hal0ai/...:rocm-7.2.4-rocmfp4-server",
             "flags":          "-fa on ...",
             "mtp":            false,
@@ -130,6 +138,7 @@ def create_profile(body: ProfileBody) -> dict[str, Any]:
             flags=body.flags,
             mtp=body.mtp,
             device_class=body.device_class,
+            backend=body.backend,
             cloned_from=body.cloned_from,
         ),
     )
@@ -154,6 +163,7 @@ def update_profile(name: str, body: ProfileUpdateBody) -> dict[str, Any]:
             flags=body.flags,
             mtp=body.mtp,
             device_class=body.device_class,
+            backend=body.backend,
         ),
     )
     return profile.to_dict()
