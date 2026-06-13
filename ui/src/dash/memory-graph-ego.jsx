@@ -25,7 +25,7 @@ const { useState, useRef, useEffect, useMemo } = React;
 // silently. Salience keeps the storyline edges (causal/temporal) on top.
 const RING1_CAP_STEP = 24;
 
-function GraphEgo({ graph, query, width, height, banner }) {
+function GraphEgo({ graph, query, width, height, banner, onCenter }) {
   const W = width, H = height;
   const nodes = (graph && graph.nodes) || [];
   const links = (graph && graph.links) || [];
@@ -59,6 +59,12 @@ function GraphEgo({ graph, query, width, height, banner }) {
 
   // reset the ring cap whenever the centre changes (each node starts collapsed)
   useEffect(() => { setRingCap(RING1_CAP_STEP); }, [center]);
+
+  // FU2: surface the active center to the parent so it can fetch a
+  // server-side ego slice (Direction-C, big banks). Fires on center change.
+  useEffect(() => {
+    if (onCenter && center) onCenter(center);
+  }, [center, onCenter]);
 
   // ── layout for current center ──────────────────────────────────────────────
   const layout = useMemo(() => {
