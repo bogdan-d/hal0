@@ -350,7 +350,6 @@ function EditSlotDrawer({ open, slot, onClose }) {
     slot?.rope_freq_base != null ? String(slot.rope_freq_base) : "0"
   );
   const [extraArgs, setExtraArgs] = useStateSM(initialExtraArgs);
-  const [makeDefault, setMakeDefault] = useStateSM(!!slot?.isDefault);
   const [submitErr, setSubmitErr] = useStateSM(null);
   // Inline error for the instant-apply thinking toggle (task 3): surface the
   // failure next to the control instead of only reverting state silently.
@@ -370,7 +369,6 @@ function EditSlotDrawer({ open, slot, onClose }) {
       setThinkingPending(false);
       setNGpuLayers(slot.n_gpu_layers != null ? String(slot.n_gpu_layers) : "-1");
       setRopeFreqBase(slot.rope_freq_base != null ? String(slot.rope_freq_base) : "0");
-      setMakeDefault(!!slot.isDefault);
       // #587: re-seed from the slot prop so the drawer tracks the real
       // on-disk values.
       setExtraArgs(slot.llamacpp_args != null ? slot.llamacpp_args : "");
@@ -421,9 +419,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
       const ctxBody = {
         ctx_size: ctxNum,
       };
-      const slotBody = {
-        default: makeDefault,
-      };
+      const slotBody = {};
       if (profileChanged) {
         slotBody.profile = selectedProfile;
       }
@@ -522,6 +518,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
         <ReadOnlyStrip k="image status" v={slot.image_status || "present"} />
       </div>
 
+      <FieldGroup label="Slot" hint="this instance">
       <div className="form-row">
         <div className="form-lbl"><span>Name</span><span className="sub">seeded slots can't be renamed</span></div>
         <div className="form-ctl"><input className="input mono" value={slot.name} disabled /></div>
@@ -603,6 +600,9 @@ function EditSlotDrawer({ open, slot, onClose }) {
         );
       })()}
 
+      </FieldGroup>
+
+      <FieldGroup label="Model" hint="what it loads">
       {/* Task 1: live model swap — mirrors the card's ModelPicker but with the
           full type+rocmfp4 compatibility filter (same as InlineSwapPopover).
           Swap is its own POST /slots/{name}/swap (not part of the batched
@@ -610,13 +610,19 @@ function EditSlotDrawer({ open, slot, onClose }) {
           popover does. */}
       {(() => {
         const isContainer = slot.runtime === "container";
+        // Derive the backend from the SELECTED profile (reactive), falling back
+        // to the slot's persisted backend when the profile carries none or isn't
+        // found yet. This makes the rocmfp4 filter re-evaluate immediately when
+        // the operator switches profiles — before Save is clicked.
+        const selProfileMeta = (profilesQuery.data ?? []).find(p => p.name === selectedProfile);
+        const selBackend = selProfileMeta?.backend ?? slot.backend;
         const compatible = (modelsQuery.data ?? [])
           .map(normalizeApiModel)
           .filter(m =>
             m.type === slot.type &&
             // ROCmFP4-quantized models only run on the rocm fork binary — hide
-            // them when the slot isn't on the rocm backend (mirror the popover).
-            !(Array.isArray(m.tags) && m.tags.includes("rocmfp4") && slot.backend !== "rocm")
+            // them when the selected profile isn't on the rocm backend.
+            !(Array.isArray(m.tags) && m.tags.includes("rocmfp4") && selBackend !== "rocm")
           );
         const cur = slot.model_id || slot.model || "";
         const has = compatible.some(m => m.id === cur);
@@ -671,80 +677,6 @@ function EditSlotDrawer({ open, slot, onClose }) {
 
       <div className="form-row">
         <div className="form-lbl">
-          <span>Default for type {slot.type}?</span>
-          <span className="sub">{slot.isDefault ? "currently default" : "another slot is default"}</span>
-        </div>
-        <div className="form-ctl">
-          <label className="checkbox-row">
-            <input
-              type="checkbox"
-              checked={makeDefault}
-              onChange={e => setMakeDefault(e.target.checked)}
-            />
-            <span>Set as default</span>
-          </label>
-        </div>
-      </div>
-
-      {/* C4: per-slot thinking default — llm slots only. Instant-apply (its
-          own PUT /config), no restart: _slot_thinking_default reads it live
-          on the next request. */}
-      {slot.type === "llm" && (
-        <div className="form-row">
-          <div className="form-lbl">
-            <span>Thinking</span>
-            <span className="sub">Stream reasoning before the answer. Off = faster, direct replies.</span>
-            {/* Task 3: make the instant-apply contract explicit — unlike the
-                ctx_size/profile fields, this saves on toggle, not on Save. */}
-            <span className="sub">applies immediately (no Save needed)</span>
-          </div>
-          <div className="form-ctl">
-            <label className="checkbox-row">
-              <input
-                type="checkbox"
-                checked={thinking}
-                disabled={thinkingPending}
-                onChange={async (e) => {
-                  const next = e.target.checked;
-                  setThinking(next);
-                  setThinkingPending(true);
-                  setThinkingErr(null);
-                  try {
-                    await editMut.mutateAsync({
-                      name: slot.name,
-                      body: { enable_thinking: next },
-                    });
-                    window.__hal0Toast && window.__hal0Toast(
-                      `${slot.name} thinking ${next ? "on" : "off"} — applies to next message`,
-                      "ok",
-                    );
-                  } catch (err) {
-                    setThinking(!next); // revert on failure
-                    // Task 3: surface the failure inline near the toggle, not
-                    // only via the silent revert above.
-                    setThinkingErr(err?.message || "thinking toggle failed");
-                  } finally {
-                    setThinkingPending(false);
-                  }
-                }}
-              />
-              <span>{thinking ? "Reasoning on" : "Reasoning off"}</span>
-            </label>
-            {thinkingErr && (
-              <div className="hint" style={{color: "var(--err)"}}>{thinkingErr}</div>
-            )}
-          </div>
-        </div>
-      )}
-
-      {/* Task 4: Advanced fields (mostly read-only, profile-owned) are
-          collapsed by default — minimal native <details> disclosure (no
-          disclosure primitive exists in primitives.jsx). */}
-      <details className="adv-disclosure">
-      <summary className="form-section" style={{cursor: "pointer", listStyle: "revert"}}>Advanced</summary>
-
-      <div className="form-row">
-        <div className="form-lbl">
           <span>ctx_size</span>
           <span className="warn">⟳ restarts the container (~model-load seconds)</span>
         </div>
@@ -757,6 +689,51 @@ function EditSlotDrawer({ open, slot, onClose }) {
           {fieldErrs.ctx && <div className="hint" style={{color: "var(--err)"}}>{fieldErrs.ctx}</div>}
         </div>
       </div>
+      </FieldGroup>
+
+      <FieldGroup label="Inference" hint="behavior">
+      {/* C4: per-slot thinking default — llm slots only. Instant-apply (its
+          own PUT /config), no restart: _slot_thinking_default reads it live
+          on the next request. */}
+      {slot.type === "llm" && (
+        <div className="form-row">
+          <div className="form-lbl">
+            <span>Reasoning</span>
+            <span className="sub">Stream reasoning before the answer. Off = faster, direct replies. Applies to the next message.</span>
+          </div>
+          <div className="form-ctl">
+            <PillToggle
+              on={thinking}
+              disabled={thinkingPending}
+              label="Reasoning"
+              stateText={thinking ? "On" : "Off"}
+              onToggle={async (next) => {
+                setThinking(next);
+                setThinkingPending(true);
+                setSubmitErr(null);
+                setThinkingErr(null);
+                try {
+                  await editMut.mutateAsync({ name: slot.name, body: { enable_thinking: next } });
+                  window.__hal0Toast && window.__hal0Toast(`${slot.name} reasoning ${next ? "on" : "off"} — applies to next message`, "ok");
+                } catch (err) {
+                  setThinking(!next);
+                  setThinkingErr(err?.message || "reasoning toggle failed");
+                } finally {
+                  setThinkingPending(false);
+                }
+              }}
+            />
+            {thinkingErr && <div className="hint" style={{ color: "var(--err)" }}>{thinkingErr}</div>}
+          </div>
+        </div>
+      )}
+      </FieldGroup>
+
+      {/* Task 4: Advanced fields (mostly read-only, profile-owned) are
+          collapsed by default — minimal native <details> disclosure (no
+          disclosure primitive exists in primitives.jsx). */}
+      <details className="adv-disclosure">
+      <summary className="form-section" style={{cursor: "pointer", listStyle: "revert"}}>Advanced</summary>
 
       {/* C5: GPU offload tuning — read-only, defined by the profile. */}
       <div className="form-row">
