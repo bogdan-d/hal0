@@ -54,15 +54,100 @@ def _quote_for_systemd(value: str) -> str:
     return quoted
 
 
+@dataclass(frozen=True, slots=True)
+class Mount:
+    """A single volume mount, with read-only as a first-class flag.
+
+    Replaces the old convention of smuggling ``:ro`` into the container
+    target string.  The renderer calls :meth:`render` to produce the
+    ``--volume`` value, so providers declare intent (``read_only=True``)
+    instead of hand-appending ``:ro`` and hoping the renderer passes it
+    through verbatim.
+    """
+
+    source: str
+    target: str
+    read_only: bool = False
+    #: SELinux relabel option ("z" shared, "Z" private) appended to the mount
+    #: opts. Required on SELinux-enforcing hosts (Fedora) so the container can
+    #: read the bind; a harmless no-op where SELinux is disabled. Empty = none.
+    selinux: str = ""
+
+    def render(self) -> str:
+        """Return the ``{src}:{dst}[:ro[,z]]`` value for ``--volume=``."""
+        target = self.target
+        read_only = self.read_only
+        # Tolerate a target that already smuggles ``:ro`` (legacy callers /
+        # coerced tuples) so we never emit a doubled ``:ro``.
+        if target.endswith(":ro"):
+            target = target[: -len(":ro")]
+            read_only = True
+        opts: list[str] = []
+        if read_only:
+            opts.append("ro")
+        if self.selinux:
+            opts.append(self.selinux)
+        suffix = (":" + ",".join(opts)) if opts else ""
+        return f"{self.source}:{target}{suffix}"
+
+    @classmethod
+    def coerce(cls, mount: Mount | tuple[str, str]) -> Mount:
+        """Normalise a ``Mount`` or a legacy ``(src, dst)`` tuple to ``Mount``.
+
+        A tuple whose target ends in ``:ro`` is interpreted as a read-only
+        mount — the renderer stays correct whether callers were migrated to
+        :class:`Mount` or still pass the old tuple shape.
+        """
+        if isinstance(mount, Mount):
+            return mount
+        source, target = mount
+        if target.endswith(":ro"):
+            return cls(source, target[: -len(":ro")], read_only=True)
+        return cls(source, target, read_only=False)
+
+
+@dataclass(frozen=True, slots=True)
+class HealthCheck:
+    """A podman ``--health-*`` override for a slot container.
+
+    The toolbox images bake a HEALTHCHECK that probes a hardcoded port; a
+    slot runs its server on its own port, so the unit must override the
+    health command (else ``podman ps`` shows a permanent ``unhealthy``).
+    Carrying it on the launch plan keeps that knowledge declarative instead
+    of inlined in the renderer (#684).
+    """
+
+    cmd: str
+    start_period: str = "180s"
+    interval: str = "30s"
+    retries: int = 3
+    timeout: str = "5s"
+
+    def render_flags(self) -> list[str]:
+        """Return the ``--health-*`` podman-run flags in a stable order."""
+        return [
+            f"--health-cmd={self.cmd}",
+            f"--health-start-period={self.start_period}",
+            f"--health-interval={self.interval}",
+            f"--health-retries={self.retries}",
+            f"--health-timeout={self.timeout}",
+        ]
+
+
 @dataclass(frozen=True)
-class ContainerSpec:
-    """Docker/podman run specification for a container-per-slot systemd unit.
+class RuntimeLaunchPlan:
+    """Typed launch plan for a container-per-slot systemd unit.
 
-    Carries everything SlotManager needs to render a docker run command
-    inside the hal0-slot@.service template.
+    Carries everything the systemd/podman adapter needs to render one
+    ``hal0-slot@<name>.service`` unit: image, in-container argv, mounts
+    (read-only as a first-class flag), devices, security, port, and the
+    optional health-check override.  Providers build one plan per
+    (slot, model) pair from a :class:`hal0.profiles.ResolvedProfile`; the
+    adapter (:func:`hal0.providers.container._render_unit_from_plan`)
+    executes it.  There is exactly one argv builder.
 
-    Frozen for safety: Providers build a ContainerSpec per (slot, model)
-    pair and hand it to SlotManager which renders the unit template.
+    Frozen for safety: a plan is computed once and never mutated, so two
+    slots can never share mutable launch state.
 
     See ARCHITECTURE.md §Key boundaries and PLAN.md §2 (deployment model).
     """
@@ -76,8 +161,9 @@ class ContainerSpec:
     env: dict[str, str] = field(default_factory=dict)
     """Environment variables injected via docker run --env."""
 
-    mounts: list[tuple[str, str]] = field(default_factory=list)
-    """(host_path, container_path) volume mounts."""
+    mounts: list[Mount | tuple[str, str]] = field(default_factory=list)
+    """Volume mounts.  Prefer :class:`Mount`; legacy ``(src, dst)`` tuples are
+    coerced by the renderer (``:ro`` target suffix → ``read_only``)."""
 
     devices: list[str] = field(default_factory=list)
     """Device paths to pass through, e.g. ["/dev/dri/renderD128"]."""
@@ -99,6 +185,15 @@ class ContainerSpec:
 
     extra_args: list[str] = field(default_factory=list)
     """Escape hatch: additional docker run arguments appended verbatim."""
+
+    health: HealthCheck | None = None
+    """Optional ``--health-*`` override (None = inherit the image's HEALTHCHECK)."""
+
+
+#: Backwards-compatible alias.  ``RuntimeLaunchPlan`` is the canonical name
+#: (it carries health + first-class read-only mounts, not just a container
+#: spec); existing imports of ``ContainerSpec`` keep working.
+ContainerSpec = RuntimeLaunchPlan
 
 
 class Provider(ABC):
