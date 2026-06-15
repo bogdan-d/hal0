@@ -552,6 +552,28 @@ function EditSlotDrawer({ open, slot, onClose }) {
   const saving = editMut.isPending || defaultsMut.isPending;
   const deleting = deleteMut.isPending;
 
+  // Instant-apply enable/disable for the drawer header toggle. Mirrors the
+  // card's onToggleEnabled — fire the PUT, toast the result, and let the slots
+  // poll re-render from server truth. On error leave server state untouched
+  // (e.g. the npu-exclusivity 409 when enabling a 2nd NPU LLM) and toast.
+  const enabled = slot.enabled !== false;
+  const onToggleEnabled = async (next) => {
+    setEnableBusy(true);
+    try {
+      await editMut.mutateAsync({ name: slot.name, body: { enabled: next } });
+      window.__hal0Toast &&
+        window.__hal0Toast(`${slot.name} ${next ? "enabled" : "disabled"}`, "ok");
+    } catch (err) {
+      window.__hal0Toast &&
+        window.__hal0Toast(
+          err?.message ? `${slot.name}: ${err.message}` : `${slot.name}: toggle failed`,
+          "warn",
+        );
+    } finally {
+      setEnableBusy(false);
+    }
+  };
+
   // extra_args dirty-tracking: the resolved command is server-computed from the
   // persisted config, so any unsaved edit makes the displayed command stale.
   // Baseline is the on-disk value surfaced as `llamacpp_args` (wire key for
@@ -568,6 +590,22 @@ function EditSlotDrawer({ open, slot, onClose }) {
       eyebrow={`Slots · /slots/${slot.name}`}
       title={`Edit ${slot.name}`}
       width={560}
+      headRight={
+        <label
+          className="slot-enable-toggle drawer-enable"
+          title={enabled ? "Disable slot" : "Enable slot"}
+        >
+          <span className="drawer-enable-label mono">{enabled ? "Enabled" : "Disabled"}</span>
+          <input
+            type="checkbox"
+            checked={enabled}
+            disabled={enableBusy}
+            onChange={() => onToggleEnabled(!enabled)}
+            aria-label={enabled ? "Disable slot" : "Enable slot"}
+          />
+          <span className="slot-enable-track" aria-hidden="true" />
+        </label>
+      }
       foot={
         <>
           <button
