@@ -23,6 +23,7 @@ class Extension:
 
 EXTENSIONS: list[Extension] = [
     Extension("openwebui", "app", "Open WebUI", "Chat web UI for your models", True),
+    Extension("comfyui", "app", "ComfyUI", "Image & video generation (iGPU)", True),
     Extension("hermes", "agent", "Hermes", "Conversational agent with memory", True),
     Extension("pi", "agent", "Pi", "Coding agent", False),
 ]
@@ -53,6 +54,10 @@ def install_extension(ext_id: str) -> ExtensionOutcome:
             _run(["hal0", "agent", "install", ext.id])
         elif ext.id == "openwebui":
             _run(["systemctl", "enable", "--now", "hal0-openwebui.service"])
+        elif ext.id == "comfyui":
+            # ComfyUI is owned by the seeded img slot. The legacy
+            # /opt/comfyui scripts remain manual operator tools only.
+            _run(["systemctl", "enable", "--now", "hal0-slot@img.service"])
         return ExtensionOutcome(ext_id=ext_id, installed=True)
     except Exception as exc:  # best-effort
         return ExtensionOutcome(ext_id=ext_id, error=str(exc))

@@ -60,6 +60,12 @@ export interface ComfyuiStatus {
   endpoint: string | null
   memory: ComfyuiMemory | null
   queue: { running: number; pending: number }
+  util: number | null
+  temp: number | null
+  clock: number | null
+  it_s: number | null
+  eta: string | null
+  step: number | null
   inference: { hermes: boolean }
   inventory: Record<string, number> | null
   switchover: ComfyuiSwitchover
@@ -77,6 +83,12 @@ export const COMFYUI_FALLBACK: ComfyuiStatus = {
   endpoint: null,
   memory: null,
   queue: { running: 0, pending: 0 },
+  util: 0,
+  temp: null,
+  clock: null,
+  it_s: null,
+  eta: null,
+  step: null,
   inference: { hermes: false },
   inventory: null,
   switchover: { active: false, target: null, error: null },
@@ -129,4 +141,148 @@ export function useComfyuiPin() {
         raw: true,
       }),
   })
+}
+
+// Cancel current + queued renders (best-effort, 202).
+export function useComfyuiRenderCancel() {
+  return useMutation({
+    mutationFn: () => api<{ status: string }>(ENDPOINTS.comfyuiRenderCancel, { method: 'POST' }),
+  })
+}
+
+// Restart ComfyUI container (202, fire-and-forget).
+export function useComfyuiRestart() {
+  return useMutation({
+    mutationFn: () => api<{ status: string }>(ENDPOINTS.comfyuiRestart, { method: 'POST' }),
+  })
+}
+
+// Fetch container logs (tail=N, default 60).
+export function useComfyuiLogs(tail = 60) {
+  return useQuery({
+    queryKey: ['comfyui', 'logs', tail],
+    queryFn: () => apiGet<{ lines: string[] }>(`${ENDPOINTS.comfyuiLogs}?tail=${tail}`),
+    enabled: false, // on-demand only
+  })
+}
+
+// Quick-launch a named workflow (202).
+export function useComfyuiWorkflowLaunch() {
+  return useMutation({
+    mutationFn: (name: string) =>
+      api<{ status: string; prompt_id: string | null }>(
+        ENDPOINTS.comfyuiWorkflowLaunch(name),
+        { method: 'POST' },
+      ),
+  })
+}
+
+// ── V2 pane data transform ───────────────────────────────────────────────────
+//
+// The server /status payload has queue counts, memory, and device telemetry.
+// Per-job detail (name, kind, node, progress) is not fully surfaced yet; it/s,
+// ETA, and step are explicit nulls until a ComfyUI websocket subscription lands.
+// The component renders placeholders for absent fields — never crashes on
+// undefined.
+//
+// active_render and queue_jobs are optional extensions that may be injected
+// by the window.__comfyuiV2MockOverride seam or a future richer backend.
+
+export interface ComfyuiV2Run {
+  name: string
+  kind: string
+  pct: number
+  eta: string
+  node: string
+  step: number
+  total: number
+  its: number
+  loaded: string
+}
+
+export interface ComfyuiV2QueueJob {
+  name: string
+  kind: string
+}
+
+export interface ComfyuiV2PaneData {
+  engine: {
+    name: string
+    endpoint: string
+    image: string
+    restart: string
+  }
+  run: ComfyuiV2Run | null
+  queue: ComfyuiV2QueueJob[]
+  gtt: { used: number; ceil: number }
+  ram: { used: number; ceil: number }
+  stats: { util: number; temp: number; clk: number; its: number }
+}
+
+// Transform a live /status payload (+ optional V2 extension fields) into the
+// component's data shape. All absent numeric fields get safe defaults so the
+// pane renders coherently even when ComfyUI isn't running.
+export function transformComfyuiStatus(
+  status: ComfyuiStatus & {
+    active_render?: ComfyuiV2Run | null
+    queue_jobs?: ComfyuiV2QueueJob[]
+  },
+): ComfyuiV2PaneData {
+  const mem = status.memory
+  const hasRun = (status.queue?.running ?? 0) > 0
+
+  // active_render is the rich per-job detail block — only present in the mock
+  // or a future richer backend. Fall back to a placeholder skeleton when the
+  // render count says something is running but the detail is absent.
+  let run: ComfyuiV2Run | null = null
+  if (status.active_render !== undefined) {
+    run = status.active_render ?? null
+  } else if (hasRun) {
+    run = {
+      name: 'rendering…',
+      kind: '—',
+      pct: 0,
+      eta: '—',
+      node: '—',
+      step: 1,
+      total: 1,
+      its: 0,
+      loaded: '—',
+    }
+  }
+
+  // queue_jobs mirrors pending job list detail. Falls back to placeholder rows
+  // equal to the pending count when detail is absent.
+  let queue: ComfyuiV2QueueJob[]
+  if (status.queue_jobs !== undefined) {
+    queue = status.queue_jobs
+  } else {
+    const pending = status.queue?.pending ?? 0
+    queue = Array.from({ length: pending }, (_, i) => ({ name: `job ${i + 1}`, kind: '—' }))
+  }
+
+  return {
+    engine: {
+      name: 'ComfyUI',
+      endpoint: status.endpoint ?? ':8188',
+      image: status.container?.name ?? 'comfyui',
+      restart: 'no',
+    },
+    run,
+    queue,
+    gtt: {
+      used: mem?.gtt_used_gb ?? 0,
+      ceil: mem?.gtt_ceil_gb ?? 80,
+    },
+    ram: {
+      used: mem?.ram_used_gb ?? 0,
+      ceil: mem?.ram_ceil_gb ?? 96,
+    },
+    stats: {
+      util: status.util ?? 0,
+      temp: status.temp ?? 0,
+      clk: status.clock ?? 0,
+      its: status.it_s ?? 0,
+    },
+  }
 }
