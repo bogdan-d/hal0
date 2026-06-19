@@ -753,6 +753,9 @@
 :is(.infer-pane, .npu-pane) .scard:hover {
   border-color: var(--line-strong);
 }
+:is(.infer-pane, .npu-pane) .scard.ready {
+  border-left: 2px solid var(--comfy);
+}
 :is(.infer-pane, .npu-pane) .scard.serving {
   border-left: 2px solid var(--comfy);
 }
