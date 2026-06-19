@@ -13,7 +13,6 @@
 //   window.AgentChat          — drawers agent
 //   window.NewBoardModal      — drawers agent
 //   window.OrchPopover        — drawers agent
-//   window.BoardTweaksPanel   — drawers agent
 //
 // Hook bridge (board-hook-bridge.ts publishes onto window):
 //   window.__hal0UseBoardView
@@ -165,6 +164,7 @@ function BoardView() {
   const useSwitchBoard      = window.__hal0UseSwitchBoard;
   const useCreateBoard      = window.__hal0UseCreateBoard;
   const useCreateTask       = window.__hal0UseCreateTask;
+  const useBoardChat        = window.__hal0UseBoardChat;
   const useBoardEventsStream = window.__hal0UseBoardEventsStream;
 
   // ── keep WS stream alive ──
@@ -186,6 +186,9 @@ function BoardView() {
   const switchBoard = useSwitchBoard ? useSwitchBoard()  : null;
   const createBoard = useCreateBoard ? useCreateBoard()  : null;
   const createTask  = useCreateTask  ? useCreateTask()   : null;
+  // Chat state lives HERE (BoardView stays mounted) rather than inside
+  // AgentChat, so the conversation survives closing/reopening the drawer.
+  const chat        = useBoardChat   ? useBoardChat()    : null;
 
   // ── local state ──
   const [board, setBoard]           = useState("default");
@@ -206,8 +209,9 @@ function BoardView() {
   const [chatOpen, setChatOpen]     = useState(false);
   const [newTaskLane, setNewTaskLane] = useState(null);
 
-  const [tw, setTw]                 = useState({ density: "comfortable", accent: "dot", titlefont: "prose", meta: true });
-  const [twOpen, setTwOpen]         = useState(false);
+  // Board display is fixed: compact spacing, left-rail accent, mono titles.
+  // (The runtime tweaks panel was removed — these are the permanent defaults.)
+  const tw = { density: "compact", accent: "left", titlefont: "mono", meta: true };
 
   const [attn, setAttn]             = useState(true);
 
@@ -218,7 +222,6 @@ function BoardView() {
   // ── reassign local state (for bulk reassign select) ──
   const [reassignTarget, setReassignTarget] = useState("");
 
-  const setTweak = (k, v) => setTw(s => ({ ...s, [k]: v }));
   const setOrchK = (k, v) => setOrch(s => ({ ...s, [k]: v }));
 
   // ── Esc closes overlays ──
@@ -229,7 +232,6 @@ function BoardView() {
         setChatOpen(false);
         setOrchOpen(false);
         setBoardMenu(false);
-        setTwOpen(false);
         setNewTaskLane(null);
       }
     };
@@ -365,7 +367,6 @@ function BoardView() {
   const NewBoardModal  = window.NewBoardModal;
   const NewTaskModal   = window.NewTaskModal;
   const OrchPopover    = window.OrchPopover;
-  const BoardTweaksPanel = window.BoardTweaksPanel;
   const BoardLane      = window.BoardLane;
 
   const opened = openTask ? tasks.find(t => t.id === openTask) : null;
@@ -571,8 +572,31 @@ function BoardView() {
             )}
           </div>
 
-          {/* lanes */}
-          <div className="lanes-scroll">
+          {/* lanes — dropping a card ANYWHERE outside a column deletes it.
+              While a drag is over the board background (not a lane) the
+              danger veil below arms; releasing there removes the card. */}
+          <div
+            className="lanes-scroll"
+            data-testid="board-drop-delete"
+            onDragOver={(e) => {
+              if (!dragId) return;
+              const overLane = e.target.closest && e.target.closest(".lane");
+              e.preventDefault();
+              setDelArmed(!overLane);
+            }}
+            onDrop={(e) => {
+              if (!dragId) return;
+              const overLane = e.target.closest && e.target.closest(".lane");
+              if (!overLane) {
+                e.preventDefault();
+                delTasks([dragId]);
+                toast(dragId + " deleted");
+              }
+              setDragId(null);
+              setDragOver(null);
+              setDelArmed(false);
+            }}
+          >
             <div className="lanes">
               {lanes.map(l => (
                 BoardLane
@@ -590,36 +614,21 @@ function BoardView() {
                     />
                   : null
               ))}
-              {/* drop-to-delete zone */}
-              <div
-                className={"drop-delete" + (delArmed ? " armed" : "")}
-                data-testid="board-drop-delete"
-                onDragOver={(e) => { e.preventDefault(); setDelArmed(true); }}
-                onDragLeave={() => setDelArmed(false)}
-                onDrop={(e) => {
-                  e.preventDefault();
-                  if (dragId) { delTasks([dragId]); toast(dragId + " deleted"); }
-                  setDragId(null);
-                  setDelArmed(false);
-                }}
-              >
-                <span className="di"><BoardIcon name="trash" size={18} /></span>
-                <span>drop to delete</span>
-              </div>
             </div>
           </div>
         </div>
-      </div>
 
-      {/* tweaks fab + panel */}
-      {!twOpen && (
-        <button className="tweak-fab" onClick={() => setTwOpen(true)} aria-label="Tweaks">
-          <BoardIcon name="sliders" size={18} />
-        </button>
-      )}
-      {twOpen && BoardTweaksPanel && (
-        <BoardTweaksPanel tw={tw} set={setTweak} onClose={() => setTwOpen(false)} />
-      )}
+        {/* danger veil — pointer-events:none so the drop still lands on the
+            lanes-scroll background underneath; purely a visual cue. */}
+        {dragId && delArmed && (
+          <div className="danger-veil" data-testid="board-danger-veil" aria-hidden="true">
+            <div className="danger-badge">
+              <BoardIcon name="trash" size={34} />
+              <span>Release to delete</span>
+            </div>
+          </div>
+        )}
+      </div>
 
       {/* task drawer */}
       {opened && TaskDrawer && (
@@ -636,6 +645,7 @@ function BoardView() {
       {/* agent chat */}
       {chatOpen && AgentChat && (
         <AgentChat
+          chat={chat}
           byId={byId}
           onClose={() => setChatOpen(false)}
           onOpenTask={(id) => { setChatOpen(false); setOpenTask(id); }}
@@ -665,8 +675,11 @@ function BoardView() {
         </div>
       )}
 
-      {/* new board modal */}
+      {/* new board modal — wrapped in `.board` so the `.board .modal-*`
+          scoped styles apply (BoardView's overlays render outside the main
+          `.board` container, as siblings in this fragment). */}
       {newBoard && NewBoardModal && (
+        <div className="board">
         <NewBoardModal
           onClose={() => setNewBoard(false)}
           onCreate={(b) => {
@@ -685,6 +698,7 @@ function BoardView() {
             toast('board "' + b.slug + '" created');
           }}
         />
+        </div>
       )}
     </React.Fragment>
   );
