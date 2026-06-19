@@ -185,6 +185,7 @@ test.describe('ImageGen V2 render-hero pane', () => {
     const pane = page.locator('.comfy-v2-pane')
     // Empty-queue state shows an in-flow message (not a bleed overlay)
     await expect(pane.locator('.queue-empty-state')).toBeVisible()
+    await expect(pane.locator('.preview .scan')).toHaveCount(0)
 
     // Verify the Open ComfyUI button (below/near empty state) is clickable.
     // A full-bleed overlay would intercept this click and cause an error or wrong element.

@@ -336,11 +336,11 @@ export const COMFYUI_V2_MOCK = {
 function CardHead({ engine, run, pct }) {
   const hasRun = run != null
   return (
-    <div className="wcard-h">
-      <span className="glyph"><Ci name="comfy" size={16} /></span>
+    <div className="engine-h wcard-h">
+      <span className="engine-glyph"><Ci name="comfy" size={16} /></span>
       <span className="col">
-        <span className="ttl">ComfyUI</span>
-        <span className="sub">image-gen engine · docker</span>
+        <span className="engine-title">ComfyUI</span>
+        <span className="engine-sub">image-gen engine · docker</span>
       </span>
       <span className={'epill' + (hasRun ? ' generating' : '')}>
         <span className="dot" />
@@ -351,10 +351,12 @@ function CardHead({ engine, run, pct }) {
         iGPU · exclusive
       </span>
       <span className="grow" />
-      <span className="gpu-note">
-        <Ci name="bolt" size={11} /> inference slots <span className="b">paused</span> while rendering
+      <span className="eh-right">
+        <span className="gpu-note">
+          <Ci name="bolt" size={11} /> inference slots <span className="b">paused</span> while rendering
+        </span>
+        <span className="meta">docker · <b>{engine.endpoint}</b></span>
       </span>
-      <span className="meta">docker · <b>{engine.endpoint}</b></span>
     </div>
   )
 }
@@ -429,86 +431,123 @@ export function ImageGenCard({
   const gttWarn = gttPct >= 80
 
   return (
-    <div className="wcard active">
+    <div className="engine wcard active">
       <CardHead engine={engine} run={run} pct={pct} />
       <div className="wcard-b">
 
-        {/* ── Render hero: preview frame + active-render progress ── */}
-        <div style={{ display: 'grid', gridTemplateColumns: '300px 1fr', gap: 22, alignItems: 'stretch' }}>
-          {/* Preview frame */}
-          <div className="preview">
-            <span className="scan" />
-            {hasRun && comfyBaseUrl ? (
-              <img
-                src="/api/comfyui/preview"
-                alt="latest render output"
-                className="preview-img"
-                style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover', opacity: 0.7 }}
-              />
-            ) : (
-              <span className="glyph"><Ci name="video" size={30} /></span>
-            )}
-            {hasRun ? (
-              <span className="lab">
-                <b>{run.name}</b><br />{run.kind}<br />
-                live preview ↦ frame {Math.round(pct / 100 * 81)}/81
-              </span>
-            ) : (
-              <span className="lab">no active render</span>
-            )}
+        {/* ── Top row: active render activity (60%) + metrics (40%) ── */}
+        <div className="activity-metrics-row">
+          <div className="activity-panel">
+            <div className="render-grid">
+              {/* Preview frame */}
+              <div className={'preview' + (hasRun ? ' active' : '')}>
+                {hasRun ? <span className="scan" /> : null}
+                {hasRun && comfyBaseUrl ? (
+                  <img
+                    src="/api/comfyui/preview"
+                    alt="latest render output"
+                    className="preview-img"
+                  />
+                ) : (
+                  <span className="glyph"><Ci name="video" size={24} /></span>
+                )}
+                {hasRun ? (
+                  <span className="lab">
+                    <b>{run.name}</b><br />{run.kind}<br />
+                    frame {Math.round(pct / 100 * 81)}/81
+                  </span>
+                ) : (
+                  <span className="lab">no active render</span>
+                )}
+              </div>
+
+              {/* Active render progress detail */}
+              <div className="render-detail">
+                <BlkH icon="bolt" acc note={hasRun ? `eta ${run.eta}` : undefined}>
+                  active render
+                </BlkH>
+                {hasRun ? (
+                  <div className="job render-job">
+                    <div className="job-h">
+                      <div className="col">
+                        <span className="nm">
+                          {run.name} <span className="kind">· {run.kind}</span>
+                        </span>
+                        <span className="job-loaded">{run.node} · step {run.step}/{run.total}</span>
+                      </div>
+                      <span className="grow" />
+                      <span className="pct big">{Math.round(pct)}%</span>
+                    </div>
+                    <div className="gbar tall">
+                      <i style={{ width: pct + '%' }} />
+                    </div>
+                    <StepPips step={run.step} total={run.total} />
+                    <div className="job-steps">
+                      <span className="node">loaded: {run.loaded}</span>
+                      <span>{its} it/s</span>
+                    </div>
+                    <div className="render-actions">
+                      <button className="rbtn" onClick={onCancel}><Ci name="stop" size={13} /> Cancel render</button>
+                      {comfyBaseUrl ? (
+                        <a className="rbtn acc" href={comfyBaseUrl} target="_blank" rel="noopener noreferrer">
+                          <Ci name="ext" size={13} /> Open ComfyUI ↗
+                        </a>
+                      ) : (
+                        <button className="rbtn acc"><Ci name="ext" size={13} /> Open ComfyUI ↗</button>
+                      )}
+                    </div>
+                  </div>
+                ) : (
+                  <div className="job-empty">engine idle · no job running</div>
+                )}
+              </div>
+            </div>
           </div>
 
-          {/* Active render progress detail */}
-          <div>
-            <BlkH icon="bolt" acc note={hasRun ? `eta ${run.eta}` : undefined}>
-              active render
-            </BlkH>
-            {hasRun ? (
-              <div className="job" style={{ background: 'transparent', border: 'none', padding: 0, gap: 13 }}>
-                <div className="job-h" style={{ alignItems: 'flex-end' }}>
-                  <div className="col" style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                    <span className="nm">
-                      {run.name} <span className="kind">· {run.kind}</span>
-                    </span>
-                    <span className="job-loaded">{run.node} · step {run.step}/{run.total}</span>
-                  </div>
-                  <span className="grow" />
-                  <span className="pct big">{Math.round(pct)}%</span>
+          {/* Telemetry: GTT gauge + RAM spark + device metric grid */}
+          <div className="metrics-panel">
+            <div className="metric-top">
+              <Gauge
+                pct={gttPct}
+                label="gtt"
+                sub={`${used} / ${gtt.ceil}`}
+                size={104}
+                warn={gttWarn}
+              />
+              <div className="ram-metric">
+                <div className="blk-h">system ram</div>
+                <div className="tp-num">
+                  {ram.used}<span className="u">/ {ram.ceil} GB</span>
                 </div>
-                <div className="gbar tall">
-                  <i style={{ width: pct + '%' }} />
+                <BarSpark />
+              </div>
+            </div>
+            <div>
+              <BlkH icon="gauge" note="iGPU">device</BlkH>
+              <div className="mx2">
+                <div className="cstat">
+                  <span className="cl">util</span>
+                  <span className="cv acc">{stats.util}<span className="u">%</span></span>
                 </div>
-                <StepPips step={run.step} total={run.total} />
-                <div className="job-steps" style={{ marginTop: 2 }}>
-                  <span className="node">loaded: {run.loaded}</span>
-                  <span>{its} it/s</span>
+                <div className="cstat">
+                  <span className="cl">temp</span>
+                  <span className="cv">{stats.temp}<span className="u">°C</span></span>
                 </div>
-                <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
-                  <button className="rbtn" onClick={onCancel}><Ci name="stop" size={13} /> Cancel render</button>
-                  {comfyBaseUrl ? (
-                    <a className="rbtn acc" href={comfyBaseUrl} target="_blank" rel="noopener noreferrer">
-                      <Ci name="ext" size={13} /> Open ComfyUI ↗
-                    </a>
-                  ) : (
-                    <button className="rbtn acc"><Ci name="ext" size={13} /> Open ComfyUI ↗</button>
-                  )}
+                <div className="cstat">
+                  <span className="cl">clock</span>
+                  <span className="cv">{stats.clk}<span className="u">GHz</span></span>
+                </div>
+                <div className="cstat">
+                  <span className="cl">speed</span>
+                  <span className="cv acc">{stats.its}<span className="u">it/s</span></span>
                 </div>
               </div>
-            ) : (
-              <div className="job-empty">engine idle · no job running</div>
-            )}
+            </div>
           </div>
         </div>
 
-        {/* ── Lower row: queue (2/3) + telemetry (1/3) ── */}
-        <div style={{
-          display: 'grid',
-          gridTemplateColumns: '2fr 1fr',
-          gap: 22,
-          marginTop: 18,
-          paddingTop: 16,
-          borderTop: '1px solid var(--line-soft)',
-        }}>
+        {/* ── Lower row: queue (60%) + workflows/models (40%) ── */}
+        <div className="queue-assets-row">
           {/* Queue */}
           <div>
             <BlkH icon="queue" note={`${hasRun ? '1 running' : '0 running'} · ${queue.length} pending`}>
@@ -558,52 +597,10 @@ export function ImageGenCard({
             )}
           </div>
 
-          {/* Telemetry: GTT gauge + RAM spark + device metric grid */}
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
-              <Gauge
-                pct={gttPct}
-                label="gtt"
-                sub={`${used} / ${gtt.ceil}`}
-                size={116}
-                warn={gttWarn}
-              />
-              <div style={{ minWidth: 0 }}>
-                <div className="blk-h" style={{ margin: '0 0 5px' }}>system ram</div>
-                <div className="tp-num" style={{ fontSize: 22 }}>
-                  {ram.used}<span className="u">/ {ram.ceil} GB</span>
-                </div>
-                <BarSpark style={{ height: 24, marginTop: 8 }} />
-              </div>
-            </div>
-            <div>
-              <BlkH icon="gauge" note="iGPU">device</BlkH>
-              <div className="mx2">
-                <div className="cstat">
-                  <span className="cl">util</span>
-                  <span className="cv acc">{stats.util}<span className="u">%</span></span>
-                </div>
-                <div className="cstat">
-                  <span className="cl">temp</span>
-                  <span className="cv">{stats.temp}<span className="u">°C</span></span>
-                </div>
-                <div className="cstat">
-                  <span className="cl">clock</span>
-                  <span className="cv">{stats.clk}<span className="u">GHz</span></span>
-                </div>
-                <div className="cstat">
-                  <span className="cl">speed</span>
-                  <span className="cv acc">{stats.its}<span className="u">it/s</span></span>
-                </div>
-              </div>
-            </div>
+          <div className="wcard-sub">
+            <WorkflowsBlock comfyBaseUrl={comfyBaseUrl} />
+            <ModelsBlock />
           </div>
-        </div>
-
-        {/* ── Workflows + Models lower section ── */}
-        <div className="wcard-sub">
-          <WorkflowsBlock comfyBaseUrl={comfyBaseUrl} />
-          <ModelsBlock />
         </div>
       </div>
 

@@ -38,26 +38,34 @@
 
 /* ── Engine pane shell ───────────────────────────────────────────── */
 .cpane { border: 1px solid var(--line); border-radius: var(--rad-lg); background: var(--bg-1); overflow: hidden; }
-.cpane.live { border-color: var(--accent-line); box-shadow: 0 0 0 1px var(--accent-line), 0 0 44px -22px var(--accent-glow); }
+.cpane.live { border-color: var(--line); box-shadow: none; }
 
+.engine-h,
 .cpane-h {
   display: flex; align-items: center; gap: 12px; padding: 14px 18px;
   border-bottom: 1px solid var(--line-soft); background: var(--bg); cursor: pointer;
   transition: background var(--dur-fast) var(--ease);
+  flex-wrap: wrap;
+  row-gap: 10px;
 }
-.cpane.live .cpane-h { background: linear-gradient(90deg, var(--accent-soft), transparent 58%); }
+.engine.active .engine-h,
+.cpane.live .cpane-h { background: linear-gradient(90deg, var(--accent-soft), transparent 60%); }
 .cpane-h:hover { background: var(--bg-2); }
-.cpane.live .cpane-h:hover { background: linear-gradient(90deg, rgba(255,176,0,0.14), transparent 58%); }
+.cpane.live .cpane-h:hover { background: linear-gradient(90deg, rgba(255,176,0,0.14), transparent 60%); }
+.engine-glyph,
 .cpane-glyph {
-  width: 28px; height: 28px; border-radius: var(--rad-sm); flex-shrink: 0;
+  width: 26px; height: 26px; border-radius: var(--rad-sm); flex-shrink: 0;
   display: inline-flex; align-items: center; justify-content: center;
   background: var(--bg-2); color: var(--fg-3); border: 1px solid var(--line);
 }
 .cpane.live .cpane-glyph { background: var(--accent-soft); color: var(--accent); border-color: var(--accent-line); }
 .cpane-titles { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.engine-title,
 .cpane-title { font-family: var(--jbm); font-size: 15px; font-weight: 500; color: var(--fg); white-space: nowrap; }
+.engine-sub,
 .cpane-sub { font-family: var(--jbm); font-size: 11px; color: var(--fg-4); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .cpane-h .grow { flex: 1; }
+.eh-right { display: inline-flex; align-items: center; gap: 8px; flex-shrink: 0; }
 
 /* state pill */
 .cpill { display: inline-flex; align-items: center; gap: 7px; padding: 3px 10px; border-radius: var(--rad-pill); font-family: var(--jbm); font-size: 11px; border: 1px solid var(--line); color: var(--fg-3); background: var(--bg-1); white-space: nowrap; }

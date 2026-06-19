@@ -34,32 +34,51 @@
   overflow: hidden;
 }
 .comfy-page .wcard.active {
-  border-color: var(--comfy-line);
-  box-shadow: 0 0 0 1px var(--comfy-line), 0 0 44px -22px var(--comfy-glow);
+  border-color: var(--line);
+  box-shadow: none;
 }
 
 /* ── Card header ────────────────────────────────────────────────────────────── */
+.comfy-page .engine-h,
 .comfy-page .wcard-h {
   display: flex;
   align-items: center;
-  gap: 11px;
-  padding: 13px 16px;
+  gap: 12px;
+  padding: 14px 18px;
   border-bottom: 1px solid var(--line-soft);
-  background: linear-gradient(90deg, var(--comfy-soft), transparent 58%);
+  background: var(--bg);
+  flex-wrap: wrap;
+  row-gap: 10px;
 }
+.comfy-page .engine.active .engine-h {
+  background: linear-gradient(90deg, var(--comfy-soft), transparent 60%);
+}
+.comfy-page .engine-glyph,
 .comfy-page .wcard-h .glyph {
-  width: 26px; height: 26px;
+  width: 26px;
+  height: 26px;
   border-radius: var(--rad-sm);
-  display: inline-flex; align-items: center; justify-content: center;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   background: var(--comfy-soft);
   color: var(--comfy);
   border: 1px solid var(--comfy-line);
   flex-shrink: 0;
 }
+.comfy-page .engine-h .col,
 .comfy-page .wcard-h .col  { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
-.comfy-page .wcard-h .ttl  { font-family: var(--jbm); font-size: 14.5px; font-weight: 500; color: var(--fg); letter-spacing: -0.01em; line-height: 1.1; }
-.comfy-page .wcard-h .sub  { font-family: var(--jbm); font-size: 10.5px; color: var(--fg-4); }
+.comfy-page .engine-title,
+.comfy-page .wcard-h .ttl  { font-family: var(--jbm); font-size: 15px; font-weight: 500; color: var(--fg); line-height: 1.1; }
+.comfy-page .engine-sub,
+.comfy-page .wcard-h .sub  { font-family: var(--jbm); font-size: 11px; color: var(--fg-4); }
 .comfy-page .wcard-h .grow { flex: 1; }
+.comfy-page .eh-right {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
 .comfy-page .wcard-h .meta { font-family: var(--jbm); font-size: 10px; color: var(--fg-4); white-space: nowrap; }
 .comfy-page .wcard-h .meta b { color: var(--fg-2); font-weight: 500; }
 .comfy-page .wcard-b { padding: 16px; }
@@ -167,6 +186,61 @@
 .comfy-page .gauge.sm .gc .lbl { font-size: 8px; margin-top: 4px; letter-spacing: 0.07em; }
 .comfy-page .gauge.sm .gc .sub { font-size: 9px; margin-top: 2px; }
 
+/* ── Activity/metrics + queue/assets layout ─────────────────────────────────── */
+.comfy-page .activity-metrics-row,
+.comfy-page .queue-assets-row {
+  display: grid;
+  grid-template-columns: minmax(0, 3fr) minmax(280px, 2fr);
+  gap: 22px;
+  align-items: start;
+}
+
+.comfy-page .queue-assets-row {
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px solid var(--line-soft);
+}
+
+.comfy-page .render-grid {
+  display: grid;
+  grid-template-columns: minmax(160px, 220px) minmax(0, 1fr);
+  gap: 18px;
+  align-items: stretch;
+}
+
+.comfy-page .render-detail {
+  min-width: 0;
+}
+
+.comfy-page .metrics-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.comfy-page .metric-top {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.comfy-page .ram-metric {
+  min-width: 0;
+}
+
+.comfy-page .ram-metric .blk-h {
+  margin: 0 0 5px;
+}
+
+.comfy-page .ram-metric .tp-num {
+  font-size: 22px;
+}
+
+.comfy-page .ram-metric .cspark {
+  height: 24px;
+  margin-top: 8px;
+}
+
 /* ── 2×2 device metric grid ─────────────────────────────────────────────────── */
 .comfy-page .mx2 {
   display: grid; grid-template-columns: 1fr 1fr;
@@ -186,7 +260,36 @@
 .comfy-page .job-h .kind { font-family: var(--jbm); font-size: 11px; color: var(--fg-4); }
 .comfy-page .job-h .grow { flex: 1; }
 .comfy-page .job-h .pct { font-family: var(--jbm); font-size: 22px; font-weight: 500; letter-spacing: -0.02em; color: var(--comfy); line-height: 1; }
-.comfy-page .job-h .pct.big { font-size: 40px; }
+.comfy-page .job-h .pct.big { font-size: 34px; }
+
+.comfy-page .render-job {
+  background: transparent;
+  border: none;
+  padding: 0;
+  gap: 11px;
+}
+
+.comfy-page .render-job .job-h {
+  align-items: flex-end;
+}
+
+.comfy-page .render-job .col {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.comfy-page .render-job .job-steps {
+  margin-top: 0;
+}
+
+.comfy-page .render-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 2px;
+}
 
 .comfy-page .gbar { height: 7px; border-radius: 3px; background: var(--bg-3); overflow: hidden; position: relative; }
 .comfy-page .gbar.tall { height: 10px; }
@@ -222,8 +325,12 @@
   background-color: var(--bg-sunken);
   background-image: repeating-linear-gradient(135deg, transparent 0 9px, rgba(94,164,249,0.05) 9px 18px);
   display: flex; flex-direction: column; align-items: center; justify-content: center;
-  gap: 8px; min-height: 184px;
+  gap: 7px;
+  min-height: 136px;
+  aspect-ratio: 16 / 10;
 }
+.comfy-page .preview.active { border-color: var(--comfy-line); }
+.comfy-page .preview-img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; opacity: 0.7; }
 .comfy-page .preview .scan {
   position: absolute; left: 0; right: 0; height: 2px;
   background: linear-gradient(90deg, transparent, var(--comfy), transparent);
@@ -302,6 +409,14 @@
   margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--line-soft);
 }
 
+.comfy-page .queue-assets-row .wcard-sub {
+  grid-template-columns: 1fr;
+  gap: 16px;
+  margin-top: 0;
+  padding-top: 0;
+  border-top: 0;
+}
+
 .comfy-page .flows { display: flex; flex-wrap: wrap; gap: 8px; }
 .comfy-page .flow {
   display: inline-flex; align-items: center; gap: 7px;
@@ -351,3 +466,34 @@
 .comfy-page .rbtn:hover { border-color: var(--line-strong); background: var(--bg-2); color: var(--fg); }
 .comfy-page .rbtn.acc { color: var(--comfy); border-color: var(--comfy-line); }
 .comfy-page .rbtn.acc:hover { background: var(--comfy-soft); }
+
+@media (max-width: 980px) {
+  .comfy-page .activity-metrics-row,
+  .comfy-page .queue-assets-row,
+  .comfy-page .wcard-sub {
+    grid-template-columns: 1fr;
+  }
+
+  .comfy-page .render-grid {
+    grid-template-columns: minmax(140px, 0.75fr) minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 720px) {
+  .comfy-page .render-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .comfy-page .metric-top {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .comfy-page .preview {
+    min-height: 128px;
+  }
+
+  .comfy-page .qcard.row {
+    flex-wrap: wrap;
+  }
+}
