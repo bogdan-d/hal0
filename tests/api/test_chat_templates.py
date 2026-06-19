@@ -49,9 +49,9 @@ def test_seed_populates_chatml_llama3_and_qwen36_mtp(
     templates_dir = tmp_path / "chat-templates"
     assert (templates_dir / "chatml.jinja").exists(), "chatml.jinja should be seeded"
     assert (templates_dir / "llama3.jinja").exists(), "llama3.jinja should be seeded"
-    assert (
-        templates_dir / "qwen3.6-27b-mtp.jinja"
-    ).exists(), "qwen3.6-27b-mtp.jinja should be seeded"
+    assert (templates_dir / "qwen3.6-27b-mtp.jinja").exists(), (
+        "qwen3.6-27b-mtp.jinja should be seeded"
+    )
 
 
 def test_seed_does_not_overwrite_existing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
