@@ -76,7 +76,9 @@ jobs:
       - name: Format check
         run: ruff format --check src tests
       - name: Test
-        run: pytest tests/ -v --cov=hal0 --cov-report=term-missing
+        # Coverage (+ verbose) only on main pushes — it's a report, not a gate,
+        # so PRs skip the instrumentation overhead and run a quiet, faster suite.
+        run: pytest tests/ ${{ github.event_name == 'push' && '-v --cov=hal0 --cov-report=term-missing' || '-q' }}
 
   ui:
     runs-on: ubuntu-latest
