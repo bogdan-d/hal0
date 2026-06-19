@@ -345,7 +345,11 @@ test.describe('C7 — drawer-editable profile + create-modal device derivation',
     await page.route('**/api/chat-templates', (route) =>
       route.fulfill({
         status: 200, contentType: 'application/json',
-        body: JSON.stringify([{ id: 'chatml', label: 'ChatML' }, { id: 'llama3', label: 'Llama 3' }]),
+        body: JSON.stringify([
+          { id: 'chatml', label: 'ChatML' },
+          { id: 'llama3', label: 'Llama 3' },
+          { id: 'qwen3.6-27b-mtp', label: 'Qwen3.6 27B MTP' },
+        ]),
       }),
     )
 
@@ -367,6 +371,7 @@ test.describe('C7 — drawer-editable profile + create-modal device derivation',
     // The override select should now be visible
     const tmplSelect = tmplRow.locator('select')
     await expect(tmplSelect).toBeVisible()
+    await expect(tmplSelect.locator('option[value="qwen3.6-27b-mtp"]')).toHaveCount(1)
 
     // Choose chatml
     await tmplSelect.selectOption('chatml')

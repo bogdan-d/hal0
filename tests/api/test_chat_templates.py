@@ -1,8 +1,10 @@
 """Tests for /api/chat-templates — catalog endpoint + bundled library + store seeding.
 
 Covers:
-  - seed_chat_templates() populates the store dir on startup (chatml, llama3).
-  - GET /api/chat-templates returns at minimum: auto, chatml, llama3.
+  - seed_chat_templates() populates the store dir on startup (chatml, llama3,
+    qwen3.6-27b-mtp).
+  - GET /api/chat-templates returns at minimum: auto, chatml, llama3,
+    qwen3.6-27b-mtp.
   - POST /api/chat-templates with valid id writes the file + appears in GET.
   - POST /api/chat-templates with path-traversal id returns 4xx, writes nothing.
 """
@@ -38,13 +40,18 @@ def store_client(store_app: FastAPI) -> Iterator[TestClient]:
 # ── seed_chat_templates ───────────────────────────────────────────────────────
 
 
-def test_seed_populates_chatml_and_llama3(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_seed_populates_chatml_llama3_and_qwen36_mtp(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """seed_chat_templates() writes bundled templates absent-only."""
     monkeypatch.setenv("HAL0_MODEL_STORE", str(tmp_path))
     seed_chat_templates()
     templates_dir = tmp_path / "chat-templates"
     assert (templates_dir / "chatml.jinja").exists(), "chatml.jinja should be seeded"
     assert (templates_dir / "llama3.jinja").exists(), "llama3.jinja should be seeded"
+    assert (templates_dir / "qwen3.6-27b-mtp.jinja").exists(), (
+        "qwen3.6-27b-mtp.jinja should be seeded"
+    )
 
 
 def test_seed_does_not_overwrite_existing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -73,6 +80,7 @@ def test_get_catalog_includes_bundled_templates(store_client: TestClient) -> Non
     ids = {entry["id"] for entry in r.json()}
     assert "chatml" in ids, f"chatml missing from {ids}"
     assert "llama3" in ids, f"llama3 missing from {ids}"
+    assert "qwen3.6-27b-mtp" in ids, f"qwen3.6-27b-mtp missing from {ids}"
 
 
 def test_get_catalog_auto_is_first(store_client: TestClient) -> None:

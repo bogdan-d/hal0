@@ -165,6 +165,14 @@ function SlotCard({
   const isContainer = slot.runtime === "container" || slot.container_status != null;
   const phase = slotButtonPhase(slot);
   const isLlm = type === "llm";
+  const ind = slotIndicator(slot);
+  const statusClass = ind.cls === "serving" || ind.cls === "stale"
+    ? " slot--active"
+    : ind.cls === "warming"
+      ? " slot--warming"
+      : ind.cls === "error"
+        ? " slot--error"
+        : "";
 
   // Only render chips backed by a real slot-payload field. Dead chips
   // (req/min, xrt, prec, p50/lat, sec/min, avg, res, maxDocs, voice) were
@@ -200,7 +208,7 @@ function SlotCard({
   })();
 
   return (
-    <div className={"slot" + (state === "serving" ? " serving" : "") + (swapOpen ? " swap-open" : "") + (enabled ? "" : " slot--disabled") + (liveWhileDisabled ? " slot--live" : "")}>
+    <div className={"slot" + statusClass + (swapOpen ? " swap-open" : "") + (enabled ? "" : " slot--disabled") + (liveWhileDisabled ? " slot--live" : "")}>
       <div className="slot-h">
         <IndicatorDot slot={slot} />
         <div className="slot-name">
@@ -314,7 +322,6 @@ function SlotCard({
           // (slot-status.js): serving|stale|warming|error|offline. The old
           // map keyed on "warning"/"recent" which that classifier never
           // emits, so every chip fell through to the default grey.
-          const ind = slotIndicator(slot);
           const chipColor = ind.cls === "serving" ? "var(--ok)"
             : ind.cls === "stale" || ind.cls === "warming" ? "var(--warn)"
             : ind.cls === "error" ? "var(--err)"
