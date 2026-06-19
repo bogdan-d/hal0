@@ -10,6 +10,59 @@ Tags older than v0.2.0 ship release notes inside the GitHub release
 page; this CHANGELOG starts at v0.2.0 (the Lemonade migration cut).
 For ADR-level architecture context see `docs/internal/adr/`.
 
+## [v0.7.3-beta.1] — 2026-06-19
+
+First Beta. The dashboard becomes a full operations console — ComfyUI image
+generation, an agent task board, NPU/FLM slots, and a unified profile-card
+layout — on top of honest slot health and per-slot context derivation.
+
+### Added
+- **ComfyUI generation engine** — full platform integration (model store,
+  capability picker, installer wiring, V2 Image-Gen pane). The Image-Gen tab
+  collapses its queue/workflows and an Inference-tab dot tracks live state; image
+  generation flips the GPU into exclusive image mode via the iGPU switchover.
+  (#878, #890, #881)
+- **NPU occupancy** — a living occupancy grid with per-slot accents and
+  activity-driven breathing, replacing the NpuFlmStack/trio picker. (#859, #861, #860)
+- **Operator Board** — a hal0-skinned kanban wired to Hermes (`/api/board/*`) with
+  a live agent-chat drawer and working task creation. (#852, #858)
+- **Agents page** — an agent-card library with a live Hermes card. (#848)
+- **Dashboard overhaul** — inference/NPU/ComfyUI cards unified to the profile-card
+  style; Profiles given an engine-style section header and moved into the Slots
+  tab; inference-pane living-grid redesign; sidebar nav accordion + bottom Services
+  launch zone; a live-journal footer with runtime + service health groups; the
+  memory+throughput band lifted above the tabs and slot cards freed from the
+  accordion. (#888, #889, #879, #894, #867, #853)
+- **Editable per-slot `extra_args`** with a Regenerate overlay. (#854)
+- **Qwen3.6 MTP** chat template + slot rails.
+- A **generated changelog** is now included in every release (nightly + stable). (#842)
+
+### Changed
+- **Slot health-probe honesty** — a slot is marked ready only once its real
+  `/health` passes, not on a systemd snapshot. (#866)
+- Slot context is derived per-slot and never silently inherits llama-server's
+  4096; the edit-drawer default is 16k. (#862, #850)
+- Disabled-but-running slots are surfaced; the enable toggle moved into the drawer. (#856)
+- The runtime indicator split into a sidebar launcher + a footer health chip. (#864)
+- Durable group-shared model ownership for an editable `/opt/hal0`. (#843, #857)
+- Nightly versions carry a sub-day timestamp so same-day re-cuts stay monotonic. (#841)
+
+### Fixed
+- **Hardware:** report the live GTT total instead of a stale cached probe value. (#891)
+- **NPU:** probe AIE columns via a temp file, not `-o /dev/stdout`. (#893)
+- **Slots:** harden container config-drift comparisons and warn on drift. (#880, #869)
+- **Routing:** translate FLM `<tag>-FLM` ids to served tags in the chat-slot rewrite. (#840)
+- **Hermes:** run-as-`hal0` guard + ownership handover prevents root-clobber;
+  corrected env arg order and dashboard TUI argv order. (#844, #847)
+- **Dashboard:** dedup the journal SSE ring; chyron/timestamp polish; grid
+  alignment; empty memory-bank graph no longer locks the dashboard; stray
+  dev-test slots removed from the persona UI; responsive sizing + chrome cleanup.
+  (#868, #871, #870, #845, #855, #846, #851)
+
+### Docs
+- Restored `doctor perms` + `migrate model-layout` to the CLI reference; added the
+  deploy + PR workflow for parallel teammate sessions. (#849, #865)
+
 ## [v0.5.1-alpha.1] — 2026-06-15
 
 Pre-Alpha. Retires the web FirstRun picker in favour of a terminal `hal0 setup`
