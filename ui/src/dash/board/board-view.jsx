@@ -204,6 +204,7 @@ function BoardView() {
   const [sel, setSel]               = useState(() => new Set());
   const [openTask, setOpenTask]     = useState(null);
   const [chatOpen, setChatOpen]     = useState(false);
+  const [newTaskLane, setNewTaskLane] = useState(null);
 
   const [tw, setTw]                 = useState({ density: "comfortable", accent: "dot", titlefont: "prose", meta: true });
   const [twOpen, setTwOpen]         = useState(false);
@@ -229,6 +230,7 @@ function BoardView() {
         setOrchOpen(false);
         setBoardMenu(false);
         setTwOpen(false);
+        setNewTaskLane(null);
       }
     };
     window.addEventListener("keydown", onKey);
@@ -263,7 +265,7 @@ function BoardView() {
   const profileOpts = useMemo(() => {
     const ps = profilesList.length > 0
       ? profilesList
-      : [...new Set(tasks.map(t => t.profile).filter(Boolean))].map(p => ({ id: p, label: p }));
+      : [...new Set(tasks.map(t => t.assignee).filter(Boolean))].map(p => ({ id: p, label: p }));
     return [{ id: "all", label: "all profiles" }, ...ps.map(p => ({ id: p.id ?? p, label: p.label ?? p.id ?? p, ct: p.count }))];
   }, [profilesList, tasks]);
 
@@ -273,7 +275,7 @@ function BoardView() {
       (t.id || "").toLowerCase().includes(search.toLowerCase())
     )) return false;
     if (tenant !== "all" && t.tenant !== tenant) return false;
-    if (profile !== "all" && t.profile !== profile) return false;
+    if (profile !== "all" && t.assignee !== profile) return false;
     return true;
   };
 
@@ -361,6 +363,7 @@ function BoardView() {
   const TaskDrawer     = window.TaskDrawer;
   const AgentChat      = window.AgentChat;
   const NewBoardModal  = window.NewBoardModal;
+  const NewTaskModal   = window.NewTaskModal;
   const OrchPopover    = window.OrchPopover;
   const BoardTweaksPanel = window.BoardTweaksPanel;
   const BoardLane      = window.BoardLane;
@@ -582,14 +585,7 @@ function BoardView() {
                       onToggle={toggleSel}
                       onOpen={setOpenTask}
                       openTask={openTask}
-                      onAdd={(laneId) => {
-                        if (createTask) {
-                          createTask.mutate(
-                            { title: "New task", status: laneId },
-                            { onSuccess: () => toast("task created in " + laneId) }
-                          );
-                        }
-                      }}
+                      onAdd={(laneId) => setNewTaskLane(laneId)}
                       dnd={dnd}
                     />
                   : null
@@ -644,6 +640,29 @@ function BoardView() {
           onClose={() => setChatOpen(false)}
           onOpenTask={(id) => { setChatOpen(false); setOpenTask(id); }}
         />
+      )}
+
+      {/* new task modal — explicit creation; nothing is POSTed until submit.
+          Wrapped in `.board` so the `.board .modal-*` scoped styles apply
+          (BoardView mounts under `.main`, not under a `.board` ancestor). */}
+      {newTaskLane && NewTaskModal && (
+        <div className="board">
+          <NewTaskModal
+            lane={newTaskLane}
+            assignees={assigneesList.length > 0 ? assigneesList : profilesList}
+            onClose={() => setNewTaskLane(null)}
+            onCreate={(fields) => {
+              const laneId = newTaskLane;
+              setNewTaskLane(null);
+              if (createTask) {
+                createTask.mutate(
+                  { ...fields, status: laneId },
+                  { onSuccess: () => toast('task "' + fields.title + '" created in ' + laneId) }
+                );
+              }
+            }}
+          />
+        </div>
       )}
 
       {/* new board modal */}
