@@ -231,7 +231,7 @@ def _resolve_web_dist(cfg: AgentConfig) -> Path | None:
 def _build_hermes_argv(cfg: AgentConfig) -> list[str]:
     """Build the argv that boots Hermes with ``/api/events`` + ``/api/pty``.
 
-    The chosen subcommand is ``hermes dashboard --tui`` per ``hermes_cli/
+    The chosen invocation is ``hermes --tui dashboard`` per ``hermes_cli/
     main.py:14050-14102`` and ``hermes_cli/main.py:10930-10939``:
 
     * ``cmd_dashboard`` is the ONLY subcommand that imports + calls
@@ -264,12 +264,12 @@ def _build_hermes_argv(cfg: AgentConfig) -> list[str]:
 
     argv = [
         str(cfg.hermes_bin),
+        "--tui",
         "dashboard",
         "--host",
         cfg.host,
         "--port",
         str(cfg.port),
-        "--tui",
         "--no-open",
     ]
     if _resolve_web_dist(cfg) is not None:
