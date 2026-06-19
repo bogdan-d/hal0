@@ -443,14 +443,14 @@ function EnginePane({ live, glyph, eyebrow, title, sub, pill, headRight, strip, 
   return (
     <section>
       <div className="conn-eyebrow">{eyebrow}</div>
-      <div className={'cpane' + (live ? ' live' : '') + (open ? ' open' : '')}>
-        <div className="cpane-h" onClick={() => setOpen((o) => !o)}>
-          <span className="cpane-glyph">
+      <div className={'engine cpane' + (live ? ' live active' : '') + (open ? ' open' : '')}>
+        <div className="engine-h cpane-h" onClick={() => setOpen((o) => !o)}>
+          <span className="engine-glyph cpane-glyph">
             <CIcon name={glyph} size={16} />
           </span>
           <span className="cpane-titles">
-            <span className="cpane-title">{title}</span>
-            <span className="cpane-sub">{sub}</span>
+            <span className="engine-title cpane-title">{title}</span>
+            <span className="engine-sub cpane-sub">{sub}</span>
           </span>
           <span className={'cpill ' + (pill.tone || '')}>
             <span className="dot" />
@@ -458,7 +458,7 @@ function EnginePane({ live, glyph, eyebrow, title, sub, pill, headRight, strip, 
           </span>
           <span className="grow" />
           {headRight && (
-            <span style={{ display: 'inline-flex', gap: 8 }} onClick={(e) => e.stopPropagation()}>
+            <span className="eh-right" onClick={(e) => e.stopPropagation()}>
               {headRight}
             </span>
           )}
