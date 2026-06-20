@@ -252,6 +252,18 @@ def profiles_toml() -> Path:
     return etc() / "profiles.toml"
 
 
+def stacks_toml() -> Path:
+    """Return the stack catalog path (/etc/hal0/stacks.toml).
+
+    The file is optional — :func:`hal0.config.loader.load_stacks_config`
+    returns the built-in seed stacks (empty until they ship) when absent.
+
+    FHS:       /etc/hal0/stacks.toml
+    HAL0_HOME: $HAL0_HOME/etc/hal0/stacks.toml
+    """
+    return etc() / "stacks.toml"
+
+
 def manifest_json() -> Path:
     """Return the release manifest path.
 
