@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from hal0.config.loader import ConfigParseError, load_stacks_config, save_stacks_config
-from hal0.config.schema import StackConfig, StackSlotEntry, StacksConfig
+from hal0.config.schema import StackConfig, StacksConfig, StackSlotEntry
 
 
 class TestLoadStacksConfig:
