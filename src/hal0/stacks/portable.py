@@ -20,8 +20,20 @@ from pydantic import BaseModel
 
 from hal0 import __version__
 from hal0.capabilities.config import load_capabilities_config
-from hal0.config.loader import load_profiles_config, save_profiles_config, list_slots, load_slot_config
-from hal0.config.schema import STACK_SCHEMA_VERSION_CURRENT, StackConfig, StackModelMeta, _VALID_DEVICES, StackCapabilityRow, StackSlotEntry
+from hal0.config.loader import (
+    list_slots,
+    load_profiles_config,
+    load_slot_config,
+    save_profiles_config,
+)
+from hal0.config.schema import (
+    _VALID_DEVICES,
+    STACK_SCHEMA_VERSION_CURRENT,
+    StackCapabilityRow,
+    StackConfig,
+    StackModelMeta,
+    StackSlotEntry,
+)
 from hal0.errors import BadRequest
 from hal0.registry.store import ModelRegistry
 

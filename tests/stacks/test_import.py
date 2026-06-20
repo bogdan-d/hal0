@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from hal0.config.schema import StackCapabilityRow, StackConfig, StackSlotEntry
+from hal0.config.schema import StackConfig, StackSlotEntry
 from hal0.errors import BadRequest
 from hal0.registry.model import Model
 from hal0.registry.store import ModelRegistry
