@@ -41,6 +41,8 @@ export const ENDPOINTS = {
     `/api/slots/${encodeURIComponent(name)}/pull`,
   slotPullStream: (name: string) =>
     `/api/slots/${encodeURIComponent(name)}/pull/stream`,
+  slotResolved: (name: string) =>
+    `/api/slots/${encodeURIComponent(name)}/resolved`,
 
   // ── Models / pull lifecycle ──────────────────────────────────────
   models: '/api/models',
