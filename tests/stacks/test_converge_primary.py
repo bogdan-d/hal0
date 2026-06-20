@@ -10,7 +10,7 @@ import pytest
 
 from hal0.config.schema import StackConfig, StackSlotEntry
 from hal0.slots.state import SlotState
-from hal0.stacks.apply import ConvergeReport, StackApplyEngine
+from hal0.stacks.apply import StackApplyEngine
 from tests.stacks.conftest import FakeSnap, RecordingOrchestrator, RecordingSlotManager
 
 

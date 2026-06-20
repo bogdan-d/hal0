@@ -9,8 +9,6 @@ from __future__ import annotations
 import tomllib
 from pathlib import Path
 
-import pytest
-
 from hal0.config.schema import StackConfig, StackSlotEntry
 from hal0.slot_config import ChangeSet
 from hal0.stacks.apply import StackApplyEngine, StackChangePlan

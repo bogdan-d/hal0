@@ -84,5 +84,5 @@ def test_child_maps_mirror_orchestrator_source_of_truth() -> None:
 
     expected_group = {child: group for (group, child) in _CHILD_TO_SLOT}
     expected_slot = {child: slot for (group, child), slot in _CHILD_TO_SLOT.items()}
-    assert _CHILD_TO_GROUP == expected_group
-    assert _CHILD_TO_SLOT_NAME == expected_slot
+    assert expected_group == _CHILD_TO_GROUP
+    assert expected_slot == _CHILD_TO_SLOT_NAME
