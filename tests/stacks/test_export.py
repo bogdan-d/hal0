@@ -26,7 +26,19 @@ from hal0.stacks.portable import ENVELOPE_KIND, embed_references, export_envelop
 @pytest.fixture
 def reg(tmp_path: Path) -> ModelRegistry:
     r = ModelRegistry(registry_dir=tmp_path / "registry")
-    r.add(Model(id="ace-saber", path="/models/ace.gguf", name="Ace Saber", hf_repo="jcbtc/ace", hf_filename="ace.gguf", size_bytes=19_000_000_000, capabilities=["chat", "vision"], backends=["rocm"], mmproj="/models/ace-mmproj.gguf"))
+    r.add(
+        Model(
+            id="ace-saber",
+            path="/models/ace.gguf",
+            name="Ace Saber",
+            hf_repo="jcbtc/ace",
+            hf_filename="ace.gguf",
+            size_bytes=19_000_000_000,
+            capabilities=["chat", "vision"],
+            backends=["rocm"],
+            mmproj="/models/ace-mmproj.gguf",
+        )
+    )
     return r
 
 
@@ -35,7 +47,12 @@ def _stack() -> StackConfig:
         name="Saber",
         slots=[
             StackSlotEntry(slot="agent", model="ace-saber", profile="rocm"),
-            StackSlotEntry(slot="embed", capabilities=[StackCapabilityRow(child="embed", device="npu", provider="flm", model="bge-m3")]),
+            StackSlotEntry(
+                slot="embed",
+                capabilities=[
+                    StackCapabilityRow(child="embed", device="npu", provider="flm", model="bge-m3")
+                ],
+            ),
         ],
     )
 
@@ -49,18 +66,24 @@ class TestEmbedReferences:
         assert meta.size_bytes == 19_000_000_000
         assert "vision" in meta.capabilities
 
-    def test_mmproj_is_presence_marker_not_path(self, reg: ModelRegistry, tmp_hal0_home: str) -> None:
+    def test_mmproj_is_presence_marker_not_path(
+        self, reg: ModelRegistry, tmp_hal0_home: str
+    ) -> None:
         out = embed_references(_stack(), registry=reg)
         assert out.models["ace-saber"].mmproj == "present", "host mmproj path must not leak"
 
-    def test_missing_model_embedded_as_bare_id(self, reg: ModelRegistry, tmp_hal0_home: str) -> None:
+    def test_missing_model_embedded_as_bare_id(
+        self, reg: ModelRegistry, tmp_hal0_home: str
+    ) -> None:
         out = embed_references(_stack(), registry=reg)
         # bge-m3 (a capability model) is not in the registry → bare ref
         assert out.models["bge-m3"].id == "bge-m3"
         assert out.models["bge-m3"].hf_repo == ""
 
     def test_embeds_referenced_profile(self, reg: ModelRegistry, tmp_hal0_home: str) -> None:
-        save_profiles_config(ProfilesConfig(profile={"rocm": ProfileConfig(image="ghcr.io/x:y", quant="FP4")}))
+        save_profiles_config(
+            ProfilesConfig(profile={"rocm": ProfileConfig(image="ghcr.io/x:y", quant="FP4")})
+        )
         out = embed_references(_stack(), registry=reg)
         assert "rocm" in out.profiles
         assert out.profiles["rocm"].image == "ghcr.io/x:y"
@@ -81,7 +104,11 @@ class TestExportEnvelope:
         assert env["checksum"].startswith("sha256:")
         assert env["stack"]["models"]["ace-saber"]["hf_repo"] == "jcbtc/ace"
 
-    def test_checksum_is_deterministic_and_ignores_exported_at(self, reg: ModelRegistry, tmp_hal0_home: str) -> None:
+    def test_checksum_is_deterministic_and_ignores_exported_at(
+        self, reg: ModelRegistry, tmp_hal0_home: str
+    ) -> None:
         a = export_envelope(_stack(), exported_at="2026-06-20T00:00:00Z", registry=reg)
         b = export_envelope(_stack(), exported_at="2099-01-01T00:00:00Z", registry=reg)
-        assert a["checksum"] == b["checksum"], "checksum must cover the stack body only, not exported_at"
+        assert a["checksum"] == b["checksum"], (
+            "checksum must cover the stack body only, not exported_at"
+        )

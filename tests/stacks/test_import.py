@@ -70,7 +70,12 @@ class TestParseEnvelope:
         env = export_envelope(_stack(), exported_at="t", registry=reg)
         env["stack"]["schema_version"] = 9999
         with pytest.raises(BadRequest):
-            import_stack(env, "s", StacksCatalog(path=Path(tmp_hal0_home) / "etc/hal0/stacks.toml"), registry=reg)
+            import_stack(
+                env,
+                "s",
+                StacksCatalog(path=Path(tmp_hal0_home) / "etc/hal0/stacks.toml"),
+                registry=reg,
+            )
 
 
 class TestVerifyChecksum:
@@ -101,20 +106,28 @@ class TestResolveModels:
 
 
 class TestImportStack:
-    def test_import_creates_stack_and_returns_report(self, reg: ModelRegistry, tmp_hal0_home: str) -> None:
+    def test_import_creates_stack_and_returns_report(
+        self, reg: ModelRegistry, tmp_hal0_home: str
+    ) -> None:
         catalog = StacksCatalog(path=Path(tmp_hal0_home) / "etc/hal0/stacks.toml")
         resolved, report = import_stack(_envelope(reg), "saber", catalog, registry=reg)
         assert resolved.slug == "saber"
         assert any(r.slug == "saber" for r in catalog.list())
         assert report.pullable == ["pullable-model"]
 
-    def test_import_reconciles_embedded_profile(self, reg: ModelRegistry, tmp_hal0_home: str) -> None:
+    def test_import_reconciles_embedded_profile(
+        self, reg: ModelRegistry, tmp_hal0_home: str
+    ) -> None:
         from hal0.config.loader import load_profiles_config
         from hal0.config.schema import ProfileConfig
 
         env = export_envelope(_stack(), exported_at="t", registry=reg)
-        env["stack"]["profiles"] = {"custom-x": ProfileConfig(image="ghcr.io/c:x").model_dump(mode="python")}
+        env["stack"]["profiles"] = {
+            "custom-x": ProfileConfig(image="ghcr.io/c:x").model_dump(mode="python")
+        }
         env["stack"]["slots"][0]["profile"] = "custom-x"
         catalog = StacksCatalog(path=Path(tmp_hal0_home) / "etc/hal0/stacks.toml")
         import_stack(env, "s2", catalog, registry=reg)
-        assert "custom-x" in load_profiles_config().profile, "embedded profile must be reconciled into profiles.toml"
+        assert "custom-x" in load_profiles_config().profile, (
+            "embedded profile must be reconciled into profiles.toml"
+        )

@@ -42,7 +42,18 @@ def _write_caps(home: str, text: str) -> None:
 
 class TestSnapshot:
     def test_captures_primary_slot(self, reg: ModelRegistry, tmp_hal0_home: str) -> None:
-        _write_slot(tmp_hal0_home, "agent", ['name = "agent"', "port = 8087", 'device = "gpu-rocm"', 'provider = "llama-server"', "[model]", 'default = "ace-saber"'])
+        _write_slot(
+            tmp_hal0_home,
+            "agent",
+            [
+                'name = "agent"',
+                "port = 8087",
+                'device = "gpu-rocm"',
+                'provider = "llama-server"',
+                "[model]",
+                'default = "ace-saber"',
+            ],
+        )
         stack = snapshot_live_stack(registry=reg, name="Live")
         agent = next(e for e in stack.slots if e.slot == "agent")
         assert agent.model == "ace-saber"
@@ -50,25 +61,59 @@ class TestSnapshot:
         assert stack.name == "Live"
 
     def test_captures_capability_rows(self, reg: ModelRegistry, tmp_hal0_home: str) -> None:
-        _write_slot(tmp_hal0_home, "embed", ['name = "embed"', "port = 8082", "[model]", 'default = ""'])
+        _write_slot(
+            tmp_hal0_home, "embed", ['name = "embed"', "port = 8082", "[model]", 'default = ""']
+        )
         _write_caps(
             tmp_hal0_home,
-            "\n".join(["schema_version = 2", "[selections.embed.embed]", 'device = "npu"', 'provider = "flm"', 'model = "bge-m3"', "enabled = true", ""]),
+            "\n".join(
+                [
+                    "schema_version = 2",
+                    "[selections.embed.embed]",
+                    'device = "npu"',
+                    'provider = "flm"',
+                    'model = "bge-m3"',
+                    "enabled = true",
+                    "",
+                ]
+            ),
         )
         stack = snapshot_live_stack(registry=reg)
         embed = next(e for e in stack.slots if e.slot == "embed")
-        assert any(r.child == "embed" and r.model == "bge-m3" and r.device == "npu" for r in embed.capabilities)
+        assert any(
+            r.child == "embed" and r.model == "bge-m3" and r.device == "npu"
+            for r in embed.capabilities
+        )
 
     def test_empty_slot_is_skipped(self, reg: ModelRegistry, tmp_hal0_home: str) -> None:
         # A seeded slot with no model and no capabilities should not bloat the snapshot.
-        _write_slot(tmp_hal0_home, "tts", ['name = "tts"', "port = 8085", "[model]", 'default = ""'])
+        _write_slot(
+            tmp_hal0_home, "tts", ['name = "tts"', "port = 8085", "[model]", 'default = ""']
+        )
         stack = snapshot_live_stack(registry=reg)
         assert not any(e.slot == "tts" for e in stack.slots)
 
-    def test_unset_capability_device_is_skipped(self, reg: ModelRegistry, tmp_hal0_home: str) -> None:
+    def test_unset_capability_device_is_skipped(
+        self, reg: ModelRegistry, tmp_hal0_home: str
+    ) -> None:
         # A blank-picker selection (device == "") must not produce an invalid row.
-        _write_slot(tmp_hal0_home, "vision", ['name = "vision"', "port = 8086", "[model]", 'default = "v"'])
-        _write_caps(tmp_hal0_home, "\n".join(["schema_version = 2", "[selections.vision.vision]", 'device = ""', 'provider = ""', 'model = ""', "enabled = false", ""]))
+        _write_slot(
+            tmp_hal0_home, "vision", ['name = "vision"', "port = 8086", "[model]", 'default = "v"']
+        )
+        _write_caps(
+            tmp_hal0_home,
+            "\n".join(
+                [
+                    "schema_version = 2",
+                    "[selections.vision.vision]",
+                    'device = ""',
+                    'provider = ""',
+                    'model = ""',
+                    "enabled = false",
+                    "",
+                ]
+            ),
+        )
         stack = snapshot_live_stack(registry=reg)
         vision = next(e for e in stack.slots if e.slot == "vision")
         assert vision.capabilities == []

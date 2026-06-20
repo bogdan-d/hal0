@@ -34,7 +34,9 @@ class TestStackModelMeta:
 
     def test_extra_field_forbidden(self) -> None:
         with pytest.raises(ValidationError):
-            StackModelMeta(id="m1", path="/mnt/ai-models/x.gguf")  # path is machine-specific, excluded
+            StackModelMeta(
+                id="m1", path="/mnt/ai-models/x.gguf"
+            )  # path is machine-specific, excluded
 
     def test_id_is_stripped(self) -> None:
         assert StackModelMeta(id="  chadrock-35b-ace-saber  ").id == "chadrock-35b-ace-saber"
