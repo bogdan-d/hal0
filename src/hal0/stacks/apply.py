@@ -23,6 +23,7 @@ from hal0.config import paths
 from hal0.config.schema import StackConfig, StackSlotEntry
 from hal0.model_meta import canonical_device, device_to_legacy_backend
 from hal0.slot_config import ChangeSet, FileState, SlotConfigStore
+from hal0.slots.state import SlotState
 from hal0.stacks.state import (
     StackStateRecord,
     read_stack_state,
@@ -60,6 +61,47 @@ class StackChangePlan:
     summary: list[str]
 
 
+# Slot states by convergence intent.
+_DISPATCHABLE = frozenset({SlotState.READY, SlotState.SERVING, SlotState.IDLE})
+_TRANSITIONAL = frozenset(
+    {SlotState.PULLING, SlotState.STARTING, SlotState.WARMING, SlotState.UNLOADING}
+)
+
+# Capability child → orchestrator group, and → underlying system slot name.
+# Hardcoded reverse of hal0.capabilities.orchestrator._CHILD_TO_SLOT (keyed
+# (group, child) → slot_name). Hardcoded, NOT imported, to keep this module
+# clear of the capabilities import cycle that hal0.slot_config also avoids —
+# KEEP IN SYNC with the orchestrator.
+_CHILD_TO_GROUP: dict[str, str] = {
+    "embed": "embed",
+    "rerank": "embed",
+    "stt": "voice",
+    "tts": "voice",
+    "img": "img",
+    "vision": "vision",
+}
+_CHILD_TO_SLOT_NAME: dict[str, str] = {
+    "embed": "embed",
+    "rerank": "embed-rerank",
+    "stt": "stt",
+    "tts": "tts",
+    "img": "img",
+    "vision": "vision",
+}
+
+
+@dataclass
+class ConvergeReport:
+    """What converge() did, per slot. Failures are recorded, not raised."""
+
+    loaded: list[str]
+    swapped: list[str]
+    skipped: list[str]
+    unloaded: list[str]
+    capabilities_applied: list[str]
+    errors: list[tuple[str, str]]
+
+
 class StackApplyEngine:
     """Reconcile a StackConfig onto slot TOMLs as one ChangeSet."""
 
@@ -68,9 +110,17 @@ class StackApplyEngine:
         *,
         slots_dir: Path | None = None,
         store: SlotConfigStore | None = None,
+        slot_manager: Any = None,
+        orchestrator: Any = None,
     ) -> None:
         self._slots_dir = Path(slots_dir) if slots_dir else None
         self._store = store or SlotConfigStore(slots_dir=slots_dir)
+        # Runtime deps for converge() (PR-2b). Duck-typed: slot_manager needs
+        # async list()/load()/swap()/unload(); orchestrator needs async
+        # apply(slot, child, partial). Injected real in production (PR-4),
+        # recording fakes in tests. None until converge() is called.
+        self._slot_manager = slot_manager
+        self._orchestrator = orchestrator
 
     def _slot_path(self, slot_name: str) -> Path:
         base = self._slots_dir or paths.slots_config_dir()
@@ -217,3 +267,108 @@ class StackApplyEngine:
         live = self._projection_live(StackConfig(slots=list(resolved.slots)))
         status = "clean" if stack_content_hash(live) == record.content_hash else "modified"
         return {"active": record.active_slug, "status": status}
+
+    # ── converge (Phase B — runtime lifecycle) ───────────────────────────────
+
+    async def converge(self, stack: StackConfig) -> ConvergeReport:
+        """Drive SlotManager/orchestrator so live runtime matches ``stack``.
+
+        Three passes over one ``SlotManager.list()`` snapshot: load/swap the
+        stack's primary slots, route enabled capability rows through the
+        orchestrator, and unload dispatchable slots not in the stack
+        (declarative replace). Per-slot failures are recorded in the report,
+        never raised — a committed config (PR-2a) is never unwound by a
+        lifecycle hiccup.
+        """
+        if self._slot_manager is None or self._orchestrator is None:
+            raise RuntimeError("converge() requires slot_manager and orchestrator")
+
+        report = ConvergeReport([], [], [], [], [], [])
+        snapshots = {s.name: s for s in await self._slot_manager.list()}
+        touched: set[str] = set()
+
+        # Pass 1 — primary slots (entries carrying a model).
+        for entry in stack.slots:
+            if not entry.model:
+                continue
+            touched.add(entry.slot)
+            await self._converge_primary(entry, snapshots.get(entry.slot), report)
+
+        # Pass 2 — capability children (enabled rows only).
+        await self._converge_capabilities(stack, touched, report)
+
+        # Pass 3 — unload dispatchable slots the stack doesn't touch.
+        await self._converge_unload(snapshots, touched, report)
+
+        return report
+
+    async def _converge_primary(
+        self, entry: StackSlotEntry, snap: Any, report: ConvergeReport
+    ) -> None:
+        """Load / swap / skip one primary slot to match ``entry.model``."""
+        try:
+            if snap is not None and snap.state in _TRANSITIONAL:
+                report.skipped.append(entry.slot)
+                return
+            if snap is None or snap.state not in _DISPATCHABLE:
+                await self._slot_manager.load(entry.slot, model_id=entry.model)
+                report.loaded.append(entry.slot)
+            elif snap.model_id != entry.model:
+                await self._slot_manager.swap(entry.slot, entry.model)
+                report.swapped.append(entry.slot)
+            else:
+                report.skipped.append(entry.slot)
+        except Exception as exc:  # per-slot failures are reported, not raised
+            report.errors.append((entry.slot, str(exc)))
+
+    async def _converge_capabilities(
+        self, stack: StackConfig, touched: set[str], report: ConvergeReport
+    ) -> None:
+        """Route each enabled capability row through ``orchestrator.apply``.
+
+        A stack lists the children it wants ON; disabled rows are skipped here
+        and turned off by the unload sweep. Each row's underlying slot name is
+        added to ``touched`` so the sweep won't unload it.
+        """
+        for entry in stack.slots:
+            for row in entry.capabilities:
+                if not row.enabled:
+                    continue
+                group = _CHILD_TO_GROUP.get(row.child)
+                slot_name = _CHILD_TO_SLOT_NAME.get(row.child)
+                if group is None or slot_name is None:
+                    report.errors.append((f"capability:{row.child}", "unknown capability child"))
+                    continue
+                touched.add(slot_name)
+                try:
+                    await self._orchestrator.apply(
+                        group,
+                        row.child,
+                        {
+                            "device": row.device,
+                            "provider": row.provider,
+                            "model": row.model,
+                            "enabled": True,
+                        },
+                    )
+                    report.capabilities_applied.append(f"{slot_name}/{row.child}")
+                except Exception as exc:  # recorded, not raised
+                    report.errors.append((f"{slot_name}/{row.child}", str(exc)))
+
+    async def _converge_unload(
+        self, snapshots: dict[str, Any], touched: set[str], report: ConvergeReport
+    ) -> None:
+        """Unload every dispatchable slot not touched by this stack.
+
+        Declarative replace: the snapshot is the PRE-converge state, so slots
+        loaded/swapped in passes 1-2 are in ``touched`` and never swept.
+        Offline/transitional slots are left alone.
+        """
+        for name, snap in snapshots.items():
+            if name in touched or snap.state not in _DISPATCHABLE:
+                continue
+            try:
+                await self._slot_manager.unload(name)
+                report.unloaded.append(name)
+            except Exception as exc:  # recorded, not raised
+                report.errors.append((name, str(exc)))
