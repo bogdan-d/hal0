@@ -906,6 +906,158 @@ class ProfilesConfig(BaseModel):
     profile: dict[str, ProfileConfig] = Field(default_factory=dict)
 
 
+# ── Stacks ────────────────────────────────────────────────────────────────────
+# A Stack is a named, portable bundle of slots + their profiles + model
+# assignments + capability selections. Stored single-file in stacks.toml keyed
+# by slug, mirroring profiles.toml. See docs/superpowers/specs/2026-06-19-stacks-design.md.
+
+# Stacks carry their own schema version (independent of hal0.toml meta.schema_version),
+# stamped on every StackConfig and on the export envelope (PR-3).
+STACK_SCHEMA_VERSION_CURRENT = 1
+
+_STACK_NAME_RE = r"^[a-z0-9][a-z0-9_-]{0,31}$"
+
+
+class StackModelMeta(BaseModel):
+    """Transport-safe metadata subset of a registry ``Model``.
+
+    Embedded in a stack so an importer on another machine can resolve or
+    pull a referenced model by id. Deliberately excludes the machine-specific
+    ``path`` and any host-local fields — see spec §3/§6.
+    """
+
+    model_config = {"populate_by_name": True, "extra": "forbid"}
+
+    id: str = Field(..., description="Registry model id this entry describes.")
+    name: str = Field(default="", description="Human-readable display name.")
+    hf_repo: str = Field(default="", description="HuggingFace repo id, for resolve-and-pull on import.")
+    hf_filename: str = Field(default="", description="Filename within the HF repo.")
+    size_bytes: int = Field(default=0, description="Total model size in bytes; 0 = unknown.")
+    quant: str = Field(default="", description="Quantization label shown on cards (e.g. 'FP4', 'Q4_K_M').")
+    capabilities: list[str] = Field(default_factory=list, description="Capability strings, e.g. ['chat','vision'].")
+    backends: list[str] = Field(default_factory=list, description="Runnable backends, e.g. ['rocm','vulkan'].")
+    mmproj: str | None = Field(default=None, description="mmproj sidecar marker (presence flag); never a host path on import.")
+
+    @field_validator("id")
+    @classmethod
+    def id_nonempty(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("stack model meta id must not be empty")
+        return v
+
+
+class StackCapabilityRow(BaseModel):
+    """One (slot, child) capability selection carried by a stack slot entry.
+
+    Mirrors the fields of ``hal0.capabilities.config.CapabilitySelection`` that
+    are portable; the apply engine (PR-2) translates these into real
+    CapabilitySelection rows at apply time.
+    """
+
+    model_config = {"populate_by_name": True, "extra": "forbid"}
+
+    child: str = Field(..., description="Capability child key, e.g. 'embed', 'rerank', 'stt', 'tts', 'vision'.")
+    device: str = Field(..., description="Device target for this child.")
+    provider: str = Field(..., description="Provider name for this child.")
+    model: str = Field(..., description="Model id bound to this child.")
+    enabled: bool = Field(default=True, description="Whether this child is active in the stack.")
+
+    @field_validator("device")
+    @classmethod
+    def device_valid(cls, v: str) -> str:
+        if v not in _VALID_DEVICES:
+            raise ValueError(f"device {v!r}: must be one of {sorted(_VALID_DEVICES)}")
+        return v
+
+
+class StackSlotEntry(BaseModel):
+    """One slot's contribution to a stack: which model/profile/caps it carries.
+
+    References models and profiles by name/id; the embedded ``profiles`` and
+    ``models`` maps on the parent ``StackConfig`` carry the metadata needed to
+    resolve those references on another machine.
+    """
+
+    model_config = {"populate_by_name": True, "extra": "forbid"}
+
+    slot: str = Field(..., description="Slot name this entry configures (kebab-case).")
+    profile: str | None = Field(default=None, description="Profile name reference (resolved against StackConfig.profiles).")
+    model: str | None = Field(default=None, description="Model id reference (resolved against StackConfig.models).")
+    device: str | None = Field(default=None, description="Device override for the slot.")
+    provider: str | None = Field(default=None, description="Provider override for the slot.")
+    role: str | None = Field(default=None, description="Normalization role hint, e.g. 'primary'.")
+    vision: bool = Field(default=False, description="Enable the mmproj vision sidecar for this slot.")
+    mtp: bool | None = Field(default=None, description="Per-slot MTP override (inherits profile default when None).")
+    enable_thinking: bool | None = Field(default=None, description="Per-slot reasoning override.")
+    server_extra_args: str | None = Field(default=None, description="Freeform llama-server CLI flags for this slot.")
+    capabilities: list[StackCapabilityRow] = Field(default_factory=list, description="Capability child selections.")
+
+    @field_validator("slot")
+    @classmethod
+    def slot_valid(cls, v: str) -> str:
+        import re
+
+        if not v or not v.strip():
+            raise ValueError("slot name must not be empty")
+        if not re.match(_STACK_NAME_RE, v):
+            raise ValueError(
+                f"slot name {v!r}: use lowercase alphanumeric, hyphens, underscores; "
+                f"start with alphanumeric; max 32 chars"
+            )
+        return v
+
+    @field_validator("device")
+    @classmethod
+    def device_valid(cls, v: str | None) -> str | None:
+        if v is not None and v not in _VALID_DEVICES:
+            raise ValueError(f"device {v!r}: must be one of {sorted(_VALID_DEVICES)}")
+        return v
+
+
+class StackConfig(BaseModel):
+    """One ``[stack.<slug>]`` entry in stacks.toml.
+
+    A curated bundle of slots + embedded profiles + embedded model metadata.
+    The slug is the dict key (validated by StacksCatalog on create), not a
+    field here — mirroring ProfileConfig. ``name`` is the human display label.
+    """
+
+    model_config = {"populate_by_name": True, "extra": "forbid"}
+
+    name: str = Field(default="", description="Human display label (falls back to slug in the UI).")
+    description: str = Field(default="", description="What this stack is for.")
+    author: str = Field(default="", description="Author/provenance, for the future directory.")
+    icon: str = Field(default="", description="Accent token or emoji shown on the card.")
+    tags: list[str] = Field(default_factory=list, description="Freeform tags for listing/filtering.")
+    schema_version: int = Field(
+        default=STACK_SCHEMA_VERSION_CURRENT,
+        description="Stack schema version, stamped for forward-compat / envelope migration.",
+    )
+    hal0_version: str = Field(default="", description="hal0 version that produced this stack (provenance).")
+    slots: list[StackSlotEntry] = Field(default_factory=list, description="Slots this stack configures.")
+    profiles: dict[str, ProfileConfig] = Field(
+        default_factory=dict,
+        description="Embedded profiles referenced by slots, so the stack is self-contained.",
+    )
+    models: dict[str, StackModelMeta] = Field(
+        default_factory=dict,
+        description="Embedded model metadata (no weights) for referenced model ids.",
+    )
+
+
+class StacksConfig(BaseModel):
+    """Parsed stacks.toml — top-level ``[stack]`` table, keyed by slug."""
+
+    model_config = {"populate_by_name": True, "extra": "forbid"}
+
+    stack: dict[str, StackConfig] = Field(default_factory=dict)
+
+
+# Built-in seed stacks (immutable, clone-only). Empty until PR-6 fills it with
+# saber/forge/pi. StacksCatalog consults this for the seed-immutability guard.
+SEED_STACKS: dict[str, StackConfig] = {}
+
+
 def resolve_profile_flags(profile: ProfileConfig, mtp_override: bool | None = None) -> str:
     """Return the full flag string for *profile*, expanding MTP when set.
 
