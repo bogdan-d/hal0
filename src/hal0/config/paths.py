@@ -264,6 +264,15 @@ def stacks_toml() -> Path:
     return etc() / "stacks.toml"
 
 
+def stacks_state_path() -> Path:
+    """Return the active-stack pointer path (/var/lib/hal0/stacks/state.json).
+
+    Records which stack is currently applied + a content hash for drift
+    detection. HAL0_HOME-aware via :func:`var_lib`.
+    """
+    return var_lib() / "stacks" / "state.json"
+
+
 def manifest_json() -> Path:
     """Return the release manifest path.
 
