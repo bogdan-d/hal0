@@ -9,7 +9,7 @@ value and drops only the earlier duplicates — so the slot launches identically
 
 from __future__ import annotations
 
-from hal0.slots.argv import normalize_argv
+from hal0.slots.argv import normalize_argv, resolve_argv
 
 # The flag portion of the live `agent` slot resolved_command (post `--port`).
 # Verbatim from `mcp__hal0-admin__slot_list` — includes the profile MTP bundle
@@ -239,3 +239,41 @@ def test_empty_is_noop() -> None:
     assert res.argv == []
     assert res.removed == 0
     assert res.winners == {}
+
+
+# ── resolve_argv: provenance over labelled segments ───────────────────────────
+
+
+def test_resolve_argv_attributes_winning_source() -> None:
+    res = resolve_argv(
+        [
+            ("base", ["--host", "0.0.0.0"]),
+            ("profile", ["-b", "512", "--jinja"]),
+            ("extra_args", ["-b", "8192"]),  # overrides the profile's -b
+        ]
+    )
+    assert res.argv == ["--host", "0.0.0.0", "--jinja", "-b", "8192"]
+    prov = {p.flag: p for p in res.provenance}
+    # -b was set last by extra_args -> that segment is credited, value preserved
+    assert prov["-b"].source == "extra_args"
+    assert prov["-b"].value == "8192"
+    # --jinja only came from the profile
+    assert prov["--jinja"].source == "profile"
+    assert prov["--jinja"].value is None
+    # --host from base
+    assert prov["--host"].source == "base"
+    assert res.removed == 1
+
+
+def test_resolve_argv_equivalent_argv_to_normalize() -> None:
+    # Same tokens, segmented vs flat, produce the same deduped argv.
+    flat = ["--host", "0.0.0.0", "-b", "512", "--jinja", "-b", "8192"]
+    seg = resolve_argv([("base", flat[:2]), ("profile", flat[2:5]), ("extra_args", flat[5:])])
+    assert seg.argv == normalize_argv(flat).argv
+
+
+def test_resolve_argv_omits_append_flags_from_provenance() -> None:
+    res = resolve_argv([("profile", ["--lora", "a", "--lora", "b"]), ("extra_args", ["--jinja"])])
+    flags = {p.flag for p in res.provenance}
+    assert "--lora" not in flags  # append flags aren't deduped -> no single "winner"
+    assert "--jinja" in flags
