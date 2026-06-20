@@ -15,8 +15,8 @@ from hal0.config.schema import (
     StackCapabilityRow,
     StackConfig,
     StackModelMeta,
-    StackSlotEntry,
     StacksConfig,
+    StackSlotEntry,
 )
 
 
