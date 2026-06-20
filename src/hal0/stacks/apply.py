@@ -299,7 +299,8 @@ class StackApplyEngine:
         # Pass 2 — capability children (enabled rows only).
         await self._converge_capabilities(stack, touched, report)
 
-        # Pass 3 — unload sweep (Task 3)
+        # Pass 3 — unload dispatchable slots the stack doesn't touch.
+        await self._converge_unload(snapshots, touched, report)
 
         return report
 
@@ -355,3 +356,21 @@ class StackApplyEngine:
                     report.capabilities_applied.append(f"{slot_name}/{row.child}")
                 except Exception as exc:  # recorded, not raised
                     report.errors.append((f"{slot_name}/{row.child}", str(exc)))
+
+    async def _converge_unload(
+        self, snapshots: dict[str, Any], touched: set[str], report: ConvergeReport
+    ) -> None:
+        """Unload every dispatchable slot not touched by this stack.
+
+        Declarative replace: the snapshot is the PRE-converge state, so slots
+        loaded/swapped in passes 1-2 are in ``touched`` and never swept.
+        Offline/transitional slots are left alone.
+        """
+        for name, snap in snapshots.items():
+            if name in touched or snap.state not in _DISPATCHABLE:
+                continue
+            try:
+                await self._slot_manager.unload(name)
+                report.unloaded.append(name)
+            except Exception as exc:  # recorded, not raised
+                report.errors.append((name, str(exc)))
