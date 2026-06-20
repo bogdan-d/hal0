@@ -23,6 +23,12 @@ from hal0.config import paths
 from hal0.config.schema import StackConfig, StackSlotEntry
 from hal0.model_meta import canonical_device, device_to_legacy_backend
 from hal0.slot_config import ChangeSet, FileState, SlotConfigStore
+from hal0.stacks.state import (
+    StackStateRecord,
+    read_stack_state,
+    stack_content_hash,
+    write_stack_state_atomic,
+)
 
 log = logging.getLogger(__name__)
 
@@ -165,3 +171,51 @@ class StackApplyEngine:
         half-reconciled. A no-op ChangeSet (nothing changed) writes nothing.
         """
         self._store.commit(plan.change_set)
+
+    # ── drift / active pointer ───────────────────────────────────────────────
+
+    def _projection_from_plan(self, plan: StackChangePlan) -> dict[str, Any]:
+        """The slot→after-dict projection a plan would write (keyed by slot name)."""
+        return {fs.path.stem: fs.data for fs in plan.change_set.after}
+
+    def _projection_live(self, stack: StackConfig) -> dict[str, Any]:
+        """The slot→current-disk-dict projection for a stack's primary slots."""
+        out: dict[str, Any] = {}
+        for entry in stack.slots:
+            if not entry.model:
+                continue
+            out[entry.slot] = _read_toml_or_none(self._slot_path(entry.slot))
+        return out
+
+    def record_active(self, plan: StackChangePlan, *, applied_at: float) -> None:
+        """Record ``plan``'s stack as active, fingerprinting what it wrote.
+
+        Call AFTER ``apply_config`` succeeds. The hash is taken over the
+        after-state projection, which equals live disk immediately post-commit
+        (so ``drift_status`` reports ``clean`` until something hand-edits a slot).
+        """
+        record = StackStateRecord(
+            active_slug=plan.stack_slug,
+            content_hash=stack_content_hash(self._projection_from_plan(plan)),
+            applied_at=applied_at,
+        )
+        write_stack_state_atomic(paths.stacks_state_path(), record)
+
+    def drift_status(self, catalog: Any) -> dict[str, Any]:
+        """Report the active stack and whether live config has drifted from it.
+
+        ``none`` — no stack applied. ``clean`` — live slot config matches the
+        applied fingerprint. ``modified`` — a slot was hand-edited since apply.
+        ``catalog`` is a ``StacksCatalog`` (duck-typed: needs ``.resolve(slug)``).
+        """
+        record = read_stack_state(paths.stacks_state_path())
+        if record is None:
+            return {"active": None, "status": "none"}
+        try:
+            resolved = catalog.resolve(record.active_slug)
+        except Exception:
+            # Active stack was deleted out from under the pointer.
+            return {"active": record.active_slug, "status": "modified"}
+        live = self._projection_live(StackConfig(slots=list(resolved.slots)))
+        status = "clean" if stack_content_hash(live) == record.content_hash else "modified"
+        return {"active": record.active_slug, "status": status}
