@@ -2137,7 +2137,13 @@ def _fetch_model_contexts() -> dict[str, int]:
 
 
 def _slot_kind(slot: dict[str, Any]) -> str:
-    """Best-effort capability classifier — handles a few schema variants."""
+    """Best-effort capability classifier — handles a few schema variants.
+
+    NOTE: still used by _phase_model_automap (~line 2743) for the embed/rerank/img
+    skip list — do NOT remove. The "kind"-before-"type" priority is a latent bug
+    for those slot types (tracked separately); voice_wire uses _find_slot instead,
+    which checks slot["type"] directly.
+    """
     for key in ("capability", "kind", "type"):
         v = slot.get(key)
         if isinstance(v, str) and v:
@@ -2954,9 +2960,20 @@ def _phase_gateway_secrets_wire(ctx: PhaseContext) -> PhaseResult:
     )
 
 
+# /api/slots uses "transcription" as the type for STT slots; accept both so
+# _find_slot(slots, "stt") matches regardless of which label the server uses.
+_STT_SLOT_TYPES: frozenset[str] = frozenset({"stt", "transcription"})
+
+
 def _find_slot(slots: list[dict[str, Any]], kind: str) -> dict[str, Any] | None:
+    # Check the functional type field directly — _slot_kind checks "kind" before
+    # "type", but "kind" carries the local/remote deployment shape ("local"),
+    # not the capability.  Matching on "type" (then "capability") avoids the
+    # short-circuit that made voice_wire always skip local tts/transcription slots.
+    accept = _STT_SLOT_TYPES if kind == "stt" else frozenset({kind})
     for s in slots:
-        if _slot_kind(s) == kind and _is_ready(s):
+        slot_type = (s.get("type") or s.get("capability") or "").lower()
+        if slot_type in accept and _is_ready(s):
             return s
     return None
 
