@@ -72,3 +72,17 @@ class TestCapabilityRouting:
         report = await _engine(orch).converge(stack)
         assert report.errors == [("embed/embed", "orch down")]
         assert report.capabilities_applied == []
+
+
+def test_child_maps_mirror_orchestrator_source_of_truth() -> None:
+    """Canary: the hardcoded child maps must exactly reverse the orchestrator's
+    _CHILD_TO_SLOT. Imported INSIDE the test so this module stays free of the
+    capabilities import cycle the maps are hardcoded to avoid.
+    """
+    from hal0.capabilities.orchestrator import _CHILD_TO_SLOT
+    from hal0.stacks.apply import _CHILD_TO_GROUP, _CHILD_TO_SLOT_NAME
+
+    expected_group = {child: group for (group, child) in _CHILD_TO_SLOT}
+    expected_slot = {child: slot for (group, child), slot in _CHILD_TO_SLOT.items()}
+    assert _CHILD_TO_GROUP == expected_group
+    assert _CHILD_TO_SLOT_NAME == expected_slot
