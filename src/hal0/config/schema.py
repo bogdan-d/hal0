@@ -930,13 +930,24 @@ class StackModelMeta(BaseModel):
 
     id: str = Field(..., description="Registry model id this entry describes.")
     name: str = Field(default="", description="Human-readable display name.")
-    hf_repo: str = Field(default="", description="HuggingFace repo id, for resolve-and-pull on import.")
+    hf_repo: str = Field(
+        default="", description="HuggingFace repo id, for resolve-and-pull on import."
+    )
     hf_filename: str = Field(default="", description="Filename within the HF repo.")
     size_bytes: int = Field(default=0, description="Total model size in bytes; 0 = unknown.")
-    quant: str = Field(default="", description="Quantization label shown on cards (e.g. 'FP4', 'Q4_K_M').")
-    capabilities: list[str] = Field(default_factory=list, description="Capability strings, e.g. ['chat','vision'].")
-    backends: list[str] = Field(default_factory=list, description="Runnable backends, e.g. ['rocm','vulkan'].")
-    mmproj: str | None = Field(default=None, description="mmproj sidecar marker (presence flag); never a host path on import.")
+    quant: str = Field(
+        default="", description="Quantization label shown on cards (e.g. 'FP4', 'Q4_K_M')."
+    )
+    capabilities: list[str] = Field(
+        default_factory=list, description="Capability strings, e.g. ['chat','vision']."
+    )
+    backends: list[str] = Field(
+        default_factory=list, description="Runnable backends, e.g. ['rocm','vulkan']."
+    )
+    mmproj: str | None = Field(
+        default=None,
+        description="mmproj sidecar marker (presence flag); never a host path on import.",
+    )
 
     @field_validator("id")
     @classmethod
@@ -956,7 +967,9 @@ class StackCapabilityRow(BaseModel):
 
     model_config = {"populate_by_name": True, "extra": "forbid"}
 
-    child: str = Field(..., description="Capability child key, e.g. 'embed', 'rerank', 'stt', 'tts', 'vision'.")
+    child: str = Field(
+        ..., description="Capability child key, e.g. 'embed', 'rerank', 'stt', 'tts', 'vision'."
+    )
     device: str = Field(..., description="Device target for this child.")
     provider: str = Field(..., description="Provider name for this child.")
     model: str = Field(..., description="Model id bound to this child.")
@@ -981,16 +994,28 @@ class StackSlotEntry(BaseModel):
     model_config = {"populate_by_name": True, "extra": "forbid"}
 
     slot: str = Field(..., description="Slot name this entry configures (kebab-case).")
-    profile: str | None = Field(default=None, description="Profile name reference (resolved against StackConfig.profiles).")
-    model: str | None = Field(default=None, description="Model id reference (resolved against StackConfig.models).")
+    profile: str | None = Field(
+        default=None, description="Profile name reference (resolved against StackConfig.profiles)."
+    )
+    model: str | None = Field(
+        default=None, description="Model id reference (resolved against StackConfig.models)."
+    )
     device: str | None = Field(default=None, description="Device override for the slot.")
     provider: str | None = Field(default=None, description="Provider override for the slot.")
     role: str | None = Field(default=None, description="Normalization role hint, e.g. 'primary'.")
-    vision: bool = Field(default=False, description="Enable the mmproj vision sidecar for this slot.")
-    mtp: bool | None = Field(default=None, description="Per-slot MTP override (inherits profile default when None).")
+    vision: bool = Field(
+        default=False, description="Enable the mmproj vision sidecar for this slot."
+    )
+    mtp: bool | None = Field(
+        default=None, description="Per-slot MTP override (inherits profile default when None)."
+    )
     enable_thinking: bool | None = Field(default=None, description="Per-slot reasoning override.")
-    server_extra_args: str | None = Field(default=None, description="Freeform llama-server CLI flags for this slot.")
-    capabilities: list[StackCapabilityRow] = Field(default_factory=list, description="Capability child selections.")
+    server_extra_args: str | None = Field(
+        default=None, description="Freeform llama-server CLI flags for this slot."
+    )
+    capabilities: list[StackCapabilityRow] = Field(
+        default_factory=list, description="Capability child selections."
+    )
 
     @field_validator("slot")
     @classmethod
@@ -1028,13 +1053,19 @@ class StackConfig(BaseModel):
     description: str = Field(default="", description="What this stack is for.")
     author: str = Field(default="", description="Author/provenance, for the future directory.")
     icon: str = Field(default="", description="Accent token or emoji shown on the card.")
-    tags: list[str] = Field(default_factory=list, description="Freeform tags for listing/filtering.")
+    tags: list[str] = Field(
+        default_factory=list, description="Freeform tags for listing/filtering."
+    )
     schema_version: int = Field(
         default=STACK_SCHEMA_VERSION_CURRENT,
         description="Stack schema version, stamped for forward-compat / envelope migration.",
     )
-    hal0_version: str = Field(default="", description="hal0 version that produced this stack (provenance).")
-    slots: list[StackSlotEntry] = Field(default_factory=list, description="Slots this stack configures.")
+    hal0_version: str = Field(
+        default="", description="hal0 version that produced this stack (provenance)."
+    )
+    slots: list[StackSlotEntry] = Field(
+        default_factory=list, description="Slots this stack configures."
+    )
     profiles: dict[str, ProfileConfig] = Field(
         default_factory=dict,
         description="Embedded profiles referenced by slots, so the stack is self-contained.",
