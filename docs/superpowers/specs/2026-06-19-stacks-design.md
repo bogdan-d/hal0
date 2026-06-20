@@ -257,10 +257,60 @@ A near-clone of the Profiles page (`ui/src/dash/profiles.jsx`).
 
 ## 10. Seed / starter stacks
 
-Ship curated, clone-only stacks mapping onto the 7-tab loadout research from this
-week: **coding, chat, voice, RAG, image, agentic, small**. Stored as seed TOML
-under the installer (`installer/etc-hal0/`, alongside the seed `profiles.toml`).
-These double as the seed content for the future directory.
+Ship three curated, clone-only seed stacks, chosen from the 2026-06-19 model
+roster benchmark (exclusive-GPU sweep, 26 models). Bench bands: 🟢 ≥60 t/s ·
+🟡 25–60 · 🔴 <25 decode. Embed/rerank/stt/tts slots use hal0's seeded
+NPU/FLM + `moonshine`/`kokoro` providers (not in the LLM bench). Non-seed slot
+names (`util`, `quick`) are created on apply via `slot_create` if absent.
+Stored as seed TOML under the installer (`installer/etc-hal0/stacks/`, alongside
+the seed `profiles.toml`); they double as seed content for the future directory.
+
+### `saber` — high-speed agentic MoE
+
+Max-throughput autonomous loadout. Decode-per-GB leader on the board.
+
+| Slot | Model (registry id) | Notes |
+| --- | --- | --- |
+| **agent** (star) | `chadrock-35b-ace-saber` | 35B-A3B MoE · 19.0 GB · f16 KV · 🟢 92.9 t/s · 94.3% MTP · vision + tools · 262k ctx. Current live agent slot. |
+| **chat** | `qwen3.6-35b-a3b-crown-halo-mtp-dynamic` | 35B-A3B · 22.6 GB · 🟢 83.8 t/s · vision · 91.3% MTP. Same MoE family. |
+| **util** | `gemma-4-12B-agentic-fable5` | 12B dense · 7.4 GB · **tool-calling** router/util · run on **Vulkan** (🟡 26.2 t/s vs 🔴 22.4 ROCm). |
+| **stt** | seeded `moonshine` (NPU) | voice in. |
+| **tts** | seeded `kokoro` (CPU) | voice out. |
+| **embed + rerank** | seeded NPU/FLM | memory recall + precision. |
+
+*Personal-only speed alt (not shipped as public seed):*
+`chadrock3-6-35b-uncensored-mtp` — fastest 35B at 🟢 102.1 t/s, but uncensored.
+
+### `forge` — coding-first developer
+
+Fast coder primary + agentic muscle + a draft coder + repo RAG.
+
+| Slot | Model (registry id) | Notes |
+| --- | --- | --- |
+| **chat** (primary) | `qwen3-coder-reap-25b-a3b-q5km` | 25B-A3B MoE · 17.7 GB · 🟡 54.7 t/s · **1368 prefill** (file ingest) · coding. |
+| **agent** | `chadrock-35b-ace-saber` | 19.0 GB · 🟢 92.9 t/s · tools + vision — drives edits/tool-calls. |
+| **quick** | `qwopus3-5-4b-coder-mtp-q6-k` | 3.6 GB · 🟢 85.0 t/s · MTP · coder — inline/draft completions. |
+| **embed + rerank** | seeded NPU/FLM | codebase retrieval. |
+
+*Heavy alt:* `qwen3-coder-next-q4kxl` (49.6 GB · 🟡 37.8 t/s) for max coding
+quality when the agent slot need not be resident.
+
+### `pi` — always-on support (compaction, recall, voice)
+
+The background brain: faithful summarization, memory recall, voice I/O. Quality
+over speed — q8 weights for faithful compaction.
+
+| Slot | Model (registry id) | Notes |
+| --- | --- | --- |
+| **util** (star) | `chadrock3.6-27b-pi-agent-rocmfp4-mtp` | 27B dense · **q8** · 14.8 GB · 🟡 33.3 t/s · 89.4% MTP · tools. q8 fidelity for compaction/recall. |
+| **stt** | seeded `moonshine` (NPU) | voice in. |
+| **tts** | seeded `kokoro` (CPU) | voice out. |
+| **embed + rerank** | seeded NPU/FLM | memory recall + precision. |
+
+*Documented swap-in #4 (`researcher`):* long-context reasoning primary
+`qwen3.6-35b-a3b-q4kxl` (🟡 46.1 t/s · **1300 prefill**) + embed + rerank for
+heavy RAG. Folded into `forge`/`pi` retrieval by default; promotable to a
+first-class seed on request.
 
 ## 11. Directory-readiness (format only — not built)
 
