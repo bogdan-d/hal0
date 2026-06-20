@@ -154,4 +154,14 @@ class StackApplyEngine:
             return f"{slot}: model {b_model or '∅'} → {a_model or '∅'}"
         return f"{slot}: config updated"
 
-    # ── apply (commit) — Task 2 ──────────────────────────────────────────────
+    # ── apply (commit) ───────────────────────────────────────────────────────
+
+    def apply_config(self, plan: StackChangePlan) -> None:
+        """Commit ``plan.change_set`` to disk atomically.
+
+        Delegates to ``SlotConfigStore.commit``: each file is written
+        tmpfile+fsync+rename; a mid-set failure restores every already-written
+        file to its ``before`` snapshot and re-raises — disk is never left
+        half-reconciled. A no-op ChangeSet (nothing changed) writes nothing.
+        """
+        self._store.commit(plan.change_set)
