@@ -120,8 +120,8 @@ class TestResolveProfileFlags:
         assert "--spec-draft-device ROCm0" in result
         assert "--spec-draft-ngl all" in result
         assert "--spec-draft-n-max 4" in result
-        assert "--spec-draft-type-k f16" in result
-        assert "--spec-draft-type-v f16" in result
+        assert "--spec-draft-type-k q8_0" in result
+        assert "--spec-draft-type-v q8_0" in result
         assert "--spec-draft-threads 16" in result
         assert "--spec-draft-poll 1" in result
 
