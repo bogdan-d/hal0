@@ -571,12 +571,13 @@ def perms(
         help="Repair editable-checkout group-share drift in place (needs root).",
     ),
 ) -> None:
-    """Audit ownership for the root-clobber regression (#843).
+    """Audit ownership for the root-clobber regression (#843) + the path table.
 
-    Covers two surfaces: Hermes runtime state (/var/lib/hal0/.hermes) and the
-    editable code checkout's group-share. ``--fix`` repairs the latter in place
-    (the easy path for an already-drifted install); Hermes drift is still
-    reconciled via ``sudo hal0 agent bootstrap hermes --repair``.
+    Covers three surfaces: Hermes runtime state (/var/lib/hal0/.hermes), the
+    editable code checkout's group-share, and the canonical path-ownership table
+    (:mod:`hal0.install.perms`, overhaul plan §5). ``--fix`` repairs the
+    group-share in place AND applies the ownership table (both need root); Hermes
+    drift is still reconciled via ``sudo hal0 agent bootstrap hermes --repair``.
     """
 
     def _owner(p: Path) -> str | None:
@@ -624,6 +625,16 @@ def perms(
     _render_audit("Editable checkout group-share (#843)", tree_rows)
     tree_drift = has_ownership_drift(tree_rows)
 
+    # 3) Canonical path-ownership table (read-only audit; --fix applies it).
+    # Phase 0: the table encodes current root-era values, so a freshly-installed
+    # box shows no drift here. Honest drift surfaces an actual ownership skew.
+    from hal0.install import perms as perms_mod
+
+    own_plan = perms_mod.plan()
+    own_rows = perms_mod.audit_rows(own_plan)
+    _render_audit("Path ownership table (overhaul plan §5)", own_rows)
+    own_drift = has_ownership_drift(own_rows)
+
     if fix:
         if root is None:
             console.print("[dim]nothing to fix — not an editable checkout.[/dim]")
@@ -640,6 +651,24 @@ def perms(
             console.print(f"[green]✓[/green]  {msg}")
             tree_drift = False
 
+        # Apply the ownership table (root-gated; atomic with rollback).
+        if own_drift:
+            if os.geteuid() != 0:
+                console.print(
+                    "[red]✗[/red]  --fix needs root for ownership repair — "
+                    "re-run `sudo hal0 doctor perms --fix`."
+                )
+                raise typer.Exit(1)
+            try:
+                changed = perms_mod.commit(own_plan)
+            except (OSError, KeyError) as exc:
+                console.print(f"[red]✗[/red]  ownership repair failed: {exc}")
+                raise typer.Exit(1) from exc
+            console.print(
+                f"[green]✓[/green]  ownership table applied ({len(changed)} path(s) reconciled)."
+            )
+            own_drift = False
+
     hermes_drift = has_ownership_drift(hermes_rows)
     if hermes_drift:
         console.print(
@@ -651,7 +680,12 @@ def perms(
             "[yellow]![/yellow]  editable-checkout group-share drift — run "
             "`sudo hal0 doctor perms --fix` to repair."
         )
-    if hermes_drift or tree_drift:
+    if own_drift and not fix:
+        console.print(
+            "[yellow]![/yellow]  path-ownership drift — run "
+            "`sudo hal0 doctor perms --fix` to reconcile against the table."
+        )
+    if hermes_drift or tree_drift or own_drift:
         raise typer.Exit(1)
     console.print("[green]✓[/green]  ownership clean.")
     raise typer.Exit(0)
