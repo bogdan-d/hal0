@@ -67,6 +67,28 @@ _TRANSITIONAL = frozenset(
     {SlotState.PULLING, SlotState.STARTING, SlotState.WARMING, SlotState.UNLOADING}
 )
 
+# Capability child → orchestrator group, and → underlying system slot name.
+# Hardcoded reverse of hal0.capabilities.orchestrator._CHILD_TO_SLOT (keyed
+# (group, child) → slot_name). Hardcoded, NOT imported, to keep this module
+# clear of the capabilities import cycle that hal0.slot_config also avoids —
+# KEEP IN SYNC with the orchestrator.
+_CHILD_TO_GROUP: dict[str, str] = {
+    "embed": "embed",
+    "rerank": "embed",
+    "stt": "voice",
+    "tts": "voice",
+    "img": "img",
+    "vision": "vision",
+}
+_CHILD_TO_SLOT_NAME: dict[str, str] = {
+    "embed": "embed",
+    "rerank": "embed-rerank",
+    "stt": "stt",
+    "tts": "tts",
+    "img": "img",
+    "vision": "vision",
+}
+
 
 @dataclass
 class ConvergeReport:
@@ -274,7 +296,8 @@ class StackApplyEngine:
             touched.add(entry.slot)
             await self._converge_primary(entry, snapshots.get(entry.slot), report)
 
-        # Pass 2 — capability children (Task 2)
+        # Pass 2 — capability children (enabled rows only).
+        await self._converge_capabilities(stack, touched, report)
 
         # Pass 3 — unload sweep (Task 3)
 
@@ -298,3 +321,37 @@ class StackApplyEngine:
                 report.skipped.append(entry.slot)
         except Exception as exc:  # per-slot failures are reported, not raised
             report.errors.append((entry.slot, str(exc)))
+
+    async def _converge_capabilities(
+        self, stack: StackConfig, touched: set[str], report: ConvergeReport
+    ) -> None:
+        """Route each enabled capability row through ``orchestrator.apply``.
+
+        A stack lists the children it wants ON; disabled rows are skipped here
+        and turned off by the unload sweep. Each row's underlying slot name is
+        added to ``touched`` so the sweep won't unload it.
+        """
+        for entry in stack.slots:
+            for row in entry.capabilities:
+                if not row.enabled:
+                    continue
+                group = _CHILD_TO_GROUP.get(row.child)
+                slot_name = _CHILD_TO_SLOT_NAME.get(row.child)
+                if group is None or slot_name is None:
+                    report.errors.append((f"capability:{row.child}", "unknown capability child"))
+                    continue
+                touched.add(slot_name)
+                try:
+                    await self._orchestrator.apply(
+                        group,
+                        row.child,
+                        {
+                            "device": row.device,
+                            "provider": row.provider,
+                            "model": row.model,
+                            "enabled": True,
+                        },
+                    )
+                    report.capabilities_applied.append(f"{slot_name}/{row.child}")
+                except Exception as exc:  # recorded, not raised
+                    report.errors.append((f"{slot_name}/{row.child}", str(exc)))
