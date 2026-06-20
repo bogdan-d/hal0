@@ -8,8 +8,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 from hal0.config import paths
 from hal0.config.schema import StackConfig, StackSlotEntry
 from hal0.stacks import StacksCatalog
