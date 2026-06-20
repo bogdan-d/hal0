@@ -858,6 +858,25 @@ async def get_slot_config(name: str, request: Request) -> dict[str, object]:
     return cfg
 
 
+@router.get("/{name}/resolved")
+async def get_slot_resolved(name: str, request: Request) -> dict[str, object]:
+    """Return the resolved llama-server argv with per-flag provenance.
+
+    The auditable single-source-of-truth view: the deduped command plus, for
+    each surviving flag, which segment (``base`` / ``profile`` / ``extra_args``)
+    set its final value and how many duplicate flags were collapsed. Non-llama
+    slots (no profile) get ``{"argv": None, ...}`` rather than an error.
+    """
+    from hal0.providers.container import resolved_argv_detail_for_slot
+
+    sm = _get_slot_manager(request)
+    cfg = await sm.get_config(name)
+    detail = resolved_argv_detail_for_slot(cfg)
+    if detail is None:
+        return {"name": name, "argv": None, "provenance": [], "removed": 0}
+    return {"name": name, **detail}
+
+
 @router.put("/{name}/config")
 async def update_slot_config(name: str, request: Request) -> dict[str, object]:
     """Update a slot's config. Body: partial SlotConfig (shallow merge)."""

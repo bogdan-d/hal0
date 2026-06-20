@@ -104,32 +104,71 @@ class _Pair:
     canon: str | None  # None => bare positional (never deduped)
     flag: str | None
     values: tuple[str, ...]
+    source: str = ""  # which input segment this token came from (provenance)
 
 
-def _split_pairs(tokens: list[str]) -> list[_Pair]:
+def _split_pairs(tokens: list[str], sources: list[str] | None = None) -> list[_Pair]:
     """Group a flat token list into ``(flag, value?)`` pairs, order preserved.
 
     A flag consumes the following token as its value iff that token is not
     itself a flag (so ``--jinja --metrics`` are two valueless bools, while
     ``-b 8192`` and ``--temp 0`` carry a value). Bare positionals are kept
     under ``canon=None`` so dedup never touches them.
+
+    ``sources`` is an optional parallel list labelling each token's origin
+    segment; a pair takes the source of its flag (or positional) token.
     """
     pairs: list[_Pair] = []
     i = 0
     n = len(tokens)
     while i < n:
         tok = tokens[i]
+        src = sources[i] if sources is not None else ""
         if _is_flag(tok):
             if i + 1 < n and not _is_flag(tokens[i + 1]):
-                pairs.append(_Pair(_canon(tok), tok, (tokens[i + 1],)))
+                pairs.append(_Pair(_canon(tok), tok, (tokens[i + 1],), src))
                 i += 2
             else:
-                pairs.append(_Pair(_canon(tok), tok, ()))
+                pairs.append(_Pair(_canon(tok), tok, (), src))
                 i += 1
         else:
-            pairs.append(_Pair(None, None, (tok,)))
+            pairs.append(_Pair(None, None, (tok,), src))
             i += 1
     return pairs
+
+
+def _dedup(pairs: list[_Pair]) -> tuple[list[str], int, dict[str, _Pair]]:
+    """Last-wins dedup over ``pairs``. Shared core of the two public entrypoints.
+
+    Returns ``(argv, removed, winners)`` where ``winners`` maps each surviving
+    canonical flag key to the winning :class:`_Pair` (in emission order, so the
+    dict iteration order matches the flag order in ``argv``).
+    """
+    last_index: dict[str, int] = {}
+    for idx, p in enumerate(pairs):
+        if p.canon is not None and p.canon not in APPEND_FLAGS:
+            last_index[p.canon] = idx
+
+    out: list[str] = []
+    winners: dict[str, _Pair] = {}
+    removed = 0
+    for idx, p in enumerate(pairs):
+        if p.canon is None:  # positional — never deduped
+            out.extend(p.values)
+            continue
+        if p.canon in APPEND_FLAGS:  # repeatable — kept verbatim
+            assert p.flag is not None
+            out.append(p.flag)
+            out.extend(p.values)
+            continue
+        if last_index[p.canon] == idx:
+            assert p.flag is not None
+            out.append(p.flag)
+            out.extend(p.values)
+            winners[p.canon] = p
+        else:
+            removed += 1  # earlier duplicate, dropped in favour of a later one
+    return out, removed, winners
 
 
 def normalize_argv(tokens: list[str]) -> NormalizedArgv:
@@ -139,35 +178,69 @@ def normalize_argv(tokens: list[str]) -> NormalizedArgv:
     last value in ``tokens`` (what llama-server used anyway). Append-list flags
     and bare positionals are kept verbatim, in order.
     """
-    pairs = _split_pairs(tokens)
-
-    # The index of the last occurrence of each dedupable canonical flag.
-    last_index: dict[str, int] = {}
-    for idx, p in enumerate(pairs):
-        if p.canon is not None and p.canon not in APPEND_FLAGS:
-            last_index[p.canon] = idx
-
-    out: list[str] = []
-    winners: dict[str, str] = {}
-    removed = 0
-    for idx, p in enumerate(pairs):
-        if p.canon is None:  # positional
-            out.extend(p.values)
-            continue
-        if p.canon in APPEND_FLAGS:
-            assert p.flag is not None
-            out.append(p.flag)
-            out.extend(p.values)
-            continue
-        if last_index[p.canon] == idx:
-            assert p.flag is not None
-            out.append(p.flag)
-            out.extend(p.values)
-            winners[p.canon] = p.flag
-        else:
-            removed += 1  # earlier duplicate, dropped in favour of a later one
-
-    return NormalizedArgv(argv=out, removed=removed, winners=winners)
+    out, removed, winners = _dedup(_split_pairs(tokens))
+    return NormalizedArgv(
+        argv=out, removed=removed, winners={k: p.flag for k, p in winners.items() if p.flag}
+    )
 
 
-__all__ = ["APPEND_FLAGS", "FLAG_ALIASES", "NormalizedArgv", "normalize_argv"]
+@dataclass(frozen=True)
+class FlagProvenance:
+    """One surviving flag and the input segment it was resolved from."""
+
+    flag: str
+    value: str | None
+    source: str
+
+
+@dataclass(frozen=True)
+class ResolvedArgv:
+    """Deduped argv plus per-flag provenance — the auditable resolution.
+
+    ``provenance`` lists each surviving scalar/bool flag (append-list flags are
+    omitted — they aren't deduped, so "which source won" is meaningless) with
+    the segment that won it, in argv order.
+    """
+
+    argv: list[str]
+    provenance: list[FlagProvenance]
+    removed: int
+
+
+def resolve_argv(segments: list[tuple[str, list[str]]]) -> ResolvedArgv:
+    """Resolve ordered ``(source_label, tokens)`` segments into one deduped argv.
+
+    Same last-wins semantics as :func:`normalize_argv`, but each segment's
+    tokens carry its label, so the result records which source set each flag's
+    final value (e.g. ``-b`` from ``profile`` vs ``--jinja`` from
+    ``extra_args``). Segments are concatenated in order before dedup, so a later
+    segment overrides an earlier one — pass them lowest-precedence first.
+    """
+    tokens: list[str] = []
+    sources: list[str] = []
+    for label, seg in segments:
+        for tok in seg:
+            tokens.append(tok)
+            sources.append(label)
+
+    out, removed, winners = _dedup(_split_pairs(tokens, sources))
+    provenance = [
+        FlagProvenance(
+            flag=p.flag,  # type: ignore[arg-type]  # winners only holds real flags
+            value=(p.values[0] if p.values else None),
+            source=p.source,
+        )
+        for p in winners.values()
+    ]
+    return ResolvedArgv(argv=out, provenance=provenance, removed=removed)
+
+
+__all__ = [
+    "APPEND_FLAGS",
+    "FLAG_ALIASES",
+    "FlagProvenance",
+    "NormalizedArgv",
+    "ResolvedArgv",
+    "normalize_argv",
+    "resolve_argv",
+]
