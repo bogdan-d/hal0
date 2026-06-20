@@ -608,9 +608,11 @@ class TestUpdateAndDelete:
 class TestSeedGuard:
     def test_seed_stack_is_immutable(self, catalog: StacksCatalog, monkeypatch: pytest.MonkeyPatch) -> None:
         # Inject a seed entry so the guard has something to protect (SEED_STACKS
-        # is empty until PR-6). The catalog reads SEED_STACKS from the schema module.
+        # is empty until PR-6). The catalog reads SEED_STACKS from the schema
+        # module. No create() call: update()/delete() run _guard_custom() FIRST,
+        # so they raise on a seed slug regardless of whether it is on disk —
+        # and load_stacks_config already surfaces seeds when the file is absent.
         monkeypatch.setitem(schema.SEED_STACKS, "saber", _saber())
-        catalog.create("saber", _saber())
         with pytest.raises(Conflict):
             catalog.update("saber", StackConfig(name="hijack"))
         with pytest.raises(Conflict):
