@@ -103,11 +103,13 @@ class TestLlamaLaunchPlanChatTemplate:
         )
         assert "--chat-template-file" not in plan.command
 
-    def test_chat_template_flag_precedes_extra_tokens(self) -> None:
-        """--chat-template-file must appear before extra_args tokens so a manual
-        ``--chat-template-file`` in [server].extra_args can still override it."""
+    def test_chat_template_override_in_extra_args_wins(self) -> None:
+        """A manual ``--chat-template-file`` in [server].extra_args overrides the
+        resolved one. normalize_argv dedups to a single flag whose value is the
+        extra_args override (last-wins) — the documented precedence, now without
+        the confusing duplicate."""
         tmpl_path = "/mnt/ai-models/chat-templates/llama3.jinja"
-        extra = "--chat-template-file /mnt/ai-models/chat-templates/override.jinja"
+        override = "/mnt/ai-models/chat-templates/override.jinja"
         plan = _llama_launch_plan(
             image="img:latest",
             port=8095,
@@ -115,17 +117,13 @@ class TestLlamaLaunchPlanChatTemplate:
             flags_str="",
             devices=[],
             group_ids=[],
-            extra_args=extra,
+            extra_args=f"--chat-template-file {override}",
             chat_template_path=tmpl_path,
         )
         cmd = plan.command
-        # Both occurrences are present (template from resolve + override from extra_args)
-        assert "--chat-template-file" in cmd
-        first_idx = cmd.index("--chat-template-file")
-        assert cmd[first_idx + 1] == tmpl_path
-        # The extra_args override appears later
-        extra_idx = cmd.index("--chat-template-file", first_idx + 1)
-        assert extra_idx > first_idx
+        assert cmd.count("--chat-template-file") == 1
+        idx = cmd.index("--chat-template-file")
+        assert cmd[idx + 1] == override
 
 
 # ── container_spec integration tests ─────────────────────────────────────────

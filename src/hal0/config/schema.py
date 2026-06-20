@@ -246,10 +246,11 @@ class ServerConfig(BaseModel):
     extra_args: str | None = Field(
         default=None,
         description=(
-            "Freeform llama-server CLI passthrough.  Tokenised via shlex; "
-            "merged with the model's defaults.extra_args by "
-            "hal0.slots.flag_merge.merge_flags so slot flags win on collisions "
-            "(except for append-list flags like --lora / --draft-model / --override-kv)."
+            "Freeform llama-server CLI passthrough.  Tokenised via shlex and "
+            "appended last in the launch argv; hal0.slots.argv.normalize_argv "
+            "then collapses cross-source duplicates last-wins, so a flag set here "
+            "overrides the same flag from the profile / model defaults "
+            "(append-list flags like --lora / --draft-model / --override-kv are kept)."
         ),
     )
 
