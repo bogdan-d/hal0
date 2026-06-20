@@ -81,9 +81,19 @@ def write_stack_state_atomic(path: Path | str, record: StackStateRecord) -> None
 
 
 def read_stack_state(path: Path | str) -> StackStateRecord | None:
-    """Read the active-stack pointer, or ``None`` when no stack is applied."""
+    """Read the active-stack pointer, or ``None`` when absent or corrupt.
+
+    A missing file is the normal "no stack applied" case. A corrupt/truncated
+    state.json (invalid JSON or a non-object top-level) degrades to the same —
+    a cosmetic status read must never raise.
+    """
     try:
         with open(path, encoding="utf-8") as f:
-            return StackStateRecord.from_dict(json.load(f))
+            data = json.load(f)
     except FileNotFoundError:
         return None
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    return StackStateRecord.from_dict(data)

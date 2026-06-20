@@ -51,6 +51,12 @@ class TestStateRecord:
     def test_read_missing_returns_none(self, tmp_hal0_home: str) -> None:
         assert read_stack_state(paths.stacks_state_path()) is None
 
+    def test_corrupt_state_returns_none(self, tmp_hal0_home: str) -> None:
+        p = paths.stacks_state_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("{ not json <<<", encoding="utf-8")
+        assert read_stack_state(p) is None
+
 
 class TestContentHash:
     def test_stable_and_order_independent(self) -> None:

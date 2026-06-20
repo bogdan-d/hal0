@@ -106,3 +106,14 @@ class TestReconciliation:
         _write_agent_slot(tmp_hal0_home)
         plan = StackApplyEngine().plan("saber", _stack())
         assert any("agent" in line for line in plan.summary)
+
+    def test_vision_false_overwrites_on_disk_true(self, tmp_hal0_home: str) -> None:
+        slot_path = _slots_dir(tmp_hal0_home) / "agent.toml"
+        slot_path.write_text(
+            "\n".join(['name = "agent"', "port = 8087", "vision = true", "[model]", 'default = "old"', ""]),
+            encoding="utf-8",
+        )
+        stack = StackConfig(name="S", slots=[StackSlotEntry(slot="agent", model="m", vision=False)])
+        plan = StackApplyEngine().plan("s", stack)
+        after = {fs.path: fs.data for fs in plan.change_set.after}[slot_path]
+        assert after["vision"] is False
