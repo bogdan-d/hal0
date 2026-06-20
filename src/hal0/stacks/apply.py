@@ -201,9 +201,7 @@ class StackApplyEngine:
         return after
 
     @staticmethod
-    def _summarize(
-        slot: str, before: dict[str, Any] | None, after: dict[str, Any] | None
-    ) -> str:
+    def _summarize(slot: str, before: dict[str, Any] | None, after: dict[str, Any] | None) -> str:
         b_model = (before or {}).get("model", {}).get("default") if before else None
         a_model = (after or {}).get("model", {}).get("default") if after else None
         if b_model != a_model:

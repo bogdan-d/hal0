@@ -56,7 +56,9 @@ class TestPrimaryConverge:
 
     async def test_entry_without_model_is_ignored(self) -> None:
         sm = RecordingSlotManager([])
-        report = await _engine(sm).converge(_stack(StackSlotEntry(slot="stt")))  # no model → capability-only
+        report = await _engine(sm).converge(
+            _stack(StackSlotEntry(slot="stt"))
+        )  # no model → capability-only
         assert report.loaded == [] and report.swapped == [] and report.skipped == []
 
     async def test_load_failure_is_recorded_not_raised(self) -> None:

@@ -19,7 +19,10 @@ def _engine(sm: RecordingSlotManager) -> StackApplyEngine:
 class TestUnloadSweep:
     async def test_running_slot_not_in_stack_is_unloaded(self) -> None:
         sm = RecordingSlotManager(
-            [FakeSnap("agent", SlotState.READY, "ace-saber"), FakeSnap("img", SlotState.READY, "flux")]
+            [
+                FakeSnap("agent", SlotState.READY, "ace-saber"),
+                FakeSnap("img", SlotState.READY, "flux"),
+            ]
         )
         stack = StackConfig(name="S", slots=[StackSlotEntry(slot="agent", model="ace-saber")])
         report = await _engine(sm).converge(stack)
@@ -41,7 +44,11 @@ class TestUnloadSweep:
             slots=[
                 StackSlotEntry(
                     slot="embed",
-                    capabilities=[StackCapabilityRow(child="embed", device="npu", provider="flm", model="bge-m3")],
+                    capabilities=[
+                        StackCapabilityRow(
+                            child="embed", device="npu", provider="flm", model="bge-m3"
+                        )
+                    ],
                 )
             ],
         )

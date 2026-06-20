@@ -24,14 +24,24 @@ def _row(child: str, **kw: object) -> StackCapabilityRow:
 class TestCapabilityRouting:
     async def test_embed_row_routes_to_embed_group(self) -> None:
         orch = RecordingOrchestrator()
-        stack = StackConfig(name="S", slots=[StackSlotEntry(slot="embed", capabilities=[_row("embed")])])
+        stack = StackConfig(
+            name="S", slots=[StackSlotEntry(slot="embed", capabilities=[_row("embed")])]
+        )
         report = await _engine(orch).converge(stack)
-        assert orch.calls == [("embed", "embed", {"device": "npu", "provider": "flm", "model": "bge-m3", "enabled": True})]
+        assert orch.calls == [
+            (
+                "embed",
+                "embed",
+                {"device": "npu", "provider": "flm", "model": "bge-m3", "enabled": True},
+            )
+        ]
         assert report.capabilities_applied == ["embed/embed"]
 
     async def test_rerank_routes_to_embed_group(self) -> None:
         orch = RecordingOrchestrator()
-        stack = StackConfig(name="S", slots=[StackSlotEntry(slot="rerank", capabilities=[_row("rerank")])])
+        stack = StackConfig(
+            name="S", slots=[StackSlotEntry(slot="rerank", capabilities=[_row("rerank")])]
+        )
         await _engine(orch).converge(stack)
         assert orch.calls[0][0] == "embed" and orch.calls[0][1] == "rerank"
 
@@ -47,7 +57,10 @@ class TestCapabilityRouting:
 
     async def test_disabled_row_is_not_applied(self) -> None:
         orch = RecordingOrchestrator()
-        stack = StackConfig(name="S", slots=[StackSlotEntry(slot="embed", capabilities=[_row("embed", enabled=False)])])
+        stack = StackConfig(
+            name="S",
+            slots=[StackSlotEntry(slot="embed", capabilities=[_row("embed", enabled=False)])],
+        )
         report = await _engine(orch).converge(stack)
         assert orch.calls == []
         assert report.capabilities_applied == []
@@ -68,7 +81,9 @@ class TestCapabilityRouting:
                 raise RuntimeError("orch down")
 
         orch = Boom()
-        stack = StackConfig(name="S", slots=[StackSlotEntry(slot="embed", capabilities=[_row("embed")])])
+        stack = StackConfig(
+            name="S", slots=[StackSlotEntry(slot="embed", capabilities=[_row("embed")])]
+        )
         report = await _engine(orch).converge(stack)
         assert report.errors == [("embed/embed", "orch down")]
         assert report.capabilities_applied == []

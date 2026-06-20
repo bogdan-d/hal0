@@ -30,10 +30,10 @@ def _write_agent_slot(home: str) -> Path:
                 'device = "gpu-vulkan"',
                 'provider = "llama-server"',
                 "enabled = true",
-                'vision = false',
+                "vision = false",
                 "[model]",
                 'default = "old-model"',
-                'context_size = 8192',
+                "context_size = 8192",
                 "",
             ]
         ),
@@ -84,7 +84,9 @@ class TestReconciliation:
         plan = StackApplyEngine().plan("saber", _stack())
         after = {fs.path: fs.data for fs in plan.change_set.after}[slot_path]
         assert after["model"]["default"] == "chadrock-35b-ace-saber"
-        assert after["model"]["context_size"] == 8192, "sibling [model] keys must survive deep-merge"
+        assert after["model"]["context_size"] == 8192, (
+            "sibling [model] keys must survive deep-merge"
+        )
         assert after["device"] == "gpu-rocm"
         assert after["backend"] == "rocm", "legacy backend alias written via model_meta"
         assert after["vision"] is True
@@ -108,7 +110,9 @@ class TestReconciliation:
     def test_vision_false_overwrites_on_disk_true(self, tmp_hal0_home: str) -> None:
         slot_path = _slots_dir(tmp_hal0_home) / "agent.toml"
         slot_path.write_text(
-            "\n".join(['name = "agent"', "port = 8087", "vision = true", "[model]", 'default = "old"', ""]),
+            "\n".join(
+                ['name = "agent"', "port = 8087", "vision = true", "[model]", 'default = "old"', ""]
+            ),
             encoding="utf-8",
         )
         stack = StackConfig(name="S", slots=[StackSlotEntry(slot="agent", model="m", vision=False)])
