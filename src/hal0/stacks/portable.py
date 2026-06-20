@@ -19,8 +19,9 @@ from typing import Any
 from pydantic import BaseModel
 
 from hal0 import __version__
-from hal0.config.loader import load_profiles_config, save_profiles_config
-from hal0.config.schema import STACK_SCHEMA_VERSION_CURRENT, StackConfig, StackModelMeta
+from hal0.capabilities.config import load_capabilities_config
+from hal0.config.loader import load_profiles_config, save_profiles_config, list_slots, load_slot_config
+from hal0.config.schema import STACK_SCHEMA_VERSION_CURRENT, StackConfig, StackModelMeta, _VALID_DEVICES, StackCapabilityRow, StackSlotEntry
 from hal0.errors import BadRequest
 from hal0.registry.store import ModelRegistry
 
@@ -252,3 +253,70 @@ def import_stack(
     resolved = catalog.create(slug, env.stack)
     report = resolve_models(env.stack, registry)
     return resolved, report
+
+
+# ── snapshot from live ───────────────────────────────────────────────────────
+
+
+def snapshot_live_stack(
+    *,
+    name: str = "",
+    description: str = "",
+    registry: ModelRegistry,
+    profiles_path: Path | None = None,
+) -> StackConfig:
+    """Build a StackConfig from the current on-disk slots + capabilities.
+
+    Reads ``/etc/hal0/slots/*.toml`` and ``capabilities.toml`` (HAL0_HOME-aware)
+    and projects each configured slot into a StackSlotEntry. Empty seeded slots
+    (no model, no capability rows) are skipped so the snapshot stays clean.
+    Blank-picker capability selections (device unset) are dropped — they would
+    fail StackCapabilityRow validation and carry no real config. The result is
+    run through :func:`embed_references` so it is self-contained.
+    """
+    caps = load_capabilities_config()
+    entries: list[StackSlotEntry] = []
+
+    for slot_name in list_slots():
+        try:
+            sc = load_slot_config(slot_name)
+        except Exception:
+            # A malformed slot TOML never breaks the whole snapshot.
+            continue
+
+        rows: list[StackCapabilityRow] = []
+        for child, sel in caps.selections.get(slot_name, {}).items():
+            if sel.device not in _VALID_DEVICES:
+                continue  # unset / blank-picker selection
+            rows.append(
+                StackCapabilityRow(
+                    child=child,
+                    device=sel.device,
+                    provider=sel.provider,
+                    model=sel.model,
+                    enabled=sel.enabled,
+                )
+            )
+
+        model = sc.model.default or None
+        if model is None and not rows:
+            continue  # empty seeded slot
+
+        entries.append(
+            StackSlotEntry(
+                slot=slot_name,
+                model=model,
+                device=sc.device,
+                provider=sc.provider,
+                role=sc.role,
+                vision=sc.vision,
+                mtp=sc.mtp,
+                enable_thinking=sc.enable_thinking,
+                server_extra_args=sc.server.extra_args,
+                profile=sc.profile,
+                capabilities=rows,
+            )
+        )
+
+    stack = StackConfig(name=name, description=description, slots=entries)
+    return embed_references(stack, registry=registry, profiles_path=profiles_path)
