@@ -10,6 +10,7 @@ import pytest
 from pydantic import ValidationError
 
 from hal0.config.schema import (
+    SEED_STACKS,
     STACK_SCHEMA_VERSION_CURRENT,
     StackCapabilityRow,
     StackConfig,
@@ -34,6 +35,9 @@ class TestStackModelMeta:
     def test_extra_field_forbidden(self) -> None:
         with pytest.raises(ValidationError):
             StackModelMeta(id="m1", path="/mnt/ai-models/x.gguf")  # path is machine-specific, excluded
+
+    def test_id_is_stripped(self) -> None:
+        assert StackModelMeta(id="  chadrock-35b-ace-saber  ").id == "chadrock-35b-ace-saber"
 
 
 class TestStackCapabilityRow:
@@ -96,3 +100,8 @@ class TestStacksConfig:
     def test_keyed_by_slug(self) -> None:
         c = StacksConfig(stack={"saber": StackConfig(name="Saber")})
         assert c.stack["saber"].name == "Saber"
+
+
+class TestSeedStacks:
+    def test_seed_stacks_is_empty_until_pr6(self) -> None:
+        assert SEED_STACKS == {}

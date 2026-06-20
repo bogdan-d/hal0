@@ -943,7 +943,7 @@ class StackModelMeta(BaseModel):
     def id_nonempty(cls, v: str) -> str:
         if not v.strip():
             raise ValueError("stack model meta id must not be empty")
-        return v
+        return v.strip()
 
 
 class StackCapabilityRow(BaseModel):
