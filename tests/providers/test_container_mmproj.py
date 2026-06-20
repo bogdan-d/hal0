@@ -8,7 +8,8 @@ hack that previously lived in the live chat.toml.
 
 Covers:
   * ``_llama_launch_plan`` appends ``--mmproj <path>`` when given, omits it when None.
-  * The flag precedes ``extra_args`` tokens (so a manual override could still win).
+  * A manual ``--mmproj`` in ``extra_args`` overrides the sidecar; normalize_argv
+    dedups to one flag (last-wins) so there's no duplicate in the command.
   * ``container_spec`` reads ``model_info["mmproj"]`` and emits the flag.
   * No flag when the model carries no sidecar (no regression for text-only slots).
   * ``load_sync`` writes a unit file containing the flag when a sidecar is present.
@@ -101,10 +102,11 @@ class TestLlamaLaunchPlanMmproj:
         )
         assert "--mmproj" not in plan.command
 
-    def test_mmproj_precedes_extra_tokens(self) -> None:
-        """--mmproj must appear before [server].extra_args tokens so a manual
-        override in extra_args can still take precedence."""
-        extra = "--mmproj /mnt/ai-models/override/mmproj.gguf"
+    def test_mmproj_override_in_extra_args_wins(self) -> None:
+        """A manual ``--mmproj`` in [server].extra_args overrides the sidecar.
+        normalize_argv dedups to one --mmproj whose value is the extra_args
+        override (last-wins) — the documented precedence, sans duplicate."""
+        override = "/mnt/ai-models/override/mmproj.gguf"
         plan = _llama_launch_plan(
             image="img:latest",
             port=8095,
@@ -112,14 +114,13 @@ class TestLlamaLaunchPlanMmproj:
             flags_str="",
             devices=[],
             group_ids=[],
-            extra_args=extra,
+            extra_args=f"--mmproj {override}",
             mmproj=_SIDECAR,
         )
         cmd = plan.command
-        first_idx = cmd.index("--mmproj")
-        assert cmd[first_idx + 1] == _SIDECAR
-        override_idx = cmd.index("--mmproj", first_idx + 1)
-        assert override_idx > first_idx
+        assert cmd.count("--mmproj") == 1
+        idx = cmd.index("--mmproj")
+        assert cmd[idx + 1] == override
 
 
 # ── container_spec integration tests ─────────────────────────────────────────

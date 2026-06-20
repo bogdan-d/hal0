@@ -22,9 +22,9 @@ Capability = str  # e.g. "chat", "embed", "rerank", "vision", "asr", "tts"
 class ModelDefaults(BaseModel):
     """Per-model default knobs surfaced as launcher defaults.
 
-    All fields optional. ``extra_args`` is appended verbatim to the
-    launcher arg list and is later merged with the slot's own
-    ``[server].extra_args`` by :func:`hal0.launchers.flag_merge.merge_flags`.
+    All fields optional. ``extra_args`` is appended to the launcher arg
+    list; cross-source duplicates (profile flags, slot ``[server].extra_args``)
+    are collapsed last-wins by :func:`hal0.slots.argv.normalize_argv` at launch.
     """
 
     model_config = {"populate_by_name": True, "str_strip_whitespace": True}

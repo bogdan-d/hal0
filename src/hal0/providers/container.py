@@ -52,6 +52,7 @@ from hal0.config.schema import resolve_chat_template, resolve_profile_flags
 from hal0.profiles import ProfileCatalog
 from hal0.providers._gpu import resolve_gpu_device_paths, resolve_gpu_group_ids
 from hal0.providers.base import HealthCheck, Mount, Provider, RuntimeLaunchPlan
+from hal0.slots.argv import normalize_argv
 
 # ``ContainerSpec`` is the back-compat alias for ``RuntimeLaunchPlan``; some
 # callers/tests still import the old name from this module.
@@ -380,6 +381,12 @@ def _llama_launch_plan(
     if mmproj:
         command += ["--mmproj", mmproj]
     command += extra_tokens
+
+    # Collapse cross-segment duplicates (profile flags vs [server].extra_args vs
+    # toggle-derived flags) to one source of truth: last-wins dedup, which is
+    # effective-value-preserving because llama-server already used the last
+    # occurrence. See hal0.slots.argv.normalize_argv.
+    command = normalize_argv(command).argv
 
     # Effective model-store root (honours [models].store / HAL0_MODEL_STORE,
     # default /mnt/ai-models). Mounted identical-path, read-only, with an
@@ -1023,7 +1030,9 @@ def resolved_command_for_slot(
         argv += ["--ctx-size", str(context_size)]
     argv.extend(flag_tokens)
     argv.extend(extra_tokens)
-    return argv
+    # Dedup the flag portion (everything after the image) the same way the
+    # launch path does, so the preview matches what actually runs.
+    return [argv[0], *normalize_argv(argv[1:]).argv]
 
 
 __all__ = [
