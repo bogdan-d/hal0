@@ -13,6 +13,7 @@ import {
   useSlotRestart,
   useSlotLoad,
   useSlotSwap,
+  useSlotResolved,
 } from '@/api/hooks/useSlots'
 import { useHardware } from '@/api/hooks/useHardware'
 import { useModels } from '@/api/hooks/useModels'
@@ -370,6 +371,10 @@ function EditSlotDrawer({ open, slot, onClose }) {
   // overrideOpen tracks whether the user has clicked [Override] to reveal the select.
   const [chatTemplate, setChatTemplate] = useStateSM(slot?.chat_template || "");
   const [overrideOpen, setOverrideOpen] = useStateSM(!!(slot?.chat_template));
+
+  // Resolved command provenance — only fetched while the drawer is open.
+  // Falls back gracefully when null (non-llama slots) or on error.
+  const resolvedQuery = useSlotResolved(slot?.name, { enabled: !!open });
 
   useEffectSM(() => {
     if (slot) {
@@ -1004,7 +1009,9 @@ function EditSlotDrawer({ open, slot, onClose }) {
           The resolved command is computed SERVER-SIDE (profile + MTP + image
           resolution), so when extra_args is dirty the displayed command is
           stale: dim it and overlay a Regenerate prompt that persists the slot
-          override and refetches the freshly-resolved command. */}
+          override and refetches the freshly-resolved command.
+          When the /resolved endpoint returns provenance data, we enhance this
+          view with per-flag source badges and a duplicate-collapse note. */}
       <div className="form-section">Resolved command</div>
       <div style={{position: "relative"}}>
         <div style={{
@@ -1015,9 +1022,19 @@ function EditSlotDrawer({ open, slot, onClose }) {
           filter: extraArgsDirty ? "grayscale(1)" : "none",
           transition: "opacity .15s ease",
         }}>
-          {Array.isArray(slot.resolved_command)
-            ? slot.resolved_command.join(" \\\n  ")
-            : slot.resolved_command || "— not yet available (slot not loaded)"}
+          {(() => {
+            // Prefer deduped argv from /resolved when available; fall back to
+            // slot.resolved_command (list-payload) then a "not yet" sentinel.
+            const resolvedData = resolvedQuery.data;
+            const argv = resolvedData?.argv ?? null;
+            if (Array.isArray(argv) && argv.length > 0) {
+              return argv.join(" \\\n  ");
+            }
+            if (Array.isArray(slot.resolved_command)) {
+              return slot.resolved_command.join(" \\\n  ");
+            }
+            return slot.resolved_command || "— not yet available (slot not loaded)";
+          })()}
         </div>
         {extraArgsDirty && (
           <div style={{
@@ -1046,6 +1063,83 @@ function EditSlotDrawer({ open, slot, onClose }) {
           </div>
         )}
       </div>
+      {/* Provenance legend + per-flag badges — only when the /resolved endpoint
+          returns data with at least one provenance entry. Gracefully absent for
+          non-llama slots (argv null) or when the endpoint hasn't loaded yet. */}
+      {(() => {
+        const resolvedData = resolvedQuery.data;
+        if (!resolvedData || !Array.isArray(resolvedData.provenance) || resolvedData.provenance.length === 0) {
+          return null;
+        }
+        // Source → display label + CSS variable colour
+        const SOURCE_META = {
+          base:       { label: "base",       color: "var(--fg-4)" },
+          profile:    { label: "profile",    color: "var(--info)" },
+          extra_args: { label: "extra_args", color: "var(--accent)" },
+        };
+        const badgeStyle = (source) => {
+          const meta = SOURCE_META[source] || SOURCE_META.base;
+          return {
+            display: "inline-block",
+            padding: "1px 5px",
+            borderRadius: "var(--rad-sm)",
+            border: `1px solid ${meta.color}`,
+            color: meta.color,
+            fontFamily: "var(--jbm)",
+            fontSize: 9,
+            lineHeight: 1.5,
+            letterSpacing: "0.04em",
+            verticalAlign: "middle",
+            whiteSpace: "nowrap",
+          };
+        };
+        return (
+          <div style={{marginTop: 8}}>
+            {/* Legend */}
+            <div style={{
+              display: "flex", alignItems: "center", gap: 8,
+              paddingBottom: 6, flexWrap: "wrap",
+            }}>
+              <span style={{fontSize: 10, color: "var(--fg-5)", fontFamily: "var(--jbm)"}}>source:</span>
+              {Object.entries(SOURCE_META).map(([src, meta]) => (
+                <span key={src} style={badgeStyle(src)}>{meta.label}</span>
+              ))}
+            </div>
+            {/* Per-flag provenance rows */}
+            <div style={{
+              display: "flex", flexDirection: "column", gap: 2,
+              padding: "8px 10px", background: "var(--bg)",
+              border: "1px solid var(--line-soft)", borderRadius: "var(--rad-sm)",
+            }}>
+              {resolvedData.provenance.map((entry, i) => (
+                <div key={i} style={{
+                  display: "flex", alignItems: "center", gap: 6,
+                  fontFamily: "var(--jbm)", fontSize: 10.5,
+                }}>
+                  <span style={{color: "var(--fg-3)", minWidth: 120, flexShrink: 0}}>
+                    {entry.flag}
+                    {entry.value != null && (
+                      <span style={{color: "var(--fg-5)"}}>{" "}{entry.value}</span>
+                    )}
+                  </span>
+                  <span style={badgeStyle(entry.source)}>
+                    {SOURCE_META[entry.source]?.label ?? entry.source}
+                  </span>
+                </div>
+              ))}
+            </div>
+            {/* Duplicate-collapse note */}
+            {resolvedData.removed > 0 && (
+              <div style={{
+                marginTop: 5, fontSize: 10, color: "var(--fg-5)",
+                fontFamily: "var(--jbm)",
+              }}>
+                {resolvedData.removed} duplicate flag{resolvedData.removed !== 1 ? "s" : ""} collapsed
+              </div>
+            )}
+          </div>
+        );
+      })()}
       <div className="hint" style={{paddingTop: 6, fontSize: 10.5, color: "var(--fg-5)", fontFamily: "var(--jbm)"}}>
         Real podman argv: profile image + flags, then slot extra_args (slot wins). Restart the slot to run with new flags.
       </div>
