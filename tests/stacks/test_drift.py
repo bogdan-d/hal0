@@ -28,7 +28,10 @@ def _slots_dir(home: str) -> Path:
 
 def _write_slot(home: str, name: str, model: str) -> Path:
     path = _slots_dir(home) / f"{name}.toml"
-    path.write_text("\n".join([f'name = "{name}"', "port = 8087", "[model]", f'default = "{model}"', ""]), encoding="utf-8")
+    path.write_text(
+        "\n".join([f'name = "{name}"', "port = 8087", "[model]", f'default = "{model}"', ""]),
+        encoding="utf-8",
+    )
     return path
 
 
@@ -58,8 +61,12 @@ class TestStateRecord:
 
 class TestContentHash:
     def test_stable_and_order_independent(self) -> None:
-        a = stack_content_hash({"agent": {"model": {"default": "x"}}, "chat": {"model": {"default": "y"}}})
-        b = stack_content_hash({"chat": {"model": {"default": "y"}}, "agent": {"model": {"default": "x"}}})
+        a = stack_content_hash(
+            {"agent": {"model": {"default": "x"}}, "chat": {"model": {"default": "y"}}}
+        )
+        b = stack_content_hash(
+            {"chat": {"model": {"default": "y"}}, "agent": {"model": {"default": "x"}}}
+        )
         assert a == b, "hash must be key-order independent"
 
     def test_changes_with_content(self) -> None:

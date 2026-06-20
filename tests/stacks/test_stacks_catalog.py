@@ -80,7 +80,9 @@ class TestUpdateAndDelete:
 
 
 class TestSeedGuard:
-    def test_seed_stack_is_immutable(self, catalog: StacksCatalog, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_seed_stack_is_immutable(
+        self, catalog: StacksCatalog, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         # Inject a seed entry so the guard has something to protect (SEED_STACKS
         # is empty until PR-6). The catalog reads SEED_STACKS from the schema
         # module. No create() call: update()/delete() run _guard_custom() FIRST,

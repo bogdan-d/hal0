@@ -26,7 +26,14 @@ def _write_slot(home: str, name: str, model: str) -> Path:
     path = _slots_dir(home) / f"{name}.toml"
     path.write_text(
         "\n".join(
-            [f'name = "{name}"', "port = 8087", 'device = "gpu-vulkan"', "[model]", f'default = "{model}"', ""]
+            [
+                f'name = "{name}"',
+                "port = 8087",
+                'device = "gpu-vulkan"',
+                "[model]",
+                f'default = "{model}"',
+                "",
+            ]
         ),
         encoding="utf-8",
     )
@@ -55,11 +62,16 @@ class TestCommit:
         engine = StackApplyEngine()
         engine.apply_config(engine.plan("s", _stack(StackSlotEntry(slot="agent", model="new"))))
         # Re-planning against the now-applied disk yields no change.
-        assert engine.plan("s", _stack(StackSlotEntry(slot="agent", model="new"))).change_set.changed is False
+        assert (
+            engine.plan("s", _stack(StackSlotEntry(slot="agent", model="new"))).change_set.changed
+            is False
+        )
 
 
 class TestRollback:
-    def test_failed_commit_rolls_back(self, tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_failed_commit_rolls_back(
+        self, tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         import hal0.slot_config as slot_config_mod
 
         a_path = _write_slot(tmp_hal0_home, "agent", "old-a")
