@@ -12,12 +12,16 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from pydantic import BaseModel
+
 from hal0 import __version__
-from hal0.config.loader import load_profiles_config
-from hal0.config.schema import StackConfig, StackModelMeta
+from hal0.config.loader import load_profiles_config, save_profiles_config
+from hal0.config.schema import STACK_SCHEMA_VERSION_CURRENT, StackConfig, StackModelMeta
+from hal0.errors import BadRequest
 from hal0.registry.store import ModelRegistry
 
 ENVELOPE_KIND = "hal0.stack"
@@ -113,3 +117,138 @@ def export_envelope(
         "checksum": _checksum(body),
         "stack": body,
     }
+
+
+# ── import ───────────────────────────────────────────────────────────────────
+
+
+class StackEnvelope(BaseModel):
+    """Parsed ``.hal0stack.json`` wire shape. ``extra="ignore"`` keeps a newer
+    producer's extra envelope keys from breaking import; the inner StackConfig
+    still forbids unknown fields."""
+
+    model_config = {"extra": "ignore"}
+
+    kind: str
+    schema_version: int = STACK_SCHEMA_VERSION_CURRENT
+    hal0_version: str = ""
+    exported_at: str = ""
+    checksum: str = ""
+    stack: StackConfig
+
+
+def parse_envelope(data: Any) -> StackEnvelope:
+    """Validate the wire shape. Raises BadRequest on a non-envelope/invalid input."""
+    if not isinstance(data, dict) or data.get("kind") != ENVELOPE_KIND:
+        raise BadRequest(
+            "not a hal0.stack envelope",
+            code="stacks.bad_envelope",
+            details={"kind": (data.get("kind") if isinstance(data, dict) else None)},
+        )
+    try:
+        return StackEnvelope.model_validate(data)
+    except Exception as exc:
+        raise BadRequest(
+            f"invalid stack envelope: {exc}",
+            code="stacks.bad_envelope",
+            details={"reason": str(exc)},
+        ) from exc
+
+
+def verify_checksum(envelope: dict[str, Any]) -> bool:
+    """True when the envelope's checksum matches its stack body."""
+    body = envelope.get("stack")
+    if not isinstance(body, dict):
+        return False
+    return envelope.get("checksum") == _checksum(body)
+
+
+@dataclass(frozen=True)
+class ModelResolution:
+    """How one referenced model id resolves against the local registry."""
+
+    model_id: str
+    status: str  # "present" | "pullable" | "unresolvable"
+    hf_repo: str = ""
+    hf_filename: str = ""
+
+
+@dataclass
+class ResolveReport:
+    """Per-model resolution + convenience buckets for the import UI."""
+
+    resolutions: list[ModelResolution] = field(default_factory=list)
+
+    @property
+    def present(self) -> list[str]:
+        return [r.model_id for r in self.resolutions if r.status == "present"]
+
+    @property
+    def pullable(self) -> list[str]:
+        return [r.model_id for r in self.resolutions if r.status == "pullable"]
+
+    @property
+    def unresolvable(self) -> list[str]:
+        return [r.model_id for r in self.resolutions if r.status == "unresolvable"]
+
+
+def resolve_models(stack: StackConfig, registry: ModelRegistry) -> ResolveReport:
+    """Classify each referenced model id: present / pullable / unresolvable."""
+    resolutions: list[ModelResolution] = []
+    for mid in sorted(_referenced_model_ids(stack)):
+        if registry.has(mid):
+            resolutions.append(ModelResolution(mid, "present"))
+            continue
+        meta = stack.models.get(mid)
+        if meta is not None and meta.hf_repo and meta.hf_filename:
+            resolutions.append(ModelResolution(mid, "pullable", meta.hf_repo, meta.hf_filename))
+        else:
+            resolutions.append(ModelResolution(mid, "unresolvable"))
+    return ResolveReport(resolutions)
+
+
+def _reconcile_profiles(stack: StackConfig, profiles_path: Path | None = None) -> None:
+    """Add the stack's embedded profiles that don't already exist locally.
+
+    Name collisions keep the LOCAL profile (the importer never silently
+    overwrites a profile the user already tuned).
+    """
+    if not stack.profiles:
+        return
+    pcfg = load_profiles_config(profiles_path)
+    changed = False
+    for name, profile in stack.profiles.items():
+        if name not in pcfg.profile:
+            pcfg.profile[name] = profile
+            changed = True
+    if changed:
+        save_profiles_config(pcfg, profiles_path)
+
+
+def import_stack(
+    data: Any,
+    slug: str,
+    catalog: Any,
+    *,
+    registry: ModelRegistry,
+    profiles_path: Path | None = None,
+) -> tuple[Any, ResolveReport]:
+    """Validate, reconcile profiles, create the stack, and report model resolution.
+
+    ``catalog`` is a StacksCatalog (duck-typed: needs ``create(slug, StackConfig)``).
+    Raises BadRequest for a bad/too-new envelope; the catalog raises Conflict on a
+    duplicate slug.
+    """
+    env = parse_envelope(data)
+    if env.stack.schema_version > STACK_SCHEMA_VERSION_CURRENT:
+        raise BadRequest(
+            f"stack schema v{env.stack.schema_version} is newer than supported "
+            f"v{STACK_SCHEMA_VERSION_CURRENT}",
+            code="stacks.envelope_too_new",
+            details={"got": env.stack.schema_version, "supported": STACK_SCHEMA_VERSION_CURRENT},
+        )
+    # (forward-compat seam: older schema_version would migrate here; only v1 exists.)
+    _reconcile_profiles(env.stack, profiles_path)
+    resolved = catalog.create(slug, env.stack)
+    report = resolve_models(env.stack, registry)
+    return resolved, report
