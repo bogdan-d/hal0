@@ -1172,43 +1172,31 @@ else
     if [[ "${HAL0_USER}" != "root" ]]; then
         info "hardened-perms flip: chowning config + state to ${HAL0_USER}"
 
-        # /etc/hal0 config root + its mutable files -> ${HAL0_USER}:hal0, dir
-        # setgid 2775. We chown only the dir and the known mutable seed files
-        # (NOT agents/ or secrets/, handled below) so a stray root-owned file
-        # under /etc/hal0 is left for `hal0 doctor perms` to surface.
-        chown "${HAL0_USER}:hal0" "${ETC_DIR}"
+        # /etc/hal0 config root + ALL its contents -> ${HAL0_USER}:hal0,
+        # RECURSIVELY: a root->hal0 UPGRADE must flip pre-existing root-owned
+        # files (slots/*.toml, hal0.toml, capabilities.toml, ...), not just a
+        # fresh install. agents/ is pruned (stays root:root, re-pinned below).
+        # Config root + slots/ are setgid 2775 so the shared hal0 group keeps
+        # write across the daemon's atomic temp-file+rename rewrites (rename
+        # needs *directory* write). -h so a symlink's target isn't chased.
+        find "${ETC_DIR}" -path "${ETC_DIR}/agents" -prune -o \
+            -exec chown -h "${HAL0_USER}:hal0" {} +
         chmod 2775 "${ETC_DIR}"
-        chown "${HAL0_USER}:hal0" "${ETC_DIR}/slots"
-        chmod 2775 "${ETC_DIR}/slots"
-        # slots/*.toml + the flat config seeds — only those that exist.
-        for _f in \
-            "${ETC_DIR}"/slots/*.toml \
-            "${ETC_DIR}/hal0.toml" \
-            "${ETC_DIR}/profiles.toml" \
-            "${ETC_DIR}/api.env" \
-            "${ETC_DIR}/capabilities.toml" \
-            "${ETC_DIR}/upstreams.toml" \
-            "${ETC_DIR}/hardware.json" \
-            "${ETC_DIR}/openwebui.env"; do
-            [[ -e "${_f}" ]] && chown "${HAL0_USER}:hal0" "${_f}"
-        done
+        [[ -d "${ETC_DIR}/slots" ]] && chmod 2775 "${ETC_DIR}/slots"
 
-        # agents/ + secrets/ pinned root:root even under the flip (re-assert in
-        # case a prior run flipped them, keeping the block self-correcting).
-        if [[ -d "${ETC_DIR}/agents" ]]; then
-            chown root:root "${ETC_DIR}/agents"
-        fi
-        if [[ -d "${VAR_DIR}/secrets" ]]; then
-            chown root:root "${VAR_DIR}/secrets"
-        fi
+        # /var/lib/hal0 state root -> service-owned, RECURSIVELY (registry/,
+        # slots/, cache/, .hermes/, memory/, ...). Prune secrets/ (systemd
+        # reads its EnvironmentFile AS ROOT before dropping to ${HAL0_USER})
+        # and the model store (huge; dir-only handling below). MODELS_DIR may
+        # live under VAR_DIR (default /var/lib/hal0/models) or outside
+        # (/mnt/ai-models); the prune path is a harmless no-op when outside.
+        find "${VAR_DIR}" \( -path "${VAR_DIR}/secrets" -o -path "${MODELS_DIR}" \) -prune -o \
+            -exec chown -h "${HAL0_USER}:hal0" {} +
 
-        # /var/lib/hal0 state root + HERMES_HOME -> service-owned. VAR_DIR was
-        # already chgrp hal0 + chmod 2775 above; flip the owner too so the
-        # unprivileged daemon owns the state root (registry/, slots/, cache/).
-        chown "${HAL0_USER}:hal0" "${VAR_DIR}"
-        if [[ -d "${VAR_DIR}/.hermes" ]]; then
-            chown "${HAL0_USER}:hal0" "${VAR_DIR}/.hermes"
-        fi
+        # agents/ + secrets/ pinned root:root (re-assert recursively in case a
+        # prior run flipped them — keeps the block self-correcting).
+        [[ -d "${ETC_DIR}/agents" ]] && chown -R root:root "${ETC_DIR}/agents"
+        [[ -d "${VAR_DIR}/secrets" ]] && chown -R root:root "${VAR_DIR}/secrets"
 
         # Model store: root-owned but group-writable so the daemon can create
         # pull subdirs + chat-templates/. We do NOT chown the (huge) existing
