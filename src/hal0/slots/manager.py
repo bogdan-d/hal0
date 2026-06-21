@@ -969,6 +969,14 @@ class SlotManager:
                 )
                 return await self.status(slot_name)
 
+            # Seed/default may pin a model id that never landed locally under
+            # that exact id (e.g. a catalog id like ``gemma-4-12b-it`` while the
+            # scanned gguf registered as ``gemma-4-12b-it-ud-q4-k-xl``). Rather
+            # than crash-loop on a non-servable id, fall back to a locally
+            # registered model matching the slot's capability. No-op for FLM/NPU
+            # (tag-served), already-local ids, and pullable catalog ids.
+            resolved_model = self._resolve_servable_model(resolved_model, cfg)
+
             # NPU FLM trio shadow (stt/embed, device=npu): the chat anchor's
             # single FLM process serves these via the anchor's [npu] toggles.
             # They are NOT independently loadable on the busy single-tenant
@@ -2061,6 +2069,87 @@ class SlotManager:
             )
             return False
 
+    def _resolve_servable_model(self, model_id: str, cfg: SlotConfig | dict[str, Any]) -> str:
+        """Resolve a slot's configured model id to one that can actually serve.
+
+        A seed/default may pin an id that never landed locally under that exact
+        id — e.g. a catalog id (``gemma-4-12b-it``, ``upstream=hal0``, no file)
+        while the operator's scanned gguf registered under the normalised stem
+        (``gemma-4-12b-it-ud-q4-k-xl``). Pinned to the ghost, the slot would
+        crash-loop on a ``--model`` path that doesn't exist. When that happens
+        we fall back to a locally-registered model matching the slot's
+        capability and log it loudly so the operator can fix the config.
+
+        Returns ``model_id`` unchanged when:
+          * the slot is FLM/NPU (``device=npu``) — those are served by tag, not
+            a local gguf file, so registry-path checks don't apply;
+          * the configured model is already registered with a file on disk;
+          * the configured id is a known curated model (still to be pulled —
+            don't pre-empt a legitimate download with a fallback);
+          * no local model matches the slot's capability.
+        """
+        d = _cfg_to_dict(cfg)
+        device = d.get("device") or d.get("slot", {}).get("device")
+        if device == "npu":
+            return model_id
+        if self._default_model_cache_check(model_id):
+            return model_id
+        try:
+            from hal0.registry.curated import get_curated
+
+            if get_curated(model_id) is not None:
+                return model_id  # pullable as configured — let load() pull it
+        except ImportError:
+            pass
+        slot_type = (d.get("type") or d.get("slot", {}).get("type") or "").lower()
+        capability = _SLOT_TYPE_TO_CAPABILITY.get(slot_type)
+        if not capability:
+            return model_id
+        fallback = self._fallback_local_model(capability)
+        if fallback is None or fallback.id == model_id:
+            return model_id
+        log.warning(
+            "slot.model_default_fallback",
+            extra={
+                "configured": model_id,
+                "fallback": fallback.id,
+                "capability": capability,
+            },
+        )
+        return fallback.id
+
+    @staticmethod
+    def _fallback_local_model(capability: str):
+        """Largest locally-registered model (file on disk) whose capabilities
+        include ``capability``; ``None`` when none match. Deterministic:
+        largest-on-disk first, tie-broken by id."""
+        try:
+            from hal0.registry.store import ModelRegistry
+        except ImportError:
+            return None
+        try:
+            models = ModelRegistry().list()
+        except Exception:
+            return None
+        candidates = []
+        for m in models:
+            caps = getattr(m, "capabilities", None) or []
+            if capability not in caps:
+                continue
+            path = getattr(m, "path", "") or ""
+            if not path:
+                continue
+            try:
+                if not Path(path).exists():
+                    continue
+            except OSError:
+                continue
+            candidates.append(m)
+        if not candidates:
+            return None
+        candidates.sort(key=lambda m: (-(getattr(m, "size_bytes", 0) or 0), m.id))
+        return candidates[0]
+
     @staticmethod
     def _default_model_cache_check(model_id: str) -> bool:
         """Default predicate: registered + path-on-disk → cached.
@@ -2591,6 +2680,21 @@ class SlotManager:
 
 
 # ── module-level helpers ─────────────────────────────────────────────────────
+
+
+# Slot ``type`` → the model capability a fallback search should match when the
+# slot's configured ``model.default`` is not locally servable. Inverse of
+# ``capabilities.catalog._CAPABILITY_TO_SLOT_TYPE`` — duplicated here (not
+# imported) to stay clear of the capabilities import cycle that ``slots.*``
+# deliberately avoids.
+_SLOT_TYPE_TO_CAPABILITY: dict[str, str] = {
+    "llm": "chat",
+    "embedding": "embed",
+    "reranking": "rerank",
+    "transcription": "asr",
+    "tts": "tts",
+    "image": "image",
+}
 
 
 def _cfg_to_dict(cfg: SlotConfig | dict[str, Any]) -> dict[str, Any]:
