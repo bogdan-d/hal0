@@ -1,17 +1,23 @@
-# hal0 — hard-pinned Hermes-Agent runtime requirements (v0.3, issue #240).
+# hal0 — Hermes-Agent runtime requirements.
 #
 # The hal0 bootstrap creates a managed venv at /var/lib/hal0/venvs/hermes/
-# with explicit Python 3.11 and installs from this file. Bumping the pin
-# requires a hal0 release; the `hal0 agent upgrade hermes [--to=<version>]`
-# CLI exists for power users + compat-testing escape hatches.
+# and installs from this file. `hal0 agent upgrade hermes` pulls the latest
+# matching release (pip install -U), runs `hermes config migrate` to reconcile
+# the config schema, and reprovisions — so updates are a single command and
+# our customizations don't block them.
 #
-# Why a hard pin: Hermes ships breaking config-schema changes between
-# minor releases. Pinning here means a hal0 upgrade is the single point
-# at which Hermes moves — operators don't get surprised by `hermes setup`
-# rewriting their config.yaml.
-
+# Posture (changed from the old hard pin, issue #240): we DON'T hard-pin
+# anymore. The old `==0.14.0` pin existed only because hal0 used to RENDER and
+# OWN the whole $HERMES_HOME/config.yaml, so a hermes minor bump could rewrite
+# the schema underneath us. The fix is that hermes owns + migrates its own
+# config.yaml (`hermes config migrate`) and hal0 applies only its specific keys
+# on top — so hermes can move freely. We keep a FLOOR (the oldest release whose
+# config CLI + `custom` provider we rely on) and a MAJOR CAP (1.0 may break the
+# CLI contract; lift the cap deliberately after validating). Operators who want
+# a specific build use `hal0 agent upgrade hermes --to=<version>`.
+#
 # The `web` extra pulls fastapi + uvicorn[standard], which the hal0 agent
 # unit needs: it runs `hermes serve` in web/dashboard mode (HERMES_WEB_DIST
 # + HERMES_DASHBOARD_TUI in the unit drop-in). Without it the unit
 # crash-loops on `No module named 'fastapi'`.
-hermes-agent[web]==0.14.0
+hermes-agent[web]>=0.14.0,<1.0

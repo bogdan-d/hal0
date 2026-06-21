@@ -459,6 +459,70 @@ def _install_venv(
     )
 
 
+#: Default managed-venv + requirements + HERMES_HOME for the upgrade path.
+#: Mirrors the BootstrapState defaults so `hal0 agent upgrade hermes` can run
+#: standalone (it pip-upgrades + migrates before re-running the state machine).
+HERMES_VENV_DEFAULT = Path("/var/lib/hal0/venvs/hermes")
+HERMES_HOME_DEFAULT = Path("/var/lib/hal0/.hermes")
+HERMES_REQUIREMENTS = (
+    REPO_ROOT_FOR_INSTALLER / "installer" / "agents" / "hermes" / "requirements.txt"
+)
+
+
+def upgrade_hermes_runtime(
+    *,
+    venv: Path = HERMES_VENV_DEFAULT,
+    requirements: Path = HERMES_REQUIREMENTS,
+    hermes_home: Path = HERMES_HOME_DEFAULT,
+    version: str | None = None,
+    runner: Any = subprocess,
+) -> tuple[bool, str]:
+    """Pull the latest matching ``hermes-agent`` into the venv + reconcile config.
+
+    This is the runtime half of ``hal0 agent upgrade hermes`` — the package move
+    that the old hard pin (issue #240) used to forbid:
+
+      1. ``pip install -U`` the requirements (floor/cap from requirements.txt),
+         or an exact ``--to=<version>`` when the operator pins one.
+      2. ``hermes config migrate`` so the on-disk config.yaml schema matches the
+         newly-installed hermes build — hermes owns + migrates its own config,
+         hal0 only layers its keys on top, so a minor bump no longer strands us.
+
+    Non-fatal on the migrate step: a migrate hiccup is surfaced but doesn't fail
+    the upgrade (the subsequent reprovision re-renders + re-chowns to hal0). The
+    caller runs ``bootstrap hermes --repair`` afterwards to converge the rest.
+
+    Returns ``(ok, message)``. ``ok`` is False only when the pip upgrade itself
+    fails (no venv, network/resolver error) — that's a real, actionable stop.
+    """
+    pip = _venv_python(venv)
+    if not pip.exists():
+        return False, f"hermes venv missing at {venv} — run `hal0 agent install hermes` first"
+
+    spec = f"hermes-agent[web]=={version}" if version else None
+    pip_argv = [str(pip), "-m", "pip", "install", "--upgrade"]
+    pip_argv += [spec] if spec else ["-r", str(requirements)]
+    try:
+        runner.run(pip_argv, check=True)  # nosec B603 — argv from local config
+    except (subprocess.SubprocessError, OSError) as exc:
+        return False, f"pip upgrade failed: {exc}"
+
+    # Reconcile the config schema to the freshly-installed hermes. hermes owns
+    # the file; this adds/migrates ITS keys without touching hal0's overlay.
+    hermes_bin = pip.parent / "hermes"
+    migrated = False
+    try:
+        env = {**os.environ, "HERMES_HOME": str(hermes_home)}
+        runner.run([str(hermes_bin), "config", "migrate"], check=True, env=env)  # nosec B603
+        migrated = True
+    except (subprocess.SubprocessError, OSError) as exc:
+        log.warning("hermes_provision.config_migrate_failed", error=str(exc))
+
+    target = version or "latest matching requirements"
+    suffix = " + config migrated" if migrated else " (config migrate skipped — see logs)"
+    return True, f"hermes-agent upgraded → {target}{suffix}"
+
+
 _HAL0_SERVICE_USER = "hal0"
 
 
