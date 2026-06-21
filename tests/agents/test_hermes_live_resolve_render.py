@@ -30,7 +30,7 @@ def _overlay(*, live_resolve_enabled, **over):
 
 def test_live_resolve_uses_virtual_default():
     keys = _overlay(live_resolve_enabled=True)
-    assert keys["model.default"] == "hal0/primary"
+    assert keys["model.default"] == "hal0/chat"
     assert keys["model.provider"] == "custom"
     assert keys["model.base_url"] == "http://127.0.0.1:8080/v1"
 
@@ -38,7 +38,7 @@ def test_live_resolve_uses_virtual_default():
 def test_disabled_uses_physical_default():
     keys = _overlay(live_resolve_enabled=False)
     assert keys["model.default"] == "phys-35b"
-    assert "hal0/primary" not in keys.values()
+    assert "hal0/chat" not in keys.values()
 
 
 def test_live_resolve_enables_live_model_discovery():

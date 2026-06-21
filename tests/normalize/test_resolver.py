@@ -32,12 +32,12 @@ def test_chat_prefers_igpu_when_loaded():
     assert r.fallback is False
 
 
-def test_primary_alias_resolves_to_chat():
-    """Back-compat: hal0/primary still resolves (via VIRTUAL_ALIASES → hal0/chat)."""
-    r = resolve_chain("hal0/primary", _slots(), loaded={"big-35b", "qwen3-4b-FLM"})
-    assert r is not None
-    assert r.model_id == "big-35b"
-    assert r.fallback is False
+def test_removed_aliases_are_unknown():
+    """The hal0/primary and hal0/flm aliases were removed — they are no longer
+    known virtual names, so resolve_chain returns None (callers leave the body
+    alone). Use the canonical hal0/chat and hal0/npu instead."""
+    assert resolve_chain("hal0/primary", _slots(), loaded={"big-35b"}) is None
+    assert resolve_chain("hal0/flm", _slots(), loaded={"qwen3-4b-FLM"}) is None
 
 
 def test_npu_picks_npu_first_never_commandeers_primary():
@@ -79,21 +79,8 @@ def test_full_miss_falls_back_to_configured_primary_unloaded():
     assert r.fallback is True
 
 
-def test_flm_alias_resolves_same_as_npu():
-    r = resolve_chain("hal0/flm", _slots(), loaded={"qwen3-4b-FLM"})
-    assert r.model_id == "qwen3-4b-FLM"
-
-
 def test_empty_slots_degrades_to_blank_resolution():
     r = resolve_chain("hal0/chat", [], loaded=set())
-    assert r is not None
-    assert r.model_id == ""
-    assert r.fallback is True
-
-
-def test_empty_slots_via_primary_alias_degrades():
-    """Back-compat: hal0/primary on empty slots still degrades gracefully."""
-    r = resolve_chain("hal0/primary", [], loaded=set())
     assert r is not None
     assert r.model_id == ""
     assert r.fallback is True
@@ -130,8 +117,9 @@ async def test_live_resolver_reads_views_and_health():
 
 
 @pytest.mark.asyncio
-async def test_live_resolver_hal0_primary_alias():
-    """hal0/primary is accepted by LiveSlotResolver via VIRTUAL_ALIASES."""
+async def test_live_resolver_rejects_removed_alias():
+    """hal0/primary is no longer a virtual name — LiveSlotResolver returns None
+    (passthrough) so the caller leaves a literal 'hal0/primary' body alone."""
     from hal0.normalize.resolver import LiveSlotResolver, SlotView
 
     views = [
@@ -141,9 +129,7 @@ async def test_live_resolver_hal0_primary_alias():
         slot_views_provider=lambda: views,
         loaded_models_provider=lambda: {"big"},
     )
-    res = await resolver.resolve("hal0/primary")
-    assert res is not None
-    assert res.model_id == "big"
+    assert await resolver.resolve("hal0/primary") is None
 
 
 def test_agent_virtual_name_resolves_to_agent_slot():

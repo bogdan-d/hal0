@@ -619,7 +619,7 @@ def test_overlay_includes_provider_and_identity_keys() -> None:
 
 def test_overlay_no_primary_under_live_resolve_uses_virtual() -> None:
     # No ready slot → _resolve_primary_slot hands a placeholder primary, but
-    # under live-resolve the overlay still points at the hal0/primary virtual
+    # under live-resolve the overlay still points at the hal0/chat virtual
     # against the gateway (not a dead default).
     keys = _build_overlay_keys(
         primary={
@@ -628,7 +628,7 @@ def test_overlay_no_primary_under_live_resolve_uses_virtual() -> None:
             "context_length": 32768,
         },
     )
-    assert keys["model.default"] == "hal0/primary"
+    assert keys["model.default"] == "hal0/chat"
     assert "127.0.0.1:8080/v1" in keys["model.base_url"]
 
 

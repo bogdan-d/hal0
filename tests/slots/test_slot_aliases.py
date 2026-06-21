@@ -3,7 +3,7 @@
 Verifies:
   1. Old names ("primary", "agent-hermes") resolve to canonical slots.
   2. Aliases do NOT appear in SlotManager.list() or iter_configs().
-  3. hal0/primary virtual name resolves via the resolver layer.
+  3. The hal0/primary VIRTUAL name was removed — only canonical hal0/chat is known.
   4. dispatcher/router Rule 6 + 7 handle the renamed slot.
   5. hal0_chat_slot_alias_map injects back-compat aliases.
 """
@@ -126,21 +126,23 @@ async def test_iter_configs_does_not_leak_aliases(tmp_slots_dir):
     assert "agent-hermes" not in names
 
 
-# ── 5. normalize/resolver virtual alias ──────────────────────────────────────
+# ── 5. normalize/resolver canonical virtual name (aliases removed) ────────────
 
 
-def test_resolver_hal0_primary_in_virtual_aliases():
-    from hal0.normalize.resolver import VIRTUAL_ALIASES
+def test_resolver_hal0_primary_virtual_removed():
+    """The hal0/primary virtual alias was removed — there is no alias map and
+    the name is not a known virtual."""
+    from hal0.normalize import resolver as R
 
-    assert "hal0/primary" in VIRTUAL_ALIASES
-    assert VIRTUAL_ALIASES["hal0/primary"] == "hal0/chat"
+    assert not hasattr(R, "VIRTUAL_ALIASES")
+    assert "hal0/primary" not in R.DEFAULT_CHAINS
 
 
 def test_resolver_hal0_chat_in_default_chains():
     from hal0.normalize.resolver import DEFAULT_CHAINS
 
     assert "hal0/chat" in DEFAULT_CHAINS
-    assert "hal0/primary" not in DEFAULT_CHAINS  # moved to VIRTUAL_ALIASES
+    assert "hal0/primary" not in DEFAULT_CHAINS  # never an alias either — removed
 
 
 def test_resolver_npu_chain_uses_chat_fallback():
@@ -151,13 +153,17 @@ def test_resolver_npu_chain_uses_chat_fallback():
     assert DEFAULT_CHAINS["hal0/utility"][-1] == "chat"
 
 
-def test_resolve_chain_hal0_primary_resolves():
+def test_resolve_chain_hal0_primary_is_unknown():
+    """hal0/primary was removed as a virtual name — resolve_chain returns None.
+    Callers must use the canonical hal0/chat."""
     from hal0.normalize.resolver import SlotView, resolve_chain
 
     slots = [
         SlotView(name="chat", role=None, device="gpu-vulkan", model_id="big", context_length=65536),
     ]
-    r = resolve_chain("hal0/primary", slots, loaded={"big"})
+    assert resolve_chain("hal0/primary", slots, loaded={"big"}) is None
+    # canonical name still resolves
+    r = resolve_chain("hal0/chat", slots, loaded={"big"})
     assert r is not None
     assert r.model_id == "big"
     assert r.fallback is False

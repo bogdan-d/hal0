@@ -20,13 +20,6 @@ DEFAULT_CHAINS: dict[str, tuple[str, ...]] = {
     "hal0/utility": ("utility", "npu", "chat"),
 }
 
-# Aliases that resolve to a canonical name before chain lookup.
-VIRTUAL_ALIASES: dict[str, str] = {
-    "hal0/flm": "hal0/npu",
-    # Back-compat: hal0/primary was the pre-v0.4 name for hal0/chat.
-    "hal0/primary": "hal0/chat",
-}
-
 
 @dataclass(frozen=True)
 class SlotView:
@@ -77,8 +70,7 @@ def resolve_chain(
     always returns a ``Resolution`` (falling back to the configured primary,
     ``fallback=True``, when no chain role is currently loaded).
     """
-    canonical = VIRTUAL_ALIASES.get(virtual_name, virtual_name)
-    chain = DEFAULT_CHAINS.get(canonical)
+    chain = DEFAULT_CHAINS.get(virtual_name)
     if chain is None:
         return None
 
@@ -114,7 +106,7 @@ class LiveSlotResolver:
         self._loaded = loaded_models_provider
 
     async def resolve(self, model_name: str) -> Resolution | None:
-        if model_name not in DEFAULT_CHAINS and model_name not in VIRTUAL_ALIASES:
+        if model_name not in DEFAULT_CHAINS:
             return None
         try:
             views = list(self._views() or [])
