@@ -309,8 +309,12 @@ def scan_and_register(registry: ModelRegistry, cfg: ModelsConfig) -> dict:
             known_paths.add(existing.path)
         known_paths.add(existing.path)
 
+    # scan_roots() folds the effective store/pull_root into the declared roots
+    # so a headless install (where --models-dir wrote pull_root but not roots)
+    # still scans where the models actually are.
+    roots = cfg.scan_roots()
     candidates = find_candidates(
-        roots=list(cfg.roots),
+        roots=list(roots),
         extensions=list(cfg.file_extensions),
         known_paths=known_paths,
     )
@@ -338,7 +342,7 @@ def scan_and_register(registry: ModelRegistry, cfg: ModelsConfig) -> dict:
     return {
         "added": added,
         "skipped": skipped,
-        "scanned_roots": [str(r) for r in cfg.roots],
+        "scanned_roots": [str(r) for r in roots],
     }
 
 

@@ -237,4 +237,6 @@ def test_scan_and_register_missing_root_is_silent(tmp_path: Path, registry: Mode
     cfg = ModelsConfig(roots=[str(tmp_path / "does-not-exist")])
     result = scan_and_register(registry, cfg)
     assert result["added"] == []
-    assert result["scanned_roots"] == [str(tmp_path / "does-not-exist")]
+    # The configured (missing) root is scanned silently. scan_roots() also folds
+    # in the effective store/pull_root, so this is a membership check, not exact.
+    assert str(tmp_path / "does-not-exist") in result["scanned_roots"]

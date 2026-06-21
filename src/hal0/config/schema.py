@@ -2039,6 +2039,24 @@ class ModelsConfig(BaseModel):
         ),
     )
 
+    def scan_roots(self) -> list[str]:
+        """Roots the discovery scan actually walks: declared ``roots`` plus the
+        effective store (``store`` when set, else the legacy ``pull_root``).
+
+        The installer writes ``pull_root`` from ``--models-dir`` but historically
+        never added it to ``roots`` (despite the pull_root doc claiming it's
+        "auto-included"), so a headless install whose models live under a custom
+        store/pull_root scanned only the default ``models_dir`` and found nothing
+        — slots then failed to load (no path resolved for the model name). Folding
+        the effective store in here makes discovery robust regardless of how the
+        TOML was written. Order-preserving, deduped.
+        """
+        out: list[str] = list(self.roots)
+        effective_store = (self.store or self.pull_root or "").strip()
+        if effective_store and effective_store not in out:
+            out.append(effective_store)
+        return out
+
     @field_validator("roots")
     @classmethod
     def roots_are_absolute(cls, v: list[str]) -> list[str]:
