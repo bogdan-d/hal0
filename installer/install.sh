@@ -768,8 +768,14 @@ else
     # curl|bash installer must stay fast). --no-extensions: OpenWebUI + Hermes
     # are installed by the dedicated stages below, not here. Interactive
     # `hal0 setup` (post-install) handles model downloads + extension choices.
-    "${HAL0_BIN}" setup --auto --no-pull --no-extensions \
-        ${MODELS_DIR:+--storage-dir "${MODELS_DIR}"} \
+    # Build argv as an array so --storage-dir and its value stay TWO separate
+    # tokens. The old `${MODELS_DIR:+--storage-dir "${MODELS_DIR}"}` collapsed
+    # into a single arg ("--storage-dir /mnt/ai-models") that typer rejected
+    # with "No such option", silently skipping --auto seeding on --models-dir
+    # installs.
+    _setup_args=(--auto --no-pull --no-extensions)
+    [[ -n "${MODELS_DIR}" ]] && _setup_args+=(--storage-dir "${MODELS_DIR}")
+    "${HAL0_BIN}" setup "${_setup_args[@]}" \
         || warn "first-run setup failed; run 'hal0 setup' after install"
 fi
 
