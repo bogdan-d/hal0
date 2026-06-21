@@ -175,3 +175,92 @@ def test_ownership_table_builds_under_hal0_home(tmp_hal0_home: str) -> None:
     targets = {r.target for r in table}
     assert paths.etc() in targets
     assert paths.slots_config_dir() in targets
+
+
+# ── the D hardened-perms flip (service_user != root) ──────────────────────────
+
+
+def _by_target(table: list[perms.PermRow]) -> dict[Path, perms.PermRow]:
+    return {r.target: r for r in table}
+
+
+def test_root_table_is_unchanged_by_the_flip(tmp_hal0_home: str) -> None:
+    """service_user="root" must reproduce the byte-identical root-era table.
+
+    Existing root installs must not move a single bit when the flip code lands.
+    """
+    rows = _by_target(perms.ownership_table(service_user="root"))
+    etc = paths.etc()
+    # /etc/hal0 + every mutable seed stays root:root with the legacy modes.
+    assert (rows[etc].owner, rows[etc].group, rows[etc].mode) == ("root", "root", 0o755)
+    assert rows[paths.hal0_toml()].owner == "root"
+    assert rows[paths.hal0_toml()].group == "root"
+    slots = rows[paths.slots_config_dir()]
+    assert (slots.owner, slots.group, slots.mode) == ("root", "root", 0o755)
+    assert slots.child_mode == 0o600
+    # agents/ + secrets/ root:root; state root defaults to the literal hal0 acct.
+    assert rows[paths.agents_config_dir()].owner == "root"
+    assert rows[paths.var_lib() / "secrets"].owner == "root"
+    assert rows[paths.var_lib()].owner == "hal0"
+
+
+def test_flip_makes_etc_hal0_service_owned_and_setgid(tmp_hal0_home: str) -> None:
+    """service_user="hal0" hands /etc/hal0 + its mutable contents to the daemon.
+
+    The config root (and slots/) go service-owned + setgid 2775 so the daemon's
+    temp-file+rename rewrites work; the flat seed files become service-owned too.
+    """
+    rows = _by_target(perms.ownership_table(service_user="hal0"))
+    etc = paths.etc()
+    assert (rows[etc].owner, rows[etc].group, rows[etc].mode) == ("hal0", "hal0", 0o2775)
+    # slots dir flips to setgid + service-owned; children keep 0600.
+    slots = rows[paths.slots_config_dir()]
+    assert (slots.owner, slots.group, slots.mode) == ("hal0", "hal0", 0o2775)
+    assert slots.child_mode == 0o600
+    # the mutable flat seeds the API rewrites all flip to hal0; modes unchanged.
+    for target in (
+        paths.hal0_toml(),
+        etc / "profiles.toml",
+        etc / "api.env",
+        etc / "capabilities.toml",
+        etc / "upstreams.toml",
+        paths.hardware_json(),
+        paths.openwebui_env(),
+    ):
+        assert rows[target].owner == "hal0", target
+        assert rows[target].group == "hal0", target
+    # mode warts are NOT touched by the flip (ownership only).
+    assert rows[paths.hal0_toml()].mode == 0o600
+    assert rows[etc / "api.env"].mode == 0o644
+
+
+def test_flip_keeps_agents_and_secrets_root_owned(tmp_hal0_home: str) -> None:
+    """agents/ + secrets/ must stay root:root even under the flip.
+
+    The API only reads agents/; systemd reads the secrets/ EnvironmentFile as
+    root before dropping to the service user, so neither may be service-writable.
+    """
+    rows = _by_target(perms.ownership_table(service_user="hal0"))
+    agents = rows[paths.agents_config_dir()]
+    assert (agents.owner, agents.group) == ("root", "root")
+    secrets = rows[paths.var_lib() / "secrets"]
+    assert (secrets.owner, secrets.group) == ("root", "root")
+
+
+def test_flip_makes_state_root_service_owned(tmp_hal0_home: str) -> None:
+    """/var/lib/hal0 + HERMES_HOME flip to the service user under the flip."""
+    rows = _by_target(perms.ownership_table(service_user="hal0"))
+    state = rows[paths.var_lib()]
+    assert (state.owner, state.group, state.mode) == ("hal0", "hal0", 0o2775)
+    hermes = rows[paths.var_lib() / ".hermes"]
+    assert (hermes.owner, hermes.group, hermes.mode) == ("hal0", "hal0", 0o700)
+
+
+def test_flip_honors_custom_service_group(tmp_hal0_home: str) -> None:
+    """A non-default service_group threads through the service-owned rows."""
+    rows = _by_target(perms.ownership_table(service_user="svc", service_group="svcgrp"))
+    etc = paths.etc()
+    assert (rows[etc].owner, rows[etc].group) == ("svc", "svcgrp")
+    assert rows[paths.var_lib()].group == "svcgrp"
+    # pinned-root rows ignore the service group.
+    assert rows[paths.agents_config_dir()].group == "root"
