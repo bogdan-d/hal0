@@ -609,6 +609,31 @@ WantedBy=multi-user.target
 EOF
 info "wrote ${API_UNIT}"
 
+# D hardened-perms flip (gated on HAL0_USER != root). The base unit above
+# already substitutes `User=${HAL0_USER}` inline; this drop-in re-asserts it and
+# adds the matching `Group=` (the generated unit carries no Group= line) so the
+# dropped daemon's group on the shared setgid /etc/hal0 + /var/lib/hal0 trees is
+# deterministic. With the default HAL0_USER=root the drop-in is NOT installed, so
+# existing root installs are byte-for-byte unchanged. The privileged seam
+# (PR #943) is what lets the unprivileged daemon still manage slots.
+API_DROPIN_SRC="${REPO_ROOT}/installer/systemd/hal0-api.service.d/20-run-as-hal0.conf"
+API_DROPIN_DST_DIR="${UNIT_DIR}/hal0-api.service.d"
+if [[ "${HAL0_USER}" != "root" ]]; then
+    if [[ -f "${API_DROPIN_SRC}" ]]; then
+        mkdir -p "${API_DROPIN_DST_DIR}"
+        sed "s/__HAL0_USER__/${HAL0_USER}/g" "${API_DROPIN_SRC}" \
+            > "${API_DROPIN_DST_DIR}/20-run-as-hal0.conf"
+        info "wrote ${API_DROPIN_DST_DIR}/20-run-as-hal0.conf (run hal0-api as ${HAL0_USER})"
+    else
+        warn "${API_DROPIN_SRC} not found — hal0-api run-as drop-in not installed"
+    fi
+else
+    # Idempotent downgrade path: if a previous flip wrote the drop-in but this
+    # run is back on root, drop it so the unit reverts cleanly to User=root.
+    rm -f "${API_DROPIN_DST_DIR}/20-run-as-hal0.conf" 2>/dev/null || true
+    rmdir "${API_DROPIN_DST_DIR}" 2>/dev/null || true
+fi
+
 OPENWEBUI_UNIT_SRC="${REPO_ROOT}/packaging/systemd/hal0-openwebui.service"
 OPENWEBUI_UNIT_DST="${UNIT_DIR}/hal0-openwebui.service"
 # pin per release (#79) — single source of truth for the OpenWebUI image
@@ -1131,6 +1156,71 @@ else
     chmod 2775 "${VAR_DIR}"
     touch "${VAR_DIR}/STATE.md"
     chown hal0:hal0 "${VAR_DIR}/STATE.md"
+
+    # ── D hardened-perms flip (gated on HAL0_USER != root) ────────────────────
+    # When hal0-api runs unprivileged, /etc/hal0 + its mutable contents must be
+    # owned by the service user so the daemon's atomic temp-file+rename rewrites
+    # (slots/*.toml, capabilities.toml, hal0.toml, api.env, chat-templates,
+    # profiles.toml) succeed — rename needs *directory* write, not just file
+    # write. This mirrors src/hal0/install/perms.py::ownership_table(
+    # service_user=...) exactly: the config root is setgid 2775 so the shared
+    # hal0 group keeps write; agents/ + secrets/ stay root:root (the API only
+    # reads agents/, and systemd reads the secrets/ EnvironmentFile AS ROOT
+    # before dropping to ${HAL0_USER}). With HAL0_USER=root this whole block is
+    # skipped, so existing installs are unchanged. Idempotent: chown/chmod
+    # converge to the same state on every re-run.
+    if [[ "${HAL0_USER}" != "root" ]]; then
+        info "hardened-perms flip: chowning config + state to ${HAL0_USER}"
+
+        # /etc/hal0 config root + its mutable files -> ${HAL0_USER}:hal0, dir
+        # setgid 2775. We chown only the dir and the known mutable seed files
+        # (NOT agents/ or secrets/, handled below) so a stray root-owned file
+        # under /etc/hal0 is left for `hal0 doctor perms` to surface.
+        chown "${HAL0_USER}:hal0" "${ETC_DIR}"
+        chmod 2775 "${ETC_DIR}"
+        chown "${HAL0_USER}:hal0" "${ETC_DIR}/slots"
+        chmod 2775 "${ETC_DIR}/slots"
+        # slots/*.toml + the flat config seeds — only those that exist.
+        for _f in \
+            "${ETC_DIR}"/slots/*.toml \
+            "${ETC_DIR}/hal0.toml" \
+            "${ETC_DIR}/profiles.toml" \
+            "${ETC_DIR}/api.env" \
+            "${ETC_DIR}/capabilities.toml" \
+            "${ETC_DIR}/upstreams.toml" \
+            "${ETC_DIR}/hardware.json" \
+            "${ETC_DIR}/openwebui.env"; do
+            [[ -e "${_f}" ]] && chown "${HAL0_USER}:hal0" "${_f}"
+        done
+
+        # agents/ + secrets/ pinned root:root even under the flip (re-assert in
+        # case a prior run flipped them, keeping the block self-correcting).
+        if [[ -d "${ETC_DIR}/agents" ]]; then
+            chown root:root "${ETC_DIR}/agents"
+        fi
+        if [[ -d "${VAR_DIR}/secrets" ]]; then
+            chown root:root "${VAR_DIR}/secrets"
+        fi
+
+        # /var/lib/hal0 state root + HERMES_HOME -> service-owned. VAR_DIR was
+        # already chgrp hal0 + chmod 2775 above; flip the owner too so the
+        # unprivileged daemon owns the state root (registry/, slots/, cache/).
+        chown "${HAL0_USER}:hal0" "${VAR_DIR}"
+        if [[ -d "${VAR_DIR}/.hermes" ]]; then
+            chown "${HAL0_USER}:hal0" "${VAR_DIR}/.hermes"
+        fi
+
+        # Model store: root-owned but group-writable so the daemon can create
+        # pull subdirs + chat-templates/. We do NOT chown the (huge) existing
+        # model files — they stay world-readable; only the store dir itself
+        # gets root:hal0 0775. MODELS_DIR may live outside VAR_DIR (e.g.
+        # /mnt/ai-models) per --models-dir / [models].pull_root.
+        if [[ -d "${MODELS_DIR}" ]]; then
+            chown root:hal0 "${MODELS_DIR}"
+            chmod 0775 "${MODELS_DIR}"
+            info "hardened-perms flip: ${MODELS_DIR} -> root:hal0 0775 (group-writable)"
+        fi
+    fi
 
 fi
 
