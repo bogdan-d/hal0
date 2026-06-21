@@ -137,18 +137,21 @@ def test_validate_phase_graph_rejects_duplicate_phase_names() -> None:
 
 
 def test_phases_declare_the_locked_needs_graph() -> None:
-    """#702 locked the 4 cross-phase edges; pin them exactly."""
+    """Pin the cross-phase edges. config-set redesign: model_automap +
+    voice_wire re-apply their overlay slice via ``hermes config set`` (no full
+    re-render), so they no longer read mcp_wire's probed-server checkpoint —
+    only config_write still does (cross-run)."""
     by_name = {p.name: p for p in hp.PHASES}
     # config_write reads mcp_wire's PREVIOUS-run checkpoint (mcp_wire
     # runs after it in the list) — a cross-run edge, not a same-run one.
     assert by_name["config_write"].needs == ()
     assert by_name["config_write"].needs_previous == ("mcp_wire",)
-    assert by_name["model_automap"].needs == ("mcp_wire",)
-    assert by_name["voice_wire"].needs == ("mcp_wire",)
+    assert by_name["model_automap"].needs == ()
+    assert by_name["voice_wire"].needs == ()
     assert by_name["self_report"].needs == ("smoke_tests",)
     # No other phase declares anything.
     declared = {p.name for p in hp.PHASES if p.needs or p.needs_previous}
-    assert declared == {"config_write", "model_automap", "voice_wire", "self_report"}
+    assert declared == {"config_write", "self_report"}
 
 
 def test_real_phases_graph_validates() -> None:

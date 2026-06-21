@@ -23,6 +23,8 @@ import pytest
 from hal0.agents import hermes_provision as hp
 from hal0.agents import personas as P
 
+from ._hermes_fakes import apply_hermes_config_cli
+
 
 @pytest.fixture
 def hermetic_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> hp.BootstrapState:
@@ -168,6 +170,11 @@ def hermetic_io() -> hp.PhaseIO:
 
     def _guarded_run(argv: Any, *a: Any, **kw: Any) -> Any:
         if isinstance(argv, (list, tuple)) and list(argv[:2]) == ["systemctl", "daemon-reload"]:
+            return _NoopCompleted()
+        # Apply `hermes config set/migrate` to the real config.yaml (the stub
+        # venv hermes is a no-op `exit 0`), so the E2E config-content asserts
+        # see what the live CLI would have written.
+        if isinstance(argv, (list, tuple)) and apply_hermes_config_cli(list(argv), kw.get("env")):
             return _NoopCompleted()
         return real_run(argv, *a, **kw)
 
@@ -327,7 +334,7 @@ def test_config_yaml_contains_mcp_servers(
     assert "mcp_servers:" in config
     assert "hal0-admin:" in config
     assert "hal0-memory:" in config
-    assert '"hermes-agent"' in config  # X-hal0-Agent value
+    assert "X-hal0-Agent: hermes-agent" in config  # identity header value
 
 
 def test_config_yaml_contains_role_slot_blocks(
@@ -352,22 +359,13 @@ def test_config_yaml_contains_role_slot_blocks(
         assert cfg["auxiliary"][task]["base_url"] == "http://127.0.0.1:8080/v1"
     # vision/web_extract still inherit the chat model.
     assert cfg["auxiliary"]["vision"]["provider"] == "main"
-    # Per-model context_length via custom_providers (keyed by model_id),
-    # NOT a global model.context_length override (the deepseek-bleed bug).
+    # No global model.context_length override (the deepseek-bleed bug); the
+    # custom_providers per-model block was dropped — under live-resolve +
+    # discover_models, hal0-api's /v1/models serves per-model context_length.
     assert "context_length" not in cfg["model"]
-    assert cfg["custom_providers"] == [
-        {
-            "name": "hal0",
-            "base_url": "http://127.0.0.1:8080/v1",
-            "models": {
-                "qwen3-test": {"context_length": 32768},
-                "qwen3-coder-test": {"context_length": 16384},
-                "qwen3-utility-test": {"context_length": 8192},
-            },
-        }
-    ]
-    # The embed slot must not leak into custom_providers either.
-    assert "bge-test" not in cfg["custom_providers"][0]["models"]
+    assert "custom_providers" not in cfg
+    # The embed slot must not leak into the chat aliases.
+    assert "bge-test" not in cfg.get("model_aliases", {})
 
 
 def test_namespace_register_skips_add_on_delete_count_mismatch(

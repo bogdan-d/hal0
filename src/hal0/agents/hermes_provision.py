@@ -836,9 +836,6 @@ def _phase_env_probe(ctx: PhaseContext) -> PhaseResult:
 # ── Phase E: config_write ───────────────────────────────────────────────────
 
 
-CONFIG_TEMPLATE_PATH = Path(__file__).resolve().parent / "hermes_templates" / "config.yaml.j2"
-
-
 def _resolve_primary_slot(
     *,
     slots_fetcher: Callable[[], list[dict[str, Any]]] | None = None,
@@ -952,96 +949,251 @@ def _live_resolve_enabled() -> bool:
     return os.environ.get("HAL0_HERMES_LIVE_RESOLVE", "1") == "1"
 
 
-def _render_config_yaml(
+# ── HAL0 config overlay (config-set + targeted YAML merge) ───────────────────
+#
+# hermes 0.17 owns + migrates its own config.yaml; hal0 layers ONLY its
+# integration keys on top instead of rendering the whole file (the old
+# Jinja whole-file ownership that forced the ``hermes-agent==0.14.0`` pin —
+# issues #240 / #934). Two appliers, split by what hermes's CLI can express:
+#
+#   * scalars + nested-scalars → hermes's OWN ``config set`` (~0.13s each,
+#     idempotent, exercises hermes's schema validation). Even ``mcp_servers``
+#     goes here: ``hermes mcp add`` is interactive (prompts "Save anyway?"
+#     on a connect probe and hangs with no TTY), so the nested-scalar
+#     ``mcp_servers.<name>.{type,url,headers.*,timeout}`` form is the
+#     headless-safe path.
+#   * the two irreducible LIST values config set can't express (it stores a
+#     list as the literal string ``'["a","b"]'``) → a targeted PyYAML
+#     deep-merge that preserves every hermes-owned key.
+
+# Static list-valued hal0 keys layered by :func:`_merge_config_yaml_layers`
+# (config set stringifies lists, so these can't go through the CLI).
+SKILLS_EXTERNAL_DIRS: list[str] = ["/etc/hal0/agent-skills", "/var/lib/hal0/skills"]
+SESSION_START_HOOK: dict[str, Any] = {
+    "command": "/usr/lib/hal0/hermes-hooks/inject-system-state.sh",
+    "timeout": 2,
+}
+HAL0_CONFIG_LIST_KEYS: dict[str, Any] = {
+    "skills": {"external_dirs": SKILLS_EXTERNAL_DIRS},
+    "hooks": {"on_session_start": [SESSION_START_HOOK]},
+}
+
+
+def _hermes_bin(venv: Path) -> Path:
+    """Path to the ``hermes`` console script in the managed venv."""
+    return _venv_python(venv).parent / "hermes"
+
+
+def _fmt_config_value(value: Any) -> str:
+    """Render a value as the positional argv for ``hermes config set``.
+
+    hermes coerces ``true``/``false`` → bool and bare integers → int on the
+    way in (verified on 0.17), so we only need the lowercased bool spelling;
+    everything else is its ``str()``. NB: lists are intentionally never
+    passed here — config set would store them as the literal string.
+    """
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
+
+
+def _build_config_overlay(
     *,
-    primary: dict[str, Any] | None,
-    chat_slots: list[dict[str, Any]] | None = None,
-    stt: dict[str, Any] | None = None,
-    tts: dict[str, Any] | None = None,
-    agent_id: str = "hermes-agent",
-    mcp_servers: list[dict[str, Any]] | None = None,
-    system_prompt: str = "",
-    personality_name: str = "",
-    delegation: dict[str, Any] | None = None,
-    auxiliary_tasks: dict[str, dict[str, Any]] | None = None,
-    custom_providers: list[dict[str, Any]] | None = None,
-    live_resolve_enabled: bool = False,
-) -> str:
-    """Render the Hermes config.yaml via Jinja2.
+    primary: dict[str, Any],
+    chat_slots: list[dict[str, Any]],
+    delegation: dict[str, Any] | None,
+    auxiliary_tasks: dict[str, dict[str, Any]],
+    mcp_servers: list[dict[str, Any]],
+    agent_id: str,
+    system_prompt: str,
+    personality_name: str,
+    live_resolve_enabled: bool,
+) -> list[tuple[str, Any]]:
+    """Ordered ``(dotted_key, value)`` overlay applied via ``hermes config set``.
 
-    Variable shape matches the template's docstring (see
-    ``src/hal0/agents/hermes_templates/config.yaml.j2``). Jinja2 is
-    pinned in pyproject so the dep is always present in production
-    bootstraps — no fallback needed.
+    Mirrors the (now-deleted) ``config.yaml.j2`` — but ONLY the scalar /
+    nested-scalar keys. List-valued keys (``skills.external_dirs``,
+    ``hooks.on_session_start``) are layered by :func:`_merge_config_yaml_layers`;
+    ``model.context_length`` is deliberately omitted (hermes treats it as a
+    GLOBAL override that bleeds onto cloud models — per-model context comes
+    from live ``/v1/models`` discovery instead).
 
-    Phase 6/7/8 inputs:
-      mcp_servers      — list of {name, url, private, timeout, usage_hint}
-                         from Phase 6's allowlist+probe. Defaults to the
-                         builtin pair when caller omits (preserves
-                         pre-PR-3 behavior for tests that haven't been
-                         updated).
-      system_prompt    — persona-rendered prelude (Phase 7); empty string
-                         falls back to upstream's default prompt.
-      personality_name — display name for upstream's CLI personality
-                         picker (Phase 8 cosmetic; the system prompt
-                         already carries the persona's prelude).
-
-    Role-slot inputs (feat/hermes-role-slots):
-      delegation       — dict {model, base_url, provider} or None. When
-                         set, renders the ``delegation:`` block so
-                         subagents run on the ``agent-hermes`` slot's
-                         model. None → block omitted → subagents inherit
-                         the chat model.
-      auxiliary_tasks  — dict task→{provider, model, base_url} driving the
-                         ``auxiliary:`` block. Defaults (when omitted) to
-                         the all-provider:"main" inventory so callers that
-                         predate role-slots keep the original behavior.
-      custom_providers — list[dict] ({name, base_url, models}) or None.
-                         Per-model context_length lookup keyed by model_id
-                         under the hal0 base_url. None → block omitted.
-                         NOTE: ``model.context_length`` is intentionally
-                         NOT rendered — hermes treats it as a global
-                         override that bleeds onto cloud models; per-model
-                         context lives here instead.
+    Under live-resolve (the hal0 default) ``model.default`` is the virtual
+    ``hal0/primary`` against the gateway with ``discover_models`` on, so the
+    picker live-discovers every loaded slot. ``HAL0_HERMES_LIVE_RESOLVE=0``
+    pins the single physical backend instead.
     """
-    from jinja2 import Environment, FileSystemLoader
+    base_url = "http://127.0.0.1:8080/v1" if live_resolve_enabled else primary["backend_url"]
+    pairs: list[tuple[str, Any]] = []
 
-    env = Environment(
-        loader=FileSystemLoader(str(CONFIG_TEMPLATE_PATH.parent)),
-        keep_trailing_newline=True,
-        autoescape=False,  # YAML output — escaping would corrupt literal strings.
-    )
-    tpl = env.get_template(CONFIG_TEMPLATE_PATH.name)
-    return tpl.render(
-        primary=primary,
-        chat_slots=chat_slots or [],
-        stt=stt,
-        tts=tts,
-        agent_id=agent_id,
-        mcp_servers=mcp_servers if mcp_servers is not None else _default_mcp_servers(),
-        system_prompt=system_prompt,
-        personality_name=personality_name,
-        delegation=delegation,
-        auxiliary_tasks=(
-            auxiliary_tasks if auxiliary_tasks is not None else _default_auxiliary_tasks()
-        ),
-        custom_providers=custom_providers,
-        live_resolve_enabled=live_resolve_enabled,
-    )
+    # model.* — the OpenAI-compatible-LAN wiring. ``provider: custom`` is
+    # hermes's built-in bucket for Ollama/vLLM/llama.cpp endpoints; hal0 is
+    # that endpoint. max_tokens guards the thinking-model silent-TUI (#635).
+    pairs.append(("model.default", "hal0/primary" if live_resolve_enabled else primary["model_id"]))
+    pairs += [
+        ("model.provider", "custom"),
+        ("model.base_url", base_url),
+        ("model.max_tokens", 8192),
+        ("providers.custom.name", "hal0"),
+        ("providers.custom.base_url", base_url),
+        ("providers.custom.request_timeout_seconds", 300),
+        ("providers.custom.stale_timeout_seconds", 900),
+    ]
+    if live_resolve_enabled:
+        # hermes's picker only runs /v1/models discovery when an api_key is
+        # present; the gateway ignores the value (it's unauthenticated).
+        pairs += [
+            ("providers.custom.api_key", "hal0-local"),
+            ("providers.custom.discover_models", True),
+        ]
+
+    for slot in chat_slots:
+        alias = slot["alias"]
+        pairs += [
+            (f"model_aliases.{alias}.model", slot["model_id"]),
+            (f"model_aliases.{alias}.provider", "custom"),
+            (f"model_aliases.{alias}.base_url", slot["backend_url"]),
+        ]
+
+    if delegation:
+        # feat/hermes-role-slots (#661): subagents run on the `agent` slot.
+        pairs += [
+            ("delegation.model", delegation["model"]),
+            ("delegation.provider", delegation.get("provider", "custom")),
+            ("delegation.base_url", delegation["base_url"]),
+        ]
+
+    pairs += [
+        ("memory.provider", "hal0-memory"),
+        ("memory.memory_enabled", True),
+        ("memory.user_profile_enabled", True),
+        ("memory.nudge_interval", 10),
+        ("memory.graph.enabled", False),  # ADR-0014: graph extraction defaults OFF
+        ("memory.graph.route", "upstream"),
+    ]
+
+    # mcp_servers via config set (NOT `hermes mcp add` — interactive/hangs).
+    # ADR-0012: no Bearer; agent identity flows via X-hal0-Agent.
+    for srv in mcp_servers:
+        name = srv["name"]
+        pairs += [
+            (f"mcp_servers.{name}.type", srv.get("type", "http")),
+            (f"mcp_servers.{name}.url", srv["url"]),
+            (f"mcp_servers.{name}.headers.X-hal0-Agent", agent_id),
+            (f"mcp_servers.{name}.timeout", srv.get("timeout", 60)),
+        ]
+        if srv.get("private"):
+            pairs.append((f"mcp_servers.{name}.headers.X-hal0-Private", "1"))
+
+    pairs.append(("skills.creation_nudge_interval", 15))
+    pairs += [("terminal.backend", "local"), ("terminal.cwd", "/etc/hal0")]
+    pairs += [("agent.max_turns", 60), ("agent.reasoning_effort", "medium")]
+    if system_prompt:
+        pairs.append(("agent.system_prompt_prelude", system_prompt))
+
+    # Reasoning visibility: both flags are required together (#635).
+    pairs += [
+        ("display.bell_on_complete", False),
+        ("display.streaming", True),
+        ("display.show_reasoning", True),
+    ]
+    if personality_name:
+        pairs.append(("display.personality", personality_name))
+
+    # auxiliary.<task> side-job routing (feat/hermes-role-slots): utility-slot
+    # tasks render provider:"custom"+base_url; vision/web_extract stay "main".
+    for task, cfg in auxiliary_tasks.items():
+        pairs += [
+            (f"auxiliary.{task}.provider", cfg.get("provider", "main")),
+            (f"auxiliary.{task}.model", cfg.get("model", "")),
+        ]
+        if cfg.get("base_url"):
+            pairs.append((f"auxiliary.{task}.base_url", cfg["base_url"]))
+
+    return pairs
 
 
-def _default_auxiliary_tasks() -> dict[str, dict[str, Any]]:
-    """All-``provider:"main"`` auxiliary inventory.
+def _ensure_hermes_config(hermes_bin: Path, hermes_home: Path, run: Callable[..., Any]) -> bool:
+    """Run ``hermes config migrate`` so hermes owns + schema-migrates the file.
 
-    Used when a caller renders without resolving live slots. Matches the
-    pre-role-slots hard-coded template block (vision / web_extract /
-    session_search) plus the rest of the confirmed task keys so the
-    rendered ``auxiliary:`` block is always fully populated.
+    Non-fatal: a migrate hiccup is logged but the subsequent ``config set``
+    calls still create/populate the file. Returns whether migrate succeeded.
     """
-    tasks: dict[str, dict[str, Any]] = {}
-    for task in (*_MAIN_AUX_TASKS, *_UTILITY_AUX_TASKS):
-        tasks[task] = {"provider": "main", "model": "", "base_url": ""}
-    return tasks
+    env = {**os.environ, "HERMES_HOME": str(hermes_home)}
+    try:
+        run(
+            [str(hermes_bin), "config", "migrate"],
+            check=True,
+            env=env,
+            capture_output=True,
+            text=True,
+        )  # nosec B603 — argv from local config
+        return True
+    except (subprocess.SubprocessError, OSError) as exc:
+        log.warning("hermes_provision.config_migrate_failed", error=str(exc))
+        return False
+
+
+def _apply_config_set(
+    pairs: list[tuple[str, Any]],
+    *,
+    hermes_bin: Path,
+    hermes_home: Path,
+    run: Callable[..., Any],
+) -> tuple[int, list[str]]:
+    """Apply each ``(key, value)`` via ``hermes config set``.
+
+    Returns ``(applied_count, errors)``. Each set is idempotent (writes the
+    same value on a re-run), so the whole overlay is safe under ``--repair``.
+    """
+    env = {**os.environ, "HERMES_HOME": str(hermes_home)}
+    applied = 0
+    errors: list[str] = []
+    for key, value in pairs:
+        try:
+            run(
+                [str(hermes_bin), "config", "set", key, _fmt_config_value(value)],
+                check=True,
+                env=env,
+                capture_output=True,
+                text=True,
+            )  # nosec B603 — argv from local config
+            applied += 1
+        except (subprocess.SubprocessError, OSError) as exc:
+            errors.append(f"{key}: {exc}")
+    return applied, errors
+
+
+def _merge_config_yaml_layers(
+    config_path: Path,
+    *,
+    list_keys: dict[str, Any],
+    overrides_path: Path,
+) -> bool:
+    """Deep-merge the irreducible list keys + operator overrides onto config.yaml.
+
+    ``config set`` can't express YAML sequences (it stringifies them), so the
+    list-valued hal0 keys (``skills.external_dirs``, ``hooks.on_session_start``)
+    are layered here. The operator escape hatch (``overrides.yaml``) deep-merges
+    on top LAST so a hand override still wins. Every hermes-owned key is
+    preserved (merge, never clobber). Returns True iff the file changed.
+    """
+    try:
+        import yaml  # type: ignore[import-untyped]
+    except ImportError:
+        return False  # PyYAML absent — list keys can't be layered; ship as-is.
+    base: dict[str, Any] = {}
+    if config_path.exists():
+        base = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    merged = _deep_merge(base, list_keys)
+    if overrides_path.exists():
+        overlay = yaml.safe_load(overrides_path.read_text(encoding="utf-8")) or {}
+        merged = _deep_merge(merged, overlay)
+    out = yaml.safe_dump(merged, sort_keys=False, default_flow_style=False)
+    if config_path.exists() and config_path.read_text(encoding="utf-8") == out:
+        return False
+    _atomic_write(config_path, out)
+    return True
 
 
 def _deep_merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
@@ -1053,24 +1205,6 @@ def _deep_merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]
         else:
             out[k] = v
     return out
-
-
-def _apply_overrides(rendered_yaml: str, overrides_path: Path) -> str:
-    """Deep-merge ``overrides_path`` (if present) on top of rendered YAML.
-
-    Re-emits YAML via stdlib (json round-trip is the fallback when
-    PyYAML isn't installed — the resulting JSON is still valid YAML).
-    """
-    if not overrides_path.exists():
-        return rendered_yaml
-    try:
-        import yaml  # type: ignore[import-untyped]
-    except ImportError:
-        return rendered_yaml  # PyYAML not installed; ship as-is.
-    base = yaml.safe_load(rendered_yaml) or {}
-    overlay = yaml.safe_load(overrides_path.read_text()) or {}
-    merged = _deep_merge(base, overlay)
-    return yaml.safe_dump(merged, sort_keys=False, default_flow_style=False)
 
 
 OVERRIDES_PATH = Path("/etc/hal0/agents/hermes/overrides.yaml")
@@ -1129,118 +1263,121 @@ def _active_persona_render(
 
 
 def _phase_config_write(ctx: PhaseContext) -> PhaseResult:
-    """Atomically render ``$HERMES_HOME/config.yaml`` from the template.
+    """Apply hal0's integration overlay onto the hermes-owned ``config.yaml``.
 
-    PR-3 overhaul: passes chat_slots + persona-rendered system_prompt +
-    probed mcp_servers list so a single-shot bootstrap renders the full
-    aliases block, the persona prelude, AND the MCP registration block
-    on the first pass. Pre-PR-3, Phase 9 (model_automap) re-rendered
-    half of these post-hoc; that's now demoted to an idempotency check.
+    Config-set redesign (replaces the old whole-file Jinja render that forced
+    the ``hermes-agent==0.14.0`` pin): hermes owns + migrates ``config.yaml``;
+    hal0 layers ONLY its keys on top.
 
-    Idempotent: hash-equal output skips the write. Overrides at
-    ``/etc/hal0/agents/hermes/overrides.yaml`` deep-merge on top.
+      1. ``hermes config migrate`` — hermes creates/schema-migrates its file.
+      2. Scalar/nested-scalar overlay (model wiring, providers.custom, memory,
+         model_aliases, delegation, mcp_servers, persona prelude, auxiliary,
+         …) applied via ``hermes config set`` — idempotent, headless-safe.
+      3. The two irreducible LIST keys (``skills.external_dirs``,
+         ``hooks.on_session_start``) + operator ``overrides.yaml`` deep-merged
+         in via PyYAML, preserving every hermes-owned key.
+
+    Idempotent under ``--repair``: every ``config set`` re-writes the same
+    value and the YAML merge is a no-op when the file already matches.
     """
     state = ctx.state
     hermes_home = Path(state.hermes_home)
     config_path = hermes_home / "config.yaml"
+    hermes_bin = _hermes_bin(Path(state.venv))
+    run = ctx.io.run
+
+    hermes_home.mkdir(parents=True, exist_ok=True)
+    migrated = _ensure_hermes_config(hermes_bin, hermes_home, run)
+
     primary_raw = _resolve_primary_slot(slots_fetcher=ctx.io.fetch_slots)
-    # The template names the dict keys ``model_id``/``backend_url``;
-    # _resolve_primary_slot returns ``model``/``base_url`` for less
-    # cognitive load at call sites. Translate at the seam.
+    # _resolve_primary_slot returns ``model``/``base_url``; the overlay builder
+    # wants ``model_id``/``backend_url``. Translate at the seam.
     primary = {
         "model_id": primary_raw["model"],
         "backend_url": primary_raw["base_url"],
         "context_length": primary_raw["context_length"],
     }
-    # PR-3 Phase 5: pull chat_slots into the first render so the
-    # ``model_aliases:`` block lands on the first config_write pass
-    # (Phase 9 used to be the only place this worked).
     slots_all = ctx.io.fetch_slots()
     chat_slots = _collect_chat_slots(slots_all, contexts=ctx.io.fetch_model_contexts())
-    # feat/hermes-role-slots: resolve per-role models from live slot NAMES.
-    # delegation ← `agent-hermes` slot; auxiliary ← `utility` slot. Both
-    # talk to hal0's /v1 endpoint (same base_url as the main model), so a
-    # missing slot degrades safely (delegation omitted / aux → "main").
+    # feat/hermes-role-slots: delegation ← `agent` slot; auxiliary ← `utility`
+    # slot. Both hit hal0's /v1 endpoint, so a missing slot degrades safely
+    # (delegation omitted / aux → "main").
     hal0_v1_base = primary["backend_url"]
     delegation = _resolve_delegation(slots_all, hal0_base_url=hal0_v1_base)
     auxiliary_tasks = _resolve_auxiliary_tasks(slots_all, hal0_base_url=hal0_v1_base)
-    # Per-model context_length lives in custom_providers (NOT the global
-    # model.context_length override) so cloud models keep their own ctx.
-    custom_providers = _resolve_custom_providers(chat_slots, hal0_base_url=hal0_v1_base)
-    # PR-3 Phase 6: probe-driven mcp_servers list. For the very first
-    # config_write (before mcp_wire runs the live probe) we fall back to
-    # the default inventory; mcp_wire then captures the probed shape and
-    # config gets re-rendered idempotently on Phase 9 / next bootstrap.
-    # Declared as ``needs_previous`` — mcp_wire runs AFTER config_write,
-    # so this read can only ever see a persisted prior-run checkpoint.
+    # Probe-driven mcp_servers (needs_previous: mcp_wire runs AFTER us, so this
+    # only ever sees a persisted prior-run checkpoint). Fall back to the
+    # builtin inventory on the very first pass — re-applied idempotently next run.
     cached_servers = ctx.output_of("mcp_wire").get("rendered_servers")
-    mcp_servers = cached_servers if isinstance(cached_servers, list) and cached_servers else None
-    # #702: silent fallbacks become observable. Same behaviour as before;
-    # the fallback sites are now recorded in details["fallbacks"].
+    have_probed = isinstance(cached_servers, list) and bool(cached_servers)
+    mcp_servers = cached_servers if have_probed else _default_mcp_servers()
+    # #702: silent fallbacks stay observable.
     fallbacks: list[dict[str, str]] = []
     if primary_raw.get("placeholder"):
         fallbacks.append(
             {
                 "site": "primary_slot",
-                "detail": "no ready llm slot — rendered the safe-but-unwired placeholder primary",
+                "detail": (
+                    "no ready llm slot — overlay points model.default at the "
+                    "hal0/primary virtual against the gateway"
+                ),
             }
         )
-    if mcp_servers is None:
+    if not have_probed:
         fallbacks.append(
             {
                 "site": "mcp_servers",
                 "detail": (
                     "no probed rendered_servers checkpoint from mcp_wire — "
-                    "rendered the default builtin MCP inventory"
+                    "applied the default builtin MCP inventory"
                 ),
             }
         )
     system_prompt, personality_name = _active_persona_render(state, mcp_servers=mcp_servers)
     live_resolve_enabled = _live_resolve_enabled()
-    rendered = _render_config_yaml(
+
+    pairs = _build_config_overlay(
         primary=primary,
         chat_slots=chat_slots,
-        agent_id=state.agent_id,
-        mcp_servers=mcp_servers,
-        system_prompt=system_prompt,
-        personality_name=personality_name,
         delegation=delegation,
         auxiliary_tasks=auxiliary_tasks,
-        custom_providers=custom_providers,
+        mcp_servers=mcp_servers,
+        agent_id=state.agent_id,
+        system_prompt=system_prompt,
+        personality_name=personality_name,
         live_resolve_enabled=live_resolve_enabled,
     )
-    rendered = _apply_overrides(rendered, OVERRIDES_PATH)
-    new_hash = content_hash(rendered)
+    applied, errors = _apply_config_set(
+        pairs, hermes_bin=hermes_bin, hermes_home=hermes_home, run=run
+    )
+    list_merge_changed = _merge_config_yaml_layers(
+        config_path, list_keys=HAL0_CONFIG_LIST_KEYS, overrides_path=OVERRIDES_PATH
+    )
 
-    if config_path.exists() and content_hash(config_path.read_text(encoding="utf-8")) == new_hash:
-        return PhaseResult(
-            status=PhaseStatus.OK,
-            hash=new_hash,
-            details={
-                "config_path": str(config_path),
-                "unchanged": True,
-                "chat_slot_count": len(chat_slots),
-                "persona": personality_name or None,
-                "mcp_server_count": len(mcp_servers) if mcp_servers else 0,
-                "fallbacks": fallbacks,
-            },
-        )
-
-    hermes_home.mkdir(parents=True, exist_ok=True)
-    tmp = config_path.with_suffix(".yaml.tmp")
-    tmp.write_text(rendered, encoding="utf-8")
-    os.replace(tmp, config_path)
+    new_hash = (
+        content_hash(config_path.read_text(encoding="utf-8")) if config_path.exists() else None
+    )
+    # Non-fatal posture (run-all): a partial set still leaves a usable config.
+    # FAIL only when the overlay couldn't apply at all (hermes_bin broken) —
+    # that's a real, actionable stop the operator must see.
+    status = PhaseStatus.OK if (applied or not pairs) else PhaseStatus.FAIL
     return PhaseResult(
-        status=PhaseStatus.OK,
+        status=status,
         hash=new_hash,
+        reason=("; ".join(errors[:3]) if status == PhaseStatus.FAIL else None),
         details={
             "config_path": str(config_path),
+            "keys_applied": applied,
+            "keys_total": len(pairs),
+            "list_merge_changed": list_merge_changed,
+            "config_migrated": migrated,
             "primary_model": primary["model_id"],
             "chat_slot_count": len(chat_slots),
             "persona": personality_name or None,
-            "mcp_server_count": len(mcp_servers) if mcp_servers else 0,
+            "mcp_server_count": len(mcp_servers),
             "delegation_model": (delegation or {}).get("model"),
             "auxiliary_utility_model": _utility_aux_model(auxiliary_tasks),
+            "config_set_errors": errors,
             "fallbacks": fallbacks,
         },
     )
@@ -1542,7 +1679,7 @@ def _phase_persona_seed(ctx: PhaseContext) -> PhaseResult:
 # Symlink-create is idempotent (only relinks when target differs).
 
 
-CONTEXT_TEMPLATE_DIR = CONFIG_TEMPLATE_PATH.parent
+CONTEXT_TEMPLATE_DIR = Path(__file__).resolve().parent / "hermes_templates"
 HAL0_BUNDLED_SKILLS = Path("/usr/share/hal0/skills")
 ETC_HAL0_DIR = Path("/etc/hal0")
 ETC_HAL0_AGENT_SKILLS = ETC_HAL0_DIR / "agent-skills"
@@ -2741,11 +2878,12 @@ def _resolve_auxiliary_tasks(
 
 
 def _phase_model_automap(ctx: PhaseContext) -> PhaseResult:
-    """Refresh ``model_aliases`` in ``$HERMES_HOME/config.yaml``.
+    """Refresh ``model.*`` + ``model_aliases.*`` via ``hermes config set``.
 
-    Re-renders the whole config (so model + aliases stay consistent)
-    and atomic-swaps if the hash drifted. Hash-equal output skips the
-    write per #245 idempotency criterion.
+    Re-applies the model wiring + per-slot aliases so a post-bootstrap slot
+    change (churn, a newly-loaded slot) lands in the hermes-owned config
+    without a full re-render. ``config set`` is idempotent, so a no-drift run
+    just re-writes the same values.
 
     Embed/rerank/img slots are deliberately NOT mapped per ADR-0011 §3
     (Hermes has no top-level embed abstraction; memory MCP handles it).
@@ -2759,89 +2897,44 @@ def _phase_model_automap(ctx: PhaseContext) -> PhaseResult:
             reason=f"{config_path} missing — config_write must run first",
         )
 
+    hermes_bin = _hermes_bin(Path(state.venv))
     slots = ctx.io.fetch_slots()
     chat_slots = _collect_chat_slots(slots, contexts=ctx.io.fetch_model_contexts())
     primary_raw = _resolve_primary_slot(slots_fetcher=lambda: slots)
-    primary = {
-        "model_id": primary_raw["model"],
-        "backend_url": primary_raw["base_url"],
-        "context_length": primary_raw["context_length"],
-    }
-    # PR-3 Phase 9 (demoted): re-render uses the SAME inputs as Phase 5
-    # so a no-drift run produces a byte-identical config. Mismatch means
-    # something changed (slot churn, persona swap, MCP servers came up)
-    # and we want the new config; match → no-op (hash check below).
-    cached_servers = ctx.output_of("mcp_wire").get("rendered_servers")
-    mcp_servers = cached_servers if isinstance(cached_servers, list) and cached_servers else None
-    system_prompt, personality_name = _active_persona_render(state, mcp_servers=mcp_servers)
-    # feat/hermes-role-slots: identical role-slot resolution to config_write
-    # so a no-drift re-render stays byte-identical (#245 idempotency).
-    hal0_v1_base = primary["backend_url"]
-    delegation = _resolve_delegation(slots, hal0_base_url=hal0_v1_base)
-    auxiliary_tasks = _resolve_auxiliary_tasks(slots, hal0_base_url=hal0_v1_base)
-    custom_providers = _resolve_custom_providers(chat_slots, hal0_base_url=hal0_v1_base)
+    live_resolve_enabled = _live_resolve_enabled()
+    base_url = "http://127.0.0.1:8080/v1" if live_resolve_enabled else primary_raw["base_url"]
 
-    try:
-        rendered = _render_config_yaml(
-            primary=primary,
-            chat_slots=chat_slots,
-            agent_id=state.agent_id,
-            mcp_servers=mcp_servers,
-            system_prompt=system_prompt,
-            personality_name=personality_name,
-            delegation=delegation,
-            custom_providers=custom_providers,
-            auxiliary_tasks=auxiliary_tasks,
-            # Must match config_write (Phase 5) or this re-render clobbers the
-            # live-resolve provider block. Single source of truth.
-            live_resolve_enabled=_live_resolve_enabled(),
-        )
-        rendered = _apply_overrides(rendered, OVERRIDES_PATH)
-    except Exception as exc:
-        return PhaseResult(
-            status=PhaseStatus.FAIL,
-            reason=f"config render failed: {type(exc).__name__}: {exc}",
-        )
-
-    new_hash = content_hash(rendered)
-    try:
-        current = config_path.read_text(encoding="utf-8")
-        current_hash: str | None = content_hash(current)
-    except OSError:
-        current_hash = None
+    pairs: list[tuple[str, Any]] = [
+        ("model.default", "hal0/primary" if live_resolve_enabled else primary_raw["model"]),
+        ("model.provider", "custom"),
+        ("model.base_url", base_url),
+    ]
+    for slot in chat_slots:
+        alias = slot["alias"]
+        pairs += [
+            (f"model_aliases.{alias}.model", slot["model_id"]),
+            (f"model_aliases.{alias}.provider", "custom"),
+            (f"model_aliases.{alias}.base_url", slot["backend_url"]),
+        ]
+    applied, errors = _apply_config_set(
+        pairs, hermes_bin=hermes_bin, hermes_home=hermes_home, run=ctx.io.run
+    )
 
     skipped = [_slot_alias(s) for s in slots if _slot_kind(s) in {"embed", "rerank", "img"}]
     aliases_written = [s["alias"] for s in chat_slots]
-
-    if current_hash == new_hash:
-        return PhaseResult(
-            status=PhaseStatus.OK,
-            hash=new_hash,
-            details={
-                "config_path": str(config_path),
-                "unchanged": True,
-                "aliases_written": aliases_written,
-                "skipped": skipped,
-                "chat_slot_count": len(chat_slots),
-            },
-        )
-
-    try:
-        _atomic_write(config_path, rendered)
-    except OSError as exc:
-        return PhaseResult(
-            status=PhaseStatus.FAIL,
-            reason=f"config write failed: {exc}",
-        )
+    status = PhaseStatus.OK if (applied or not pairs) else PhaseStatus.FAIL
     return PhaseResult(
-        status=PhaseStatus.OK,
-        hash=new_hash,
+        status=status,
+        hash=content_hash(config_path.read_text(encoding="utf-8")),
+        reason=("; ".join(errors[:3]) if status == PhaseStatus.FAIL else None),
         details={
             "config_path": str(config_path),
             "aliases_written": aliases_written,
             "skipped": skipped,
             "chat_slot_count": len(chat_slots),
             "slots_total": len(slots),
+            "keys_applied": applied,
+            "config_set_errors": errors,
         },
     )
 
@@ -3141,78 +3234,24 @@ def _phase_voice_wire(ctx: PhaseContext) -> PhaseResult:
             details=details,
         )
 
-    # Re-render config.yaml so the stt: / tts: blocks land. The render
-    # uses the same template config_write does — passing stt/tts kwargs
-    # turns on the conditional sections.
+    # Wire the stt:/tts: blocks via `hermes config set` (nested scalars).
+    # The backend URL lives in the secrets env above (STT_/TTS_OPENAI_BASE_URL);
+    # config carries only provider + per-engine model, matching the old render.
     hermes_home = Path(state.hermes_home)
     config_path = hermes_home / "config.yaml"
-    try:
-        primary_raw = _resolve_primary_slot(slots_fetcher=lambda: slots)
-        primary = {
-            "model_id": primary_raw["model"],
-            "backend_url": primary_raw["base_url"],
-            "context_length": primary_raw["context_length"],
-        }
-        cached_servers = ctx.output_of("mcp_wire").get("rendered_servers")
-        mcp_servers = (
-            cached_servers if isinstance(cached_servers, list) and cached_servers else None
-        )
-        system_prompt, personality_name = _active_persona_render(state, mcp_servers=mcp_servers)
-        # feat/hermes-role-slots: keep role-slot blocks consistent with the
-        # other render call sites so re-render stays idempotent.
-        hal0_v1_base = primary["backend_url"]
-        chat_slots = _collect_chat_slots(slots, contexts=ctx.io.fetch_model_contexts())
-        delegation = _resolve_delegation(slots, hal0_base_url=hal0_v1_base)
-        auxiliary_tasks = _resolve_auxiliary_tasks(slots, hal0_base_url=hal0_v1_base)
-        custom_providers = _resolve_custom_providers(chat_slots, hal0_base_url=hal0_v1_base)
-        rendered = _render_config_yaml(
-            primary=primary,
-            chat_slots=chat_slots,
-            stt={
-                "provider": "openai",
-                "backend_url": details["stt"]["backend_url"] if details["stt"] else None,
-                "model": details["stt"]["model"] if details["stt"] else None,
-            }
-            if details["stt"]
-            else None,
-            tts={
-                "provider": "openai",
-                "backend_url": details["tts"]["backend_url"] if details["tts"] else None,
-                "model": details["tts"]["model"] if details["tts"] else None,
-            }
-            if details["tts"]
-            else None,
-            agent_id=state.agent_id,
-            mcp_servers=mcp_servers,
-            system_prompt=system_prompt,
-            personality_name=personality_name,
-            delegation=delegation,
-            auxiliary_tasks=auxiliary_tasks,
-            custom_providers=custom_providers,
-        )
-        rendered = _apply_overrides(rendered, OVERRIDES_PATH)
-    except Exception as exc:
-        return PhaseResult(
-            status=PhaseStatus.FAIL,
-            reason=f"config render with voice failed: {exc}",
-            details=details,
-        )
-
-    if config_path.exists():
-        new_hash = content_hash(rendered)
-        try:
-            current_hash: str | None = content_hash(config_path.read_text(encoding="utf-8"))
-        except OSError:
-            current_hash = None
-        if current_hash != new_hash:
-            try:
-                _atomic_write(config_path, rendered)
-            except OSError as exc:
-                return PhaseResult(
-                    status=PhaseStatus.FAIL,
-                    reason=f"config write failed: {exc}",
-                    details=details,
-                )
+    hermes_bin = _hermes_bin(Path(state.venv))
+    pairs: list[tuple[str, Any]] = []
+    if details["stt"]:
+        pairs.append(("stt.provider", "openai"))
+        if details["stt"]["model"]:
+            pairs.append(("stt.openai.model", details["stt"]["model"]))
+    if details["tts"]:
+        pairs.append(("tts.provider", "openai"))
+        if details["tts"]["model"]:
+            pairs.append(("tts.openai.model", details["tts"]["model"]))
+    applied, errors = _apply_config_set(
+        pairs, hermes_bin=hermes_bin, hermes_home=hermes_home, run=ctx.io.run
+    )
 
     return PhaseResult(
         status=PhaseStatus.OK,
@@ -3220,6 +3259,8 @@ def _phase_voice_wire(ctx: PhaseContext) -> PhaseResult:
             **details,
             "secrets_env": str(HERMES_SECRETS_ENV),
             "config_path": str(config_path),
+            "keys_applied": applied,
+            "config_set_errors": errors,
         },
     )
 
@@ -3839,8 +3880,11 @@ PHASES: list[Phase] = [
     Phase("mcp_wire", _phase_mcp_wire),
     Phase("context_link", _phase_context_link),
     Phase("namespace_register", _phase_namespace_register),
-    Phase("model_automap", _phase_model_automap, needs=("mcp_wire",)),
-    Phase("voice_wire", _phase_voice_wire, needs=("mcp_wire",)),
+    # Both re-apply their slice of the overlay via `hermes config set` (no
+    # full re-render), so neither reads mcp_wire's probed-server checkpoint
+    # any more — only config_write still does (needs_previous above).
+    Phase("model_automap", _phase_model_automap),
+    Phase("voice_wire", _phase_voice_wire),
     # #437 (SYSTEM scope): wire the gateway secrets drop-in so fresh
     # provisions/reinstalls come up with Telegram + Discord connected,
     # surviving hermes_cli main-unit regeneration. Runs after voice_wire
