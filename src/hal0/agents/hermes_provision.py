@@ -2893,8 +2893,14 @@ def _gateway_dropin_body() -> str:
         "# the main .service body. pid1 (root) reads the 0600 vault below.\n"
         "#\n"
         "# Re-apply: `systemctl daemon-reload && systemctl restart hermes-gateway`.\n"
+        "#\n"
+        "# The `-` prefix makes the vault OPTIONAL: on a fresh install with no\n"
+        "# platform tokens provisioned yet, the file doesn't exist — without the\n"
+        "# `-`, systemd hard-fails the unit with `Failed to load environment\n"
+        "# files` and crash-loops it. Optional lets the gateway come up (idle,\n"
+        "# no platform) until tokens are added.\n"
         "[Service]\n"
-        f"EnvironmentFile={HERMES_SECRETS_ENV}\n"
+        f"EnvironmentFile=-{HERMES_SECRETS_ENV}\n"
     )
 
 
