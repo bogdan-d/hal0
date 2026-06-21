@@ -276,7 +276,9 @@ class TestHermesGatewaySecretsDropin:
 
         body = hp._gateway_dropin_body()
         assert "[Service]" in body
-        assert "EnvironmentFile=/var/lib/hal0/secrets/agents/hermes.env" in body
+        # Optional (`-` prefix): a missing vault on a fresh install must not
+        # hard-fail the unit — mirrors hal0-agent@.service's EnvironmentFile=-.
+        assert "EnvironmentFile=-/var/lib/hal0/secrets/agents/hermes.env" in body
 
     def test_dropin_does_not_reference_legacy_home(self) -> None:
         from hal0.agents import hermes_provision as hp
