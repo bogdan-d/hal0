@@ -1929,7 +1929,9 @@ def test_gateway_secrets_wire_writes_dropin(
     assert out.status == hp.PhaseStatus.OK
     assert dropin_file.exists()
     body = dropin_file.read_text(encoding="utf-8")
-    assert "EnvironmentFile=/var/lib/hal0/secrets/agents/hermes.env" in body
+    # Optional (`-`): a missing vault on a fresh install must not hard-fail the
+    # unit (matches hal0-agent@.service's EnvironmentFile=-).
+    assert "EnvironmentFile=-/var/lib/hal0/secrets/agents/hermes.env" in body
     assert "[Service]" in body
     # Mode 0o644 — NOT 0o600, which would block systemd from reading the
     # unit fragment. The secrets themselves are in the 0600 vault.
