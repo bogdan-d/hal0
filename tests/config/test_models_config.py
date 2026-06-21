@@ -42,3 +42,33 @@ class TestRootsValidator:
     def test_dot_relative_rejected(self) -> None:
         with pytest.raises(ValidationError):
             ModelsConfig(roots=["./local-models"])
+
+
+class TestScanRoots:
+    """scan_roots() folds the effective store/pull_root into the scanned set so
+    a headless install (--models-dir → pull_root, but roots left default) still
+    discovers its models. Regression for the fresh-install scan gap."""
+
+    def test_store_folded_into_scan_roots(self) -> None:
+        cfg = ModelsConfig(roots=["/var/lib/hal0/models"], store="/mnt/ai-models")
+        assert cfg.scan_roots() == ["/var/lib/hal0/models", "/mnt/ai-models"]
+
+    def test_pull_root_folded_when_store_unset(self) -> None:
+        # The exact CT107 shape: --models-dir wrote pull_root, roots left default.
+        cfg = ModelsConfig(roots=["/var/lib/hal0/models"], pull_root="/mnt/ai-models")
+        assert "/mnt/ai-models" in cfg.scan_roots()
+
+    def test_store_wins_over_pull_root(self) -> None:
+        cfg = ModelsConfig(roots=["/a"], store="/store", pull_root="/pull")
+        assert cfg.scan_roots() == ["/a", "/store"]
+        assert "/pull" not in cfg.scan_roots()
+
+    def test_no_duplicate_when_store_already_in_roots(self) -> None:
+        cfg = ModelsConfig(roots=["/mnt/ai-models"], store="/mnt/ai-models")
+        assert cfg.scan_roots() == ["/mnt/ai-models"]
+
+    def test_default_config_scans_pull_root_default(self) -> None:
+        # Even a bare ModelsConfig() scans somewhere (pull_root defaults to models_dir).
+        roots = ModelsConfig().scan_roots()
+        assert roots  # non-empty
+        assert all(r for r in roots)
