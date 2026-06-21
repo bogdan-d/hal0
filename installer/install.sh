@@ -676,6 +676,39 @@ if [[ -f "${AGENT_UNIT_SRC}" ]]; then
     else
         warn "${GUARD_SRC} not found — run-as-hal0 guard not installed"
     fi
+
+    # Privileged seam (D hardened-perms): hal0-slotctl is the entire root
+    # surface an UNPRIVILEGED hal0-api needs — write/remove the per-slot unit
+    # and run systemctl on hal0-slot@<name>. It MUST land at the absolute
+    # /usr/lib/hal0/bin path the provider's _HAL0_SLOTCTL default hardcodes
+    # (dev mode shadows it under PREFIX/usr/lib/hal0). The matching sudoers
+    # drop-in below grants only `hal0 -> hal0-slotctl`, no wildcards.
+    SLOTCTL_SRC="${REPO_ROOT}/installer/wrappers/hal0-slotctl"
+    if [[ -f "${SLOTCTL_SRC}" ]]; then
+        install -d "${LIB_DIR}/bin"
+        install -m 0755 "${SLOTCTL_SRC}" "${LIB_DIR}/bin/hal0-slotctl"
+        info "wrote ${LIB_DIR}/bin/hal0-slotctl"
+    else
+        warn "${SLOTCTL_SRC} not found — privileged seam helper not installed"
+    fi
+
+    # sudoers grant for the seam. Real installs only (dev mode never touches
+    # /etc/sudoers.d). visudo-validate before activating so a malformed drop-in
+    # can never wedge sudo for the box.
+    if [[ "${DEV_MODE}" -eq 0 ]]; then
+        SLOTCTL_SUDOERS_SRC="${REPO_ROOT}/packaging/sudoers/hal0-slotctl"
+        SLOTCTL_SUDOERS_DST="/etc/sudoers.d/hal0-slotctl"
+        if [[ -f "${SLOTCTL_SUDOERS_SRC}" ]]; then
+            if visudo -cf "${SLOTCTL_SUDOERS_SRC}" >/dev/null 2>&1; then
+                install -m 0440 "${SLOTCTL_SUDOERS_SRC}" "${SLOTCTL_SUDOERS_DST}"
+                info "wrote ${SLOTCTL_SUDOERS_DST}"
+            else
+                warn "${SLOTCTL_SUDOERS_SRC} failed visudo check — slotctl sudoers grant not installed"
+            fi
+        else
+            warn "${SLOTCTL_SUDOERS_SRC} not found — slotctl sudoers grant not installed"
+        fi
+    fi
 else
     warn "${AGENT_UNIT_SRC} not found — hal0-agent@ template not installed"
 fi
