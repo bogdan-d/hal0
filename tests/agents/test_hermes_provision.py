@@ -622,8 +622,11 @@ def test_overlay_no_primary_under_live_resolve_uses_virtual() -> None:
     # under live-resolve the overlay still points at the hal0/primary virtual
     # against the gateway (not a dead default).
     keys = _build_overlay_keys(
-        primary={"model_id": "primary", "backend_url": "http://127.0.0.1:8080/v1",
-                 "context_length": 32768},
+        primary={
+            "model_id": "primary",
+            "backend_url": "http://127.0.0.1:8080/v1",
+            "context_length": 32768,
+        },
     )
     assert keys["model.default"] == "hal0/primary"
     assert "127.0.0.1:8080/v1" in keys["model.base_url"]
