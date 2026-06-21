@@ -18,18 +18,28 @@ from hal0.registry.store import ModelRegistry
 from hal0.slots.manager import SlotManager
 
 
-def _add_model(home: str, *, id: str, capability: str, size_bytes: int, exists: bool = True) -> str:
+def _add_model(
+    home: str,
+    *,
+    id: str,
+    capability: str,
+    size_bytes: int,
+    exists: bool = True,
+    suffix: str = ".gguf",
+    tags: list[str] | None = None,
+) -> str:
     """Register a Model under HAL0_HOME, optionally materialising its file."""
-    gguf = Path(home) / f"{id}.gguf"
+    model_file = Path(home) / f"{id}{suffix}"
     if exists:
-        gguf.write_bytes(b"\0")
+        model_file.write_bytes(b"\0")
     ModelRegistry().add(
         Model(
             id=id,
             name=id,
-            path=str(gguf),
+            path=str(model_file),
             size_bytes=size_bytes,
             capabilities=[capability],
+            tags=tags or [],
         )
     )
     return id
@@ -106,3 +116,77 @@ def test_fallback_skips_registered_models_with_missing_file(tmp_hal0_home):
 
 def test_fallback_local_model_returns_none_when_empty(tmp_hal0_home):
     assert SlotManager._fallback_local_model("chat") is None
+
+
+# ── #940 hardening: diffusion guard + name-similarity ─────────────────────────
+
+
+def test_ghost_chat_slot_never_picks_video_model(tmp_hal0_home):
+    # The live failure: a 25GB video diffusion gguf got capabilities=['chat']
+    # (default guess) and, being the largest, was selected for the chat slot.
+    # It must be excluded — leaving a real (smaller) chat model as the pick.
+    _add_model(tmp_hal0_home, id="ltx-2-19b-dev-fp8", capability="chat", size_bytes=25_000_000_000)
+    real = _add_model(
+        tmp_hal0_home, id="gemma-4-12b-it-ud-q4-k-xl", capability="chat", size_bytes=6_900_000_000
+    )
+    cfg = _llm_cfg("gemma-4-12b-it")  # ghost
+    assert _mgr()._resolve_servable_model("gemma-4-12b-it", cfg) == real
+
+
+def test_ghost_chat_slot_with_only_video_model_does_not_fall_back(tmp_hal0_home):
+    # If the *only* chat-tagged candidate is a video model, there is no valid
+    # fallback at all — keep the configured (ghost) id rather than serve video.
+    _add_model(tmp_hal0_home, id="ltx-2-19b-dev-fp8", capability="chat", size_bytes=25_000_000_000)
+    cfg = _llm_cfg("gemma-4-12b-it")
+    assert _mgr()._resolve_servable_model("gemma-4-12b-it", cfg) == "gemma-4-12b-it"
+
+
+def test_excludes_safetensors_diffusion_checkpoint(tmp_hal0_home):
+    # A .safetensors checkpoint mislabelled chat must not be a fallback target.
+    _add_model(
+        tmp_hal0_home,
+        id="v1-5-pruned-emaonly",
+        capability="chat",
+        size_bytes=4_000_000_000,
+        suffix=".safetensors",
+    )
+    cfg = _llm_cfg("gemma-4-12b-it")
+    assert _mgr()._resolve_servable_model("gemma-4-12b-it", cfg) == "gemma-4-12b-it"
+
+
+def test_excludes_image_capability_model(tmp_hal0_home):
+    # An explicit image-capability model is never a text-slot fallback even
+    # when it is the only candidate carrying the requested 'chat' cap too.
+    gguf = Path(tmp_hal0_home) / "flux-dev.gguf"
+    gguf.write_bytes(b"\0")
+    ModelRegistry().add(
+        Model(
+            id="flux-dev",
+            name="flux-dev",
+            path=str(gguf),
+            size_bytes=12_000_000_000,
+            capabilities=["chat", "image"],
+        )
+    )
+    cfg = _llm_cfg("gemma-4-12b-it")
+    assert _mgr()._resolve_servable_model("gemma-4-12b-it", cfg) == "gemma-4-12b-it"
+
+
+def test_name_similarity_beats_larger_unrelated_chat_model(tmp_hal0_home):
+    # A much larger but unrelated chat model must lose to the look-alike that
+    # shares leading tokens with the configured (ghost) id.
+    _add_model(tmp_hal0_home, id="qwen3-coder-30b", capability="chat", size_bytes=30_000_000_000)
+    lookalike = _add_model(
+        tmp_hal0_home, id="gemma-4-12b-it-ud-q4-k-xl", capability="chat", size_bytes=6_900_000_000
+    )
+    cfg = _llm_cfg("gemma-4-12b-it")
+    assert _mgr()._resolve_servable_model("gemma-4-12b-it", cfg) == lookalike
+
+
+def test_size_tiebreak_when_no_name_similarity(tmp_hal0_home):
+    # No candidate shares a leading token with the ghost id → size wins
+    # (legacy behaviour preserved).
+    _add_model(tmp_hal0_home, id="alpha-chat", capability="chat", size_bytes=1_000_000_000)
+    big = _add_model(tmp_hal0_home, id="beta-chat", capability="chat", size_bytes=9_000_000_000)
+    cfg = _llm_cfg("zeta-ghost-id")
+    assert _mgr()._resolve_servable_model("zeta-ghost-id", cfg) == big

@@ -2105,7 +2105,7 @@ class SlotManager:
         capability = _SLOT_TYPE_TO_CAPABILITY.get(slot_type)
         if not capability:
             return model_id
-        fallback = self._fallback_local_model(capability)
+        fallback = self._fallback_local_model(capability, configured_id=model_id)
         if fallback is None or fallback.id == model_id:
             return model_id
         log.warning(
@@ -2119,10 +2119,27 @@ class SlotManager:
         return fallback.id
 
     @staticmethod
-    def _fallback_local_model(capability: str):
-        """Largest locally-registered model (file on disk) whose capabilities
-        include ``capability``; ``None`` when none match. Deterministic:
-        largest-on-disk first, tie-broken by id."""
+    def _fallback_local_model(capability: str, configured_id: str = ""):
+        """Pick a locally-registered model (file on disk) to stand in for a
+        non-servable slot default.
+
+        Candidates must carry ``capability`` AND a real on-disk file. They are
+        additionally filtered through :func:`_looks_diffusion_or_nontext` so an
+        image/video/diffusion artifact (which :func:`discover._guess_capability`
+        may have mislabelled ``chat``) can never be served into a text slot —
+        the live ``ltx-2-19b-dev-fp8`` incident, where a 25GB video model was
+        the largest "chat" candidate and llama-server then failed to load it.
+
+        Selection order (a text slot wants a look-alike of its configured id,
+        not merely the biggest model on the box):
+          1. **Name similarity** — the candidate sharing the most leading
+             hyphen tokens with ``configured_id`` (e.g. ``gemma-4-12b-it`` →
+             ``gemma-4-12b-it-ud-q4-k-xl``). Ties broken by larger size, then id.
+          2. **Size** — only when nothing shares a leading token: the largest
+             on-disk model, tie-broken by id (the legacy behaviour).
+
+        ``None`` when no candidate matches.
+        """
         try:
             from hal0.registry.store import ModelRegistry
         except ImportError:
@@ -2136,6 +2153,11 @@ class SlotManager:
             caps = getattr(m, "capabilities", None) or []
             if capability not in caps:
                 continue
+            # Never serve a diffusion/image/video artifact into a text slot,
+            # even if it leaked into the chat candidate pool via a default
+            # capability guess (see _looks_diffusion_or_nontext).
+            if _looks_diffusion_or_nontext(m):
+                continue
             path = getattr(m, "path", "") or ""
             if not path:
                 continue
@@ -2147,7 +2169,25 @@ class SlotManager:
             candidates.append(m)
         if not candidates:
             return None
-        candidates.sort(key=lambda m: (-(getattr(m, "size_bytes", 0) or 0), m.id))
+        config_tokens = _id_tokens(configured_id)
+
+        def _shared_leading(m) -> int:
+            return _leading_token_overlap(config_tokens, _id_tokens(getattr(m, "id", "")))
+
+        best_overlap = max(_shared_leading(m) for m in candidates)
+        if best_overlap > 0:
+            # Prefer the closest name match; size + id only tie-break peers
+            # that share the same number of leading tokens.
+            candidates.sort(
+                key=lambda m: (
+                    -_shared_leading(m),
+                    -(getattr(m, "size_bytes", 0) or 0),
+                    getattr(m, "id", ""),
+                )
+            )
+        else:
+            # Nothing resembles the configured id — fall back to size.
+            candidates.sort(key=lambda m: (-(getattr(m, "size_bytes", 0) or 0), m.id))
         return candidates[0]
 
     @staticmethod
@@ -2695,6 +2735,97 @@ _SLOT_TYPE_TO_CAPABILITY: dict[str, str] = {
     "tts": "tts",
     "image": "image",
 }
+
+# ── Diffusion / non-text fallback guard (#940 hardening) ──────────────────────
+#
+# discover._guess_capability defaults any unrecognised gguf to "chat", so
+# video/image/diffusion ggufs land in the chat candidate pool. Combined with
+# the fallback's old "largest-first" pick this grabbed the biggest wrong model
+# — live, the chat utility slot fell back to ltx-2-19b-dev-fp8, a 25GB VIDEO
+# diffusion model, which llama-server then failed to load. The fallback must
+# never select an image/video/diffusion/non-text model for a text slot, so we
+# screen candidates by several independent signals before they qualify.
+
+#: Substrings in a model id / name / path that mark a diffusion / image /
+#: video artifact (matched on a normalised lower-case, separator-collapsed
+#: form so ``sd-``/``sd_``/``SDXL`` all hit). Word-ish tokens are matched on
+#: token boundaries; the rest are plain substring contains.
+_DIFFUSION_NAME_TOKENS: frozenset[str] = frozenset(
+    {"sdxl", "sd", "flux", "ltx", "wan", "comfyui", "turbo", "refiner", "upscaler", "esrgan", "vae"}
+)
+_DIFFUSION_NAME_SUBSTRINGS: tuple[str, ...] = ("diffus", "lora", "unet", "controlnet")
+#: Non-text model file suffixes the llama-server / FLM text providers cannot
+#: serve — a gguf default-guessed as chat is fine, these are not. Kept to the
+#: diffusion/checkpoint formats; ``.bin`` is deliberately excluded (ggml ASR
+#: weights use it and are legitimately text-adjacent).
+_NONTEXT_MODEL_SUFFIXES: frozenset[str] = frozenset({".safetensors", ".ckpt", ".pth", ".onnx"})
+#: Capabilities that are inherently non-text. A candidate advertising any of
+#: these can never serve a chat/embed/rerank/asr/tts slot.
+_NONTEXT_CAPABILITIES: frozenset[str] = frozenset({"image", "video"})
+
+
+def _looks_diffusion_or_nontext(model: Any) -> bool:
+    """True when *model* looks like a diffusion / image / video / non-text artifact.
+
+    Robust to mislabelled capabilities: a video gguf that
+    :func:`discover._guess_capability` defaulted to ``chat`` is still caught
+    by its id/name/path tokens and (for non-gguf checkpoints) its file suffix.
+    Conservative — only fires on strong signals so a legitimately-named text
+    model (e.g. ``wandb``-tagged) is not excluded by an accidental substring.
+    """
+    caps = {str(c).lower() for c in (getattr(model, "capabilities", None) or [])}
+    if caps & _NONTEXT_CAPABILITIES:
+        return True
+    tags = {str(t).lower() for t in (getattr(model, "tags", None) or [])}
+    if tags & _NONTEXT_CAPABILITIES or "diffusion" in tags:
+        return True
+    path = str(getattr(model, "path", "") or "")
+    if path:
+        suffix = Path(path).suffix.lower()
+        if suffix in _NONTEXT_MODEL_SUFFIXES:
+            return True
+    haystacks = (
+        str(getattr(model, "id", "") or ""),
+        str(getattr(model, "name", "") or ""),
+        path,
+    )
+    for raw in haystacks:
+        if not raw:
+            continue
+        tokens = set(_id_tokens(raw))
+        if tokens & _DIFFUSION_NAME_TOKENS:
+            return True
+        collapsed = raw.lower()
+        if any(sub in collapsed for sub in _DIFFUSION_NAME_SUBSTRINGS):
+            return True
+    return False
+
+
+def _id_tokens(value: str) -> list[str]:
+    """Split a model id / name / path into lower-case alphanumeric tokens.
+
+    ``gemma-4-12b-it_UD-Q4_K_XL`` → ``['gemma', '4', '12b', 'it', 'ud', ...]``.
+    Any run of non-alphanumeric characters is a separator, so ``sd-``, ``sd_``,
+    ``sd.`` and ``SDXL`` all tokenise predictably.
+    """
+    return [tok for tok in re.split(r"[^a-z0-9]+", value.lower()) if tok]
+
+
+def _leading_token_overlap(a: list[str], b: list[str]) -> int:
+    """Count of shared leading tokens between two token lists.
+
+    Used to rank fallback candidates by name similarity to the configured id:
+    ``gemma-4-12b-it`` vs ``gemma-4-12b-it-ud-q4-k-xl`` shares 4 leading
+    tokens, beating an unrelated (0-overlap) but larger chat model.
+    """
+    if not a or not b:
+        return 0
+    shared = 0
+    for x, y in zip(a, b, strict=False):
+        if x != y:
+            break
+        shared += 1
+    return shared
 
 
 def _cfg_to_dict(cfg: SlotConfig | dict[str, Any]) -> dict[str, Any]:
