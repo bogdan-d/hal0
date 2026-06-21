@@ -934,7 +934,7 @@ def _live_resolve_enabled() -> bool:
     """Single source of truth for live-resolve mode.
 
     Live-resolve is the hal0 default: ``model.default`` → the virtual
-    ``hal0/primary`` and ``providers.custom`` → the hal0-api gateway
+    ``hal0/chat`` and ``providers.custom`` → the hal0-api gateway
     (:8080/v1) with ``discover_models`` + an api_key, so Hermes' model picker
     live-discovers every loaded slot (responsive, auto-updating, context-aware)
     instead of pinning one physical backend. hal0-api always serves
@@ -1019,7 +1019,7 @@ def _build_config_overlay(
     from live ``/v1/models`` discovery instead).
 
     Under live-resolve (the hal0 default) ``model.default`` is the virtual
-    ``hal0/primary`` against the gateway with ``discover_models`` on, so the
+    ``hal0/chat`` against the gateway with ``discover_models`` on, so the
     picker live-discovers every loaded slot. ``HAL0_HERMES_LIVE_RESOLVE=0``
     pins the single physical backend instead.
     """
@@ -1029,7 +1029,7 @@ def _build_config_overlay(
     # model.* — the OpenAI-compatible-LAN wiring. ``provider: custom`` is
     # hermes's built-in bucket for Ollama/vLLM/llama.cpp endpoints; hal0 is
     # that endpoint. max_tokens guards the thinking-model silent-TUI (#635).
-    pairs.append(("model.default", "hal0/primary" if live_resolve_enabled else primary["model_id"]))
+    pairs.append(("model.default", "hal0/chat" if live_resolve_enabled else primary["model_id"]))
     pairs += [
         ("model.provider", "custom"),
         ("model.base_url", base_url),
@@ -1319,7 +1319,7 @@ def _phase_config_write(ctx: PhaseContext) -> PhaseResult:
                 "site": "primary_slot",
                 "detail": (
                     "no ready llm slot — overlay points model.default at the "
-                    "hal0/primary virtual against the gateway"
+                    "hal0/chat virtual against the gateway"
                 ),
             }
         )
@@ -2905,7 +2905,7 @@ def _phase_model_automap(ctx: PhaseContext) -> PhaseResult:
     base_url = "http://127.0.0.1:8080/v1" if live_resolve_enabled else primary_raw["base_url"]
 
     pairs: list[tuple[str, Any]] = [
-        ("model.default", "hal0/primary" if live_resolve_enabled else primary_raw["model"]),
+        ("model.default", "hal0/chat" if live_resolve_enabled else primary_raw["model"]),
         ("model.provider", "custom"),
         ("model.base_url", base_url),
     ]

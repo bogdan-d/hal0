@@ -28,7 +28,7 @@ PANE_COPY: dict[str, PaneCopy] = {
     ),
     "main": PaneCopy(
         "Your Main model",
-        "The primary model every app and agent routes to (hal0/primary). "
+        "The primary model every app and agent routes to (hal0/chat). "
         "We recommend the largest pick that fits your memory.",
     ),
     "agent": PaneCopy(

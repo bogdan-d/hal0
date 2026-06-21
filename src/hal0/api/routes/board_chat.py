@@ -52,9 +52,9 @@ _MAX_ROUNDS = 8
 
 # The slot the orchestrator drives. Points at the `agent` slot — the
 # tool-calling orchestrator model — rather than the conversational `chat`
-# slot (hal0/primary): board chat IS an agentic surface (it drives audited
+# slot (hal0/chat): board chat IS an agentic surface (it drives audited
 # board mutations via tool-calls), so the agent model is the correct brain.
-# (Named PRIMARY_SLOT_MODEL for back-compat; resolves via the hal0/ alias map.)
+# (Named PRIMARY_SLOT_MODEL for back-compat; resolves via the resolver chains.)
 PRIMARY_SLOT_MODEL = "hal0/agent"
 
 #: LLM backend signature: an OpenAI chat-completion request body in, the

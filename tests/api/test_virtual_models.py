@@ -6,8 +6,8 @@ loaded, and that each row carries a context_length field (required by
 Hermes' custom provider for correct context-window sizing).
 
 #654: the canonical chat virtual name is ``hal0/chat`` (was ``hal0/primary``).
-``hal0/primary`` remains a HIDDEN back-compat alias — it resolves for dispatch
-but is NOT advertised in /v1/models.
+The ``hal0/primary`` alias has since been removed — it is neither advertised in
+/v1/models nor resolvable for dispatch.
 """
 
 from __future__ import annotations
@@ -52,7 +52,7 @@ def test_virtual_rows_do_not_duplicate(client, monkeypatch):
 
 
 def test_legacy_primary_virtual_name_is_hidden(client, monkeypatch):
-    """#654: hal0/primary is a hidden alias — it must NOT be advertised."""
+    """#654: hal0/primary was removed — it must NOT be advertised in /v1/models."""
 
     async def fake_views(request):
         return _views()

@@ -57,7 +57,7 @@ _PRIMARY = [
 @pytest.mark.asyncio
 async def test_virtual_name_resolved_and_thinking_injected():
     req = _make_request(cfgs=_PRIMARY, loaded={"big"})
-    out = await v1._normalize_chat_body(req, {"model": "hal0/primary", "messages": []})
+    out = await v1._normalize_chat_body(req, {"model": "hal0/chat", "messages": []})
     assert out["model"] == "big"
     assert out["chat_template_kwargs"]["enable_thinking"] is False
 
@@ -83,7 +83,7 @@ async def test_remote_model_not_thinking_injected():
 @pytest.mark.asyncio
 async def test_caller_top_level_thinking_translated_to_kwarg():
     req = _make_request(cfgs=_PRIMARY, loaded={"big"})
-    out = await v1._normalize_chat_body(req, {"model": "hal0/primary", "enable_thinking": True})
+    out = await v1._normalize_chat_body(req, {"model": "hal0/chat", "enable_thinking": True})
     # #487: top-level enable_thinking is translated to the chat-template lever
     # (a bare /no_think marker is ineffective on abliterated Qwen3), not passed through.
     assert out["chat_template_kwargs"]["enable_thinking"] is True
@@ -123,7 +123,7 @@ async def test_request_body_rewritten_for_downstream_consumers():
     import json
 
     req = _make_request(cfgs=_PRIMARY, loaded={"big"})
-    await v1._normalize_chat_body(req, {"model": "hal0/primary", "messages": []})
+    await v1._normalize_chat_body(req, {"model": "hal0/chat", "messages": []})
     # any downstream consumer re-reading request.body() must observe the
     # normalized body, so request._body carries the rewrite
     assert json.loads(req._body)["model"] == "big"
@@ -168,7 +168,7 @@ async def test_omni_path_receives_normalized_body(monkeypatch):
     from hal0.normalize.resolver import SlotView
 
     # Pin the resolver inputs so resolution is deterministic regardless of
-    # alias-map internals: hal0/primary -> "big" (loaded on gpu-vulkan).
+    # alias-map internals: hal0/chat -> "big" (loaded on gpu-vulkan).
     async def _fake_views(request):
         return [
             SlotView(
@@ -191,7 +191,7 @@ async def test_omni_path_receives_normalized_body(monkeypatch):
 
     monkeypatch.setattr(v1, "_maybe_run_omni_loop", _fake_omni)
 
-    raw = json.dumps({"model": "hal0/primary", "omni": True, "messages": []}).encode("utf-8")
+    raw = json.dumps({"model": "hal0/chat", "omni": True, "messages": []}).encode("utf-8")
     req = _OmniRequest(raw)
 
     resp = await v1.chat_completions(req, dispatcher=None)
@@ -241,7 +241,7 @@ class _FakeDispatcher:
 async def test_chat_template_kwargs_opt_out_through_seam():
     req = _make_request(cfgs=_PRIMARY, loaded={"big"})
     out = await v1._normalize_chat_body(
-        req, {"model": "hal0/primary", "chat_template_kwargs": {"enable_thinking": True}}
+        req, {"model": "hal0/chat", "chat_template_kwargs": {"enable_thinking": True}}
     )
     assert "enable_thinking" not in out
     assert out["chat_template_kwargs"] == {"enable_thinking": True}
