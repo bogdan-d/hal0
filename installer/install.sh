@@ -1324,16 +1324,40 @@ else
         # the drop-in BEFORE first start so platforms connect on boot.
         # HERMES_HOME is unset so the generator bakes the hal0 default
         # (~/.hermes), not a value inherited from the installer env.
+        #
+        # `hermes gateway install` on the systemd path PROMPTS interactively
+        # ("Start the gateway now…?" / "…on boot?") with no flag to bypass.
+        # The installer's contract is non-interactive (see DEBIAN_FRONTEND
+        # above), so we feed it </dev/null: a TTY-less read hits EOF and
+        # hermes falls back to its built-in defaults (install + enable on
+        # boot + start now). Without this, two failure modes appear:
+        #   - on a real TTY the install BLOCKS on the prompt;
+        #   - under a launcher that *closes* fd 0 (some headless/CI runners),
+        #     hermes' input() raises `RuntimeError: lost sys.stdin` — which it
+        #     does NOT catch — so the install aborts AFTER printing the prompt
+        #     but BEFORE writing the unit file. That is what produced the
+        #     "Unit file hermes-gateway.service does not exist" error below.
+        # Redirecting from /dev/null turns that crash into a clean EOF.
+        GATEWAY_UNIT_DST="${UNIT_DIR}/hermes-gateway.service"
         info "installing system-scope hermes gateway (User=hal0)"
-        env -u HERMES_HOME /var/lib/hal0/venvs/hermes/bin/hermes gateway install --system --run-as-user hal0 \
+        env -u HERMES_HOME /var/lib/hal0/venvs/hermes/bin/hermes gateway install --system --run-as-user hal0 </dev/null \
             || warn "hermes gateway install failed — Telegram/Discord bridge unavailable; continuing"
-        systemctl daemon-reload
-        systemctl enable --now hermes-gateway.service \
-            || warn "hermes-gateway enable returned non-zero — continuing (check 'journalctl -u hermes-gateway -n 40')"
-        if wait_active hermes-gateway.service 20; then
-            info "hermes-gateway is running (Telegram/Discord)"
+        # Only enable/start if hermes actually laid down the unit. If the
+        # install genuinely failed the file is absent; `systemctl enable` would
+        # otherwise emit a scary "Unit file … does not exist" error and trip
+        # the ERR trap. Skip honestly with a warning instead.
+        if [[ -f "${GATEWAY_UNIT_DST}" ]]; then
+            systemctl daemon-reload
+            systemctl enable --now hermes-gateway.service \
+                || warn "hermes-gateway enable returned non-zero — continuing (check 'journalctl -u hermes-gateway -n 40')"
+            if wait_active hermes-gateway.service 20; then
+                info "hermes-gateway is running (Telegram/Discord)"
+            else
+                warn "hermes-gateway not yet active; check 'journalctl -u hermes-gateway -n 40'"
+            fi
         else
-            warn "hermes-gateway not yet active; check 'journalctl -u hermes-gateway -n 40'"
+            warn "hermes-gateway unit not installed (${GATEWAY_UNIT_DST} missing) — Telegram/Discord bridge unavailable"
+            warn "  retry with 'sudo -u hal0 env -u HERMES_HOME /var/lib/hal0/venvs/hermes/bin/hermes gateway install --system --run-as-user hal0 </dev/null'"
         fi
     elif [[ -f "${AGENT_UNIT_DST}" ]]; then
         # No venv after the provision block: it was skipped (HAL0_SKIP_HERMES=1)
