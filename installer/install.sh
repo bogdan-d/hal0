@@ -823,10 +823,31 @@ else
         warn "  (only the host 'flm validate' probe is disabled). Install FastFlowLM manually if upstream ships a build for this host."
     fi
 
-    # libxrt-npu2 — best-effort. Available only when the host's apt sources
-    # carry an XRT NPU build (e.g. a pre-existing vendor repo on upgraded
-    # boxes). The FLM container image bundles its own runtime, so a miss here
-    # only disables the HOST `flm validate` probe, not the npu slot itself.
+    # The FastFlowLM .deb hard-depends on libxrt2 + libxrt-npu2 (AMDXDNA NPU
+    # runtime), which ship from the lemonade-team PPA — NOT Ubuntu's own repos.
+    # Without the PPA a fresh box hits `fastflowlm : Depends: libxrt-npu2 but it
+    # is not installable` and skips FLM entirely. Add the PPA (Ubuntu only — it
+    # builds for `noble`; the FLM container bundles its own runtime so this is
+    # only for the host `flm validate` probe) before the libxrt install.
+    # Best-effort + idempotent: a failure here just disables host NPU probing;
+    # GPU/CPU hal0 is unaffected.
+    if [[ "$(distro_id)" == "ubuntu" ]] \
+        && ! apt-cache policy libxrt-npu2 2>/dev/null | grep -q lemonade-team; then
+        if command -v add-apt-repository >/dev/null 2>&1 \
+            || apt-get install -y software-properties-common >/dev/null 2>&1; then
+            if add-apt-repository -y ppa:lemonade-team/stable >/dev/null 2>&1; then
+                apt-get update -qq >/dev/null 2>&1 || true
+                info "added lemonade-team PPA (libxrt-npu2 / AMDXDNA NPU runtime)"
+            else
+                warn "could not add lemonade-team PPA — host NPU libs (libxrt-npu2) may be unavailable"
+            fi
+        fi
+    fi
+
+    # libxrt-npu2 — best-effort. Resolved from the lemonade-team PPA added above
+    # (or a pre-existing vendor repo on upgraded boxes). The FLM container image
+    # bundles its own runtime, so a miss here only disables the HOST `flm
+    # validate` probe, not the npu slot itself.
     if apt-get install -y libxrt-npu2 >/dev/null 2>&1; then
         info "libxrt-npu2 installed (AMDXDNA NPU runtime for the host flm probe)"
     else
