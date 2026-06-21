@@ -1,0 +1,24 @@
+#!/bin/bash
+# Privileged seam for the unprivileged hal0-api: only ever touches hal0-slot@<name>.
+#
+# Background (D hardened-perms): hal0-api can run as the unprivileged `hal0`
+# system user while the per-slot podman containers stay rootful (the container
+# IS the sandbox boundary). The only two root operations the orchestrator
+# needs are (a) writing the per-slot unit under /etc/systemd/system and (b)
+# running systemctl on hal0-slot@<name>. Everything else stays unprivileged.
+#
+# This script is the entire privileged surface. The slot-name regex below is a
+# security requirement: it rejects path traversal (../), shell metacharacters
+# (;, &, |), and anything that is not a literal slot name, so the grant in
+# /etc/sudoers.d/hal0-slotctl can never be widened into arbitrary unit control.
+set -euo pipefail
+cmd="${1:-}"; slot="${2:-}"
+[[ "$slot" =~ ^[a-z0-9_-]+$ ]] || { echo "hal0-slotctl: bad slot name" >&2; exit 2; }
+unit="hal0-slot@${slot}.service"
+case "$cmd" in
+  write-unit)  umask 022; cat > "/etc/systemd/system/${unit}"; systemctl daemon-reload ;;   # unit text on stdin
+  remove-unit) rm -f "/etc/systemd/system/${unit}"; systemctl daemon-reload ;;
+  start|stop|restart|enable|disable) systemctl "$cmd" "$unit" ;;
+  reload) systemctl daemon-reload ;;
+  *) echo "hal0-slotctl: bad cmd: ${cmd}" >&2; exit 2 ;;
+esac
