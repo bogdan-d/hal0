@@ -108,6 +108,8 @@ def test_requirements_floor_not_hard_pinned() -> None:
     from hal0.agents.hermes_provision import HERMES_REQUIREMENTS
 
     text = HERMES_REQUIREMENTS.read_text(encoding="utf-8")
-    reqs = [ln.strip() for ln in text.splitlines() if ln.strip() and not ln.lstrip().startswith("#")]
+    reqs = [
+        ln.strip() for ln in text.splitlines() if ln.strip() and not ln.lstrip().startswith("#")
+    ]
     # The single requirement line is the floored+capped spec, not a hard pin.
     assert reqs == ["hermes-agent[web]>=0.14.0,<1.0"]
