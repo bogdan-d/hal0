@@ -111,6 +111,18 @@ def _normalise_id(stem: str) -> str:
     return collapsed or "model"
 
 
+# Filename tokens that mark an image/video diffusion artifact. Classifying
+# these as ``image``/``video`` (instead of defaulting to ``chat``) keeps them
+# out of the chat candidate pool that ``SlotManager._fallback_local_model``
+# draws from — the live ltx-2 incident, where a 25GB video diffusion gguf was
+# default-guessed ``chat`` and selected as the chat slot's fallback. The
+# fallback's own diffusion guard is the must-have backstop; this is defence in
+# depth at the source. Conservative: only well-known families, matched as
+# substrings of the lower-cased filename.
+_VIDEO_NAME_TOKENS = ("ltx", "wan", "hunyuan-video", "hunyuanvideo", "cogvideo", "svd")
+_IMAGE_NAME_TOKENS = ("sdxl", "flux", "stable-diffusion", "stable_diffusion")
+
+
 def _guess_capability(filename: str) -> str:
     """Best-effort capability inference from the filename."""
     lower = filename.lower()
@@ -122,6 +134,12 @@ def _guess_capability(filename: str) -> str:
         return "tts"
     if any(tok in lower for tok in ("whisper", "moonshine", "asr", "stt")):
         return "asr"
+    # Clearly-diffusion media: classify as image/video rather than the chat
+    # default so they never pollute the chat fallback pool (#940 hardening).
+    if any(tok in lower for tok in _VIDEO_NAME_TOKENS):
+        return "video"
+    if any(tok in lower for tok in _IMAGE_NAME_TOKENS):
+        return "image"
     return "chat"
 
 

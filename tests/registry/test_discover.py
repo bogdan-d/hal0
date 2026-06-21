@@ -98,6 +98,19 @@ def test_capability_guess(model_root: Path) -> None:
     assert caps["qwen3-4b-instruct-q4_k_m.gguf"] == "chat"
 
 
+def test_capability_guess_classifies_diffusion_media() -> None:
+    """Clearly-diffusion media files classify as image/video, not the chat
+    default — keeps them out of the chat fallback pool (#940 hardening)."""
+    from hal0.registry.discover import _guess_capability
+
+    assert _guess_capability("ltx-2-19b-dev-fp8.gguf") == "video"
+    assert _guess_capability("wan2.1-t2v-14b.gguf") == "video"
+    assert _guess_capability("flux1-dev.gguf") == "image"
+    assert _guess_capability("sdxl-base-1.0.safetensors") == "image"
+    # A plain chat model is still 'chat' — the new branches are last-resort.
+    assert _guess_capability("qwen3-4b-instruct-q4_k_m.gguf") == "chat"
+
+
 def test_curated_match_by_filename(model_root: Path) -> None:
     """A discovered file whose name matches a curated entry's hf_file
     must surface that curated entry on the candidate."""
