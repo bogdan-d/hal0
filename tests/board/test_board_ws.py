@@ -143,9 +143,7 @@ def test_ws_proxy_forwards_upstream_frames(monkeypatch) -> None:
     assert qs.get("board") == ["alpha"]
 
 
-_DASHBOARD_HTML = (
-    '<!doctype html><script>window.__HERMES_SESSION_TOKEN__="HARVESTED_TOK";</script>'
-)
+_DASHBOARD_HTML = '<!doctype html><script>window.__HERMES_SESSION_TOKEN__="HARVESTED_TOK";</script>'
 
 
 def _make_harvesting_client() -> HermesKanbanClient:

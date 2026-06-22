@@ -91,7 +91,9 @@ async def _pump(
         log.warning("hal0.board_ws.pump_error", direction=direction, error=str(exc))
 
 
-async def _resolve_session_token(browser_ws: WebSocket, *, force_refresh: bool = False) -> str | None:
+async def _resolve_session_token(
+    browser_ws: WebSocket, *, force_refresh: bool = False
+) -> str | None:
     """Resolve the Hermes session bearer for the upstream WS upgrade.
 
     Mirrors the REST path's resolution (``HermesKanbanClient._current_token``):
