@@ -10,6 +10,80 @@ Tags older than v0.2.0 ship release notes inside the GitHub release
 page; this CHANGELOG starts at v0.2.0 (the Lemonade migration cut).
 For ADR-level architecture context see `docs/internal/adr/`.
 
+## [v0.8.0-beta.1] — 2026-06-21
+
+First beta of the 0.8.0 line — the model-config, Hermes, and permissions
+overhaul. Configuration becomes a declarative single source of truth
+(**Stacks** + single-source launch argv), Hermes consolidates onto its own
+config ownership, and `hal0-api` can finally drop root. Voice (TTS + STT)
+lands end-to-end. One behaviour change to be aware of: the `hal0/primary`
+and `hal0/flm` virtual aliases are gone — see **Changed**.
+
+### Added
+- **Stacks — declarative config SSOT.** A `StackConfig` schema plus a
+  `StackApplyEngine` that `plan()`s a Stack into a ChangeSet, `apply_config()`s
+  it as an atomic commit with rollback, and `converge()`s the live slot set
+  (primary-slot load/swap/skip + capability-child routing through the
+  orchestrator). Content-hash drift detection and an active-stack pointer,
+  export/import via a checksummed `.hal0stack.json` envelope, snapshot of live
+  config into a Stack, and a `StacksCatalog` CRUD with seed guards. Seed stacks
+  (saber / forge / pi) derived from the roster bench.
+  (#921, #923, #925, #926)
+- **Voice stack — TTS + STT.** Brought up and verified end-to-end: `voice_wire`
+  fixed, Open WebUI Call mode wired, and the NPU-trio facade auto-provisions
+  STT. (#924, #928)
+- **Single-source slot argv (overhaul stream A).** A resolver dedups the launch
+  flag soup down to a last-wins canonical command; per-flag provenance is
+  exposed at `GET /api/slots/{name}/resolved`, and the slot Edit drawer renders
+  the resolved command with per-flag source badges (base / profile /
+  extra_args). (#929, #930, #931, #932)
+- **Capability-based slot fallback.** When a slot's `model.default` isn't
+  locally servable (registered-but-no-file, or pulled-away), `load()` falls back
+  to the best locally-registered model matching the slot's capability —
+  excluding diffusion / image / video models and preferring name-similarity to
+  the configured id. (#940, #942)
+- **Hardened permissions — run `hal0-api` unprivileged (opt-in).** Set
+  `HAL0_USER=hal0` and the installer drops the API off root: a declarative
+  ownership table (audited read-only by `hal0 doctor perms`), a narrow
+  privileged seam (`hal0-slotctl` + a no-wildcard sudoers grant) so the
+  unprivileged API can still write per-slot units and drive `hal0-slot@*`, and
+  a codified flip (run-as drop-in + recursive chown of config + state, pruning
+  `agents/` + `secrets/` + the models dir). Slot containers stay rootful — the
+  container remains the sandbox boundary. Default `HAL0_USER=root` is
+  byte-for-byte unchanged. (#929, #943, #944, #945)
+- **Hermes owns its own config.** The runtime is unpinned with a real upgrade
+  path, and a config-set overlay replaces the whole-file `config.yaml` render —
+  Hermes owns and self-migrates its config while hal0 layers only its keys.
+  (#934, #938)
+- **Chat-template render-validation.** The template catalog is render-validated
+  so a broken template can no longer ship silently. (#917)
+
+### Changed
+- **Breaking — `hal0/primary` and `hal0/flm` virtual aliases removed.** Virtual
+  model names now map 1:1 to their resolution chains; `hal0/primary` no longer
+  resolves (use `hal0/chat`) and `hal0/flm` is gone (use `hal0/npu`). Slot-name
+  back-compat is intentionally kept, and the Hermes overlay now emits
+  `model.default: hal0/chat`. (#939)
+- **q8_0 KV cache, universally.** Main and MTP-draft KV caches are now `q8_0`
+  across slots — near-lossless and keeps fused FlashAttention on AMD HIP. (#933)
+- **Profiles** lift bench-tuned MTP config into `rocm-moe` / `rocm-dnse`. (#922)
+- **Open WebUI** disables PersistentConfig so the env prewire wins the chat
+  connection. (#927)
+- Docs mirrored from hal0-web.
+
+### Fixed
+- **Installer** — `setup --storage-dir` is passed as a separate argv token so
+  fresh `--models-dir` installs seed slots correctly (#946); the hardened-perms
+  flip chowns config + state recursively so a root→hal0 upgrade doesn't strand
+  root-owned state subdirs (#945); `hermes gateway install` runs
+  non-interactively and skips `enable` when the unit is absent (#941); a
+  lemonade-team PPA is added so the FLM/NPU `.deb` resolves on a fresh Ubuntu
+  box (#937); the registry scans the effective store / pull_root rather than
+  only declared roots (#935).
+- **Hermes gateway** marks its `EnvironmentFile` optional (`-`) so fresh
+  installs don't crash-loop on a missing secrets vault. (#936)
+- **Dependencies** — bump vulnerable deps flagged by Dependabot. (#919)
+
 ## [v0.7.3-beta.2] — 2026-06-19
 
 Second beta in the 0.7.3 line. Vision lands on the chat slot, idle slots
