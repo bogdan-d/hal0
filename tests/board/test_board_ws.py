@@ -9,6 +9,7 @@ from __future__ import annotations
 import contextlib
 from urllib.parse import parse_qs, urlsplit
 
+import httpx
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from starlette.datastructures import QueryParams
@@ -18,6 +19,7 @@ import hal0.api.routes.board_ws as board_ws_mod
 from hal0.api.middleware.error_codes import install as install_errors
 from hal0.api.routes import board
 from hal0.api.routes.board_ws import _build_upstream_url, _http_to_ws
+from hal0.board import HermesKanbanClient
 
 # ── _http_to_ws ──────────────────────────────────────────────────────────────
 
@@ -139,6 +141,68 @@ def test_ws_proxy_forwards_upstream_frames(monkeypatch) -> None:
     assert qs.get("token") == ["TOK"]
     assert qs.get("since") == ["0"]
     assert qs.get("board") == ["alpha"]
+
+
+_DASHBOARD_HTML = '<!doctype html><script>window.__HERMES_SESSION_TOKEN__="HARVESTED_TOK";</script>'
+
+
+def _make_harvesting_client() -> HermesKanbanClient:
+    """A real client whose MockTransport serves the dashboard HTML at ``/``.
+
+    No env pin → the client harvests ``window.__HERMES_SESSION_TOKEN__`` from
+    the HTML, exactly as it does against the live loopback dashboard.
+    """
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/":
+            return httpx.Response(200, text=_DASHBOARD_HTML)
+        return httpx.Response(200, json={})
+
+    http = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="http://127.0.0.1:9119"
+    )
+    return HermesKanbanClient(http_client=http)
+
+
+def test_ws_proxy_harvests_token_when_env_unpinned(monkeypatch) -> None:
+    """Regression: the events WS must use the HARVESTED session token, not just
+    the ``HERMES_SESSION_TOKEN`` env pin.
+
+    Production never pins the env var (the per-process token rotates), so the
+    bridge relied on harvest for REST but sent NO token on the WS upgrade —
+    Hermes answered 403 and live task events never reached the board. This
+    asserts the upstream connect URL carries the harvested bearer with the env
+    var explicitly unset.
+    """
+    monkeypatch.setenv("HERMES_DASHBOARD_BASE_URL", "http://127.0.0.1:9119")
+    monkeypatch.delenv("HERMES_SESSION_TOKEN", raising=False)
+
+    frame = '{"events":[{"id":1}],"cursor":1}'
+    connect_calls: list[str] = []
+
+    async def fake_connect(url, **kwargs):
+        connect_calls.append(url)
+        return _FakeUpstreamWS([frame])
+
+    monkeypatch.setattr(board_ws_mod.websockets, "connect", fake_connect)
+
+    app = FastAPI()
+    install_errors(app)
+    app.include_router(board.router, prefix="/api/board")
+    app.state.hermes_kanban = _make_harvesting_client()
+    client = TestClient(app, raise_server_exceptions=False)
+
+    received: list[str] = []
+    with (
+        client.websocket_connect("/api/board/events?since=0") as ws,
+        contextlib.suppress(Exception),
+    ):
+        received.append(ws.receive_text())
+
+    assert received == [frame]
+    assert len(connect_calls) == 1
+    qs = parse_qs(urlsplit(connect_calls[0]).query)
+    assert qs.get("token") == ["HARVESTED_TOK"]
 
 
 def test_ws_proxy_upstream_connect_fails_closes_browser(monkeypatch) -> None:
