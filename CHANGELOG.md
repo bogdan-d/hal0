@@ -10,6 +10,25 @@ Tags older than v0.2.0 ship release notes inside the GitHub release
 page; this CHANGELOG starts at v0.2.0 (the Lemonade migration cut).
 For ADR-level architecture context see `docs/internal/adr/`.
 
+## [v0.8.0-beta.2] — 2026-06-22
+
+Bugfix release on the 0.8.0 beta line. No behaviour changes beyond the two
+fixes below — a safe upgrade from v0.8.0-beta.1. First release to carry #948.
+
+### Fixed
+- **Operator Board live updates restored.** The board's events-WS proxy
+  (`/api/board/events`) resolved its upstream Hermes session token from the
+  `HERMES_SESSION_TOKEN` env var only, while the REST path harvests the
+  rotating per-process token from the dashboard HTML. With no env pin (the
+  default), the WS connected upstream with no token, Hermes rejected the
+  upgrade (403), and the browser socket died with 1011 — so tasks created in
+  Hermes loaded on refresh but never pushed live to the board. The WS bridge
+  now shares the REST client's token resolution (env-pin → HTML-harvest →
+  rotation cache) and re-harvests + retries once on connect failure. (#949)
+- **Hermes privileged env seam.** A privileged env-write seam lets the
+  unprivileged provisioner write `root:root` `.env` files, so Hermes agent
+  config provisioning works under the dropped-root `hal0-api`. (#948)
+
 ## [v0.8.0-beta.1] — 2026-06-21
 
 First beta of the 0.8.0 line — the model-config, Hermes, and permissions
