@@ -28,7 +28,7 @@ shared inference daemon; no extra process to babysit.
 curl -fsSL https://hal0.dev/install.sh | bash
 ```
 
-> **Status:** **v0.8.0-beta.1** — container-runtime era, declarative
+> **Status:** **v0.8.0-beta.2** — container-runtime era, declarative
 > config. Each slot (`chat`, `embed`, `rerank`, `stt`, `tts`, `img`, NPU
 > trio) runs as a dedicated podman container (`hal0-slot@<name>.service`).
 > Slot definitions live in `/etc/hal0/slots/<name>.toml`; backend profiles
