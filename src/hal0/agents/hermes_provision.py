@@ -3194,6 +3194,52 @@ def _merge_env_file(path: Path, updates: dict[str, str]) -> None:
         path.chmod(0o600)
 
 
+#: Privileged seam for writing the root:root agent .env files when hal0-api runs
+#: unprivileged (D hardened-perms). Mirrors the hal0-slotctl seam: a non-root
+#: provisioner cannot write the secrets vault
+#: (/var/lib/hal0/secrets/agents/<agent>.env, 0600 root:root) or the driver env
+#: (/etc/hal0/agents/<agent>.env, 0644 root:root) directly, so it delegates the
+#: write to this root helper over `sudo -n`. Env-overridable for tests.
+_HAL0_AGENTENV = os.environ.get("HAL0_AGENTENV", "/usr/lib/hal0/bin/hal0-agentenv")
+
+#: The agent this provisioner manages; the seam re-validates it server-side.
+_HERMES_AGENT_NAME = "hermes"
+
+
+def _privileged_env_write(verb: str, body: str) -> None:
+    """Pipe ``body`` to the hal0-agentenv seam as root via ``sudo -n``.
+
+    The unprivileged path for an env write that lands in a root:root dir. Raises
+    ``subprocess.CalledProcessError`` on a non-zero seam exit (no sudo grant,
+    bad verb, write failure) so the caller surfaces it loudly — the optional
+    ``EnvironmentFile=-`` would otherwise let a swallowed failure masquerade as
+    "gateway up, no tokens".
+    """
+    subprocess.run(  # nosec B603 — fixed argv; agent name re-validated by the seam
+        ["sudo", "-n", _HAL0_AGENTENV, verb, _HERMES_AGENT_NAME],
+        input=body,
+        text=True,
+        check=True,
+    )
+
+
+def _write_secrets_env(updates: dict[str, str]) -> None:
+    """Merge ``updates`` into the root:root secrets vault, privilege-aware.
+
+    Root (install-time) writes directly via :func:`_merge_env_file` and re-pins
+    the file root:root. Unprivileged (the flipped hal0-api at runtime) routes
+    the merge through the hal0-agentenv seam, which read-merges AS ROOT so the
+    0600 vault never has to be readable by the ``hal0`` user.
+    """
+    if os.geteuid() == 0:
+        _merge_env_file(HERMES_SECRETS_ENV, updates)
+        with contextlib.suppress(OSError):
+            os.chown(HERMES_SECRETS_ENV, 0, 0)
+    else:
+        body = "".join(f"{k}={v}\n" for k, v in updates.items())
+        _privileged_env_write("merge-secrets", body)
+
+
 def _phase_voice_wire(ctx: PhaseContext) -> PhaseResult:
     """Emit STT/TTS provider config + secrets env when both slots are ready.
 
@@ -3226,8 +3272,8 @@ def _phase_voice_wire(ctx: PhaseContext) -> PhaseResult:
         details["tts"] = {"backend_url": url, "model": _slot_model_id(tts)}
 
     try:
-        _merge_env_file(HERMES_SECRETS_ENV, updates)
-    except OSError as exc:
+        _write_secrets_env(updates)
+    except (OSError, subprocess.SubprocessError) as exc:
         return PhaseResult(
             status=PhaseStatus.FAIL,
             reason=f"secrets env write to {HERMES_SECRETS_ENV} failed: {exc}",
@@ -3626,10 +3672,17 @@ def _write_driver_env(state: BootstrapState) -> tuple[Path, bool]:
                 return path, False
         except OSError:
             pass
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".env.tmp")
-    tmp.write_text(body, encoding="utf-8")
-    os.replace(tmp, path)
+    if os.geteuid() == 0:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".env.tmp")
+        tmp.write_text(body, encoding="utf-8")
+        os.replace(tmp, path)
+        with contextlib.suppress(OSError):
+            os.chown(path, 0, 0)
+    else:
+        # Driver env lives in root:root /etc/hal0/agents — delegate the write
+        # to the seam (it builds the path from the validated agent name).
+        _privileged_env_write("write-driver-env", body)
     return path, True
 
 
