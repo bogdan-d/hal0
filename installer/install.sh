@@ -734,6 +734,40 @@ if [[ -f "${AGENT_UNIT_SRC}" ]]; then
             warn "${SLOTCTL_SUDOERS_SRC} not found — slotctl sudoers grant not installed"
         fi
     fi
+
+    # Privileged seam #2 (D hardened-perms): hal0-agentenv writes the per-agent
+    # .env files that the hardened model pins root:root — the secrets vault
+    # (/var/lib/hal0/secrets/agents/<agent>.env) and the driver env
+    # (/etc/hal0/agents/<agent>.env). When hal0-api runs unprivileged it cannot
+    # write those root-owned dirs, so the hermes provisioner delegates the two
+    # writes here. Inert under the default root install (the provisioner branches
+    # on euid). Lands at the absolute /usr/lib/hal0/bin path the provider's
+    # _HAL0_AGENTENV default hardcodes (dev mode shadows it under PREFIX).
+    AGENTENV_SRC="${REPO_ROOT}/installer/wrappers/hal0-agentenv"
+    if [[ -f "${AGENTENV_SRC}" ]]; then
+        install -d "${LIB_DIR}/bin"
+        install -m 0755 "${AGENTENV_SRC}" "${LIB_DIR}/bin/hal0-agentenv"
+        info "wrote ${LIB_DIR}/bin/hal0-agentenv"
+    else
+        warn "${AGENTENV_SRC} not found — agent-env seam helper not installed"
+    fi
+
+    # sudoers grant for the agent-env seam. Real installs only; visudo-validate
+    # before activating so a malformed drop-in can never wedge sudo for the box.
+    if [[ "${DEV_MODE}" -eq 0 ]]; then
+        AGENTENV_SUDOERS_SRC="${REPO_ROOT}/packaging/sudoers/hal0-agentenv"
+        AGENTENV_SUDOERS_DST="/etc/sudoers.d/hal0-agentenv"
+        if [[ -f "${AGENTENV_SUDOERS_SRC}" ]]; then
+            if visudo -cf "${AGENTENV_SUDOERS_SRC}" >/dev/null 2>&1; then
+                install -m 0440 "${AGENTENV_SUDOERS_SRC}" "${AGENTENV_SUDOERS_DST}"
+                info "wrote ${AGENTENV_SUDOERS_DST}"
+            else
+                warn "${AGENTENV_SUDOERS_SRC} failed visudo check — agent-env sudoers grant not installed"
+            fi
+        else
+            warn "${AGENTENV_SUDOERS_SRC} not found — agent-env sudoers grant not installed"
+        fi
+    fi
 else
     warn "${AGENT_UNIT_SRC} not found — hal0-agent@ template not installed"
 fi
@@ -1177,6 +1211,16 @@ else
     # converge to the same state on every re-run.
     if [[ "${HAL0_USER}" != "root" ]]; then
         info "hardened-perms flip: chowning config + state to ${HAL0_USER}"
+
+        # Ensure the root-pinned secret-bearing dirs EXIST before the re-pin
+        # below. On a blank install secrets/ doesn't exist yet (the early mkdir
+        # seeds registry/slots/cache, not secrets/), so the `[[ -d ]]`-guarded
+        # `chown -R root:root` further down would silently no-op and the hermes
+        # provisioner's first .env write could land owned by ${HAL0_USER}. Create
+        # them root:root NOW (installer is root) so the find-prunes match and the
+        # re-pin always runs. These are also the dirs the hal0-agentenv seam
+        # writes into.
+        mkdir -p "${ETC_DIR}/agents" "${VAR_DIR}/secrets/agents"
 
         # /etc/hal0 config root + ALL its contents -> ${HAL0_USER}:hal0,
         # RECURSIVELY: a root->hal0 UPGRADE must flip pre-existing root-owned
