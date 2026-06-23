@@ -129,7 +129,7 @@ test.describe('Profiles page (#658)', () => {
     await expect(seedSection.locator('.stk-lib-card')).toHaveCount(MOCK_DATA.profiles.length)
     const rocm = page.locator('.stk-lib-card', { has: page.locator('.stk-lib-name', { hasText: /^rocm$/ }) })
     await expect(rocm.locator('.pf-bk')).toContainText('ROCm')
-    await expect(rocm.locator('.pf-tps')).toHaveText('52.8')
+    await expect(rocm.locator('.pf-card-metric')).toContainText('52.8')
   })
 })
 
