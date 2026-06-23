@@ -71,7 +71,16 @@ log = logging.getLogger(__name__)
 # canonical llm seeds. `chat` is retired as a slot/role name (the `chat` *capability*
 # is unaffected; any llm slot serves it). `utility` is seeded so the memory
 # extraction target is always present on a fresh box.
-SEEDED_SLOTS: tuple[str, ...] = ("utility", "embed", "rerank", "stt", "tts", "img", "vision", "agent")
+SEEDED_SLOTS: tuple[str, ...] = (
+    "utility",
+    "embed",
+    "rerank",
+    "stt",
+    "tts",
+    "img",
+    "vision",
+    "agent",
+)
 
 #: NPU FLM shadow slots seeded only when the FastFlowLM ``.deb`` is
 #: installed (``shutil.which('flm')`` truthy): the ASR + embed tags that

@@ -1835,7 +1835,11 @@ def _phase_context_link(ctx: PhaseContext) -> PhaseResult:
     primary_for_template: dict[str, Any] | None = None
     primary_alias = "agent"  # ADR-0023 canonical default anchor
     primary_slot = next(
-        (s for s in slots_all if isinstance(s, dict) and s.get("name") in ("agent", "chat", "primary")),
+        (
+            s
+            for s in slots_all
+            if isinstance(s, dict) and s.get("name") in ("agent", "chat", "primary")
+        ),
         None,
     )
     if primary_slot:
@@ -2515,7 +2519,11 @@ def render_live_context(
     primary_raw = _resolve_primary_slot(slots_fetcher=lambda: slots_all)
 
     primary_slot = next(
-        (s for s in slots_all if isinstance(s, dict) and s.get("name") in ("agent", "chat", "primary")),
+        (
+            s
+            for s in slots_all
+            if isinstance(s, dict) and s.get("name") in ("agent", "chat", "primary")
+        ),
         None,
     )
     primary_for_template: dict[str, Any] | None = None

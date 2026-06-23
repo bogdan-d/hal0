@@ -1458,7 +1458,11 @@ def resolve_by_capability(  # TIER1
                 slot_match = upstreams.get(m_resolved)
                 # ADR-0023: the anchor (`agent`) is reached via the rule-9 default,
                 # not explicit name matching here — guard against double-routing.
-                if slot_match is not None and slot_match.kind == "slot" and m_resolved != _DEFAULT_MODEL:
+                if (
+                    slot_match is not None
+                    and slot_match.kind == "slot"
+                    and m_resolved != _DEFAULT_MODEL
+                ):
                     candidate = m_resolved
 
     # Rule 9 — fallback default slot (ADR-0023: the `agent` anchor).
