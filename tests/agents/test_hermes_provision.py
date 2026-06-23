@@ -1071,13 +1071,15 @@ def test_legacy_hal0_profile_plugin_removed() -> None:
 
 def test_hal0_memory_provider_plugin_file_present() -> None:
     repo_root = hp.REPO_ROOT_FOR_INSTALLER
-    src = repo_root / "installer" / "agents" / "hermes" / "plugins" / "hal0-memory" / "__init__.py"
-    body = src.read_text()
+    plugin_dir = repo_root / "installer" / "agents" / "hermes" / "plugins" / "hal0-memory"
+    # The plugin is a package (__init__ re-export + register, provider.py,
+    # _client.py); read the combined source so lifecycle methods (defined in
+    # provider.py) are found.
+    body = "\n".join(p.read_text() for p in sorted(plugin_dir.glob("*.py")))
     assert "Hal0MemoryProvider" in body
     assert "MemoryProvider" in body
-    # ADR-0014: graph defaults OFF; ADR-0013-aware namespace.
     assert "register" in body  # entry point; graph forwarding is server-side now (ADR-0023)
-    assert "private:" in body or "private:hermes-agent" in body
+    assert "private:" in body
     # Lifecycle methods upstream calls.
     for method in ("system_prompt_block", "prefetch", "sync_turn"):
         assert method in body
