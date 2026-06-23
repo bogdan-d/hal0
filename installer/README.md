@@ -42,7 +42,7 @@ install (GPU/Vulkan/ROCm and CPU paths are fully supported everywhere).
 ## What the installer does
 
 1. **Pre-flight checks** — confirms Python 3.11–3.14 is on `$PATH`, systemd is present (skipped in `--dev`), x86_64 arch, disk space, and free ports.
-2. **Privilege model** — runs as `root` (re-execs under `sudo` if needed). `hal0-api` runs as `HAL0_USER` (default `root`; the podman container is the sandbox boundary for slots). A dedicated `hal0` system user runs the non-root services (agents, hermes-gateway, hindsight-api).
+2. **Privilege model** — runs as `root` (re-execs under `sudo` if needed); `hal0-api` runs as `root` so it can apply updates, write systemd drop-ins, and restart services directly. The slot inference containers (podman) are the sandbox boundary for models. A dedicated `hal0` system user runs the non-root services (agents, hermes-gateway, hindsight-api).
 3. **Layout** — code under `/usr/lib/hal0/hal0-<version>` with a `current` symlink and a shared venv (`hal0 update` swaps the symlink atomically); config in `/etc/hal0/`; state in `/var/lib/hal0/{models,registry,slots,openwebui,cache}`. In `--dev` everything lands under `$PWD/.hal0ai/` instead.
 4. **Installs hal0** — creates the shared venv and `pip install`s the release tree into it (editable in `--dev`), then links `/usr/local/bin/hal0` + `/usr/local/bin/hal0-agent`.
 5. **Builds the dashboard UI** — runs `npm install && npm run build` in `ui/` if `ui/dist/` is missing and `npm` is available. Skipped (with a warning) when `npm` is absent.
@@ -86,7 +86,6 @@ These are the variables `installer/install.sh` actually reads:
 |---|---|---|
 | `HAL0_PREFIX` | `/usr/lib/hal0` (or `$PWD/.hal0ai` in `--dev`) | Installation root (versioned code + shared venv) |
 | `HAL0_PORT` | `8080` | hal0 API port |
-| `HAL0_USER` | `root` | systemd unit user for hal0-api (see §What the installer does) |
 | `HAL0_PYTHON` | `python3` | Python interpreter used to build the venv |
 | `HAL0_MODELS_DIR` | _(unset)_ | Absolute path where model pulls land; same as `--models-dir=PATH`. When unset, models live at `/var/lib/hal0/models` (or `$PWD/.hal0ai/var/lib/hal0/models` under `--dev`). |
 | `HAL0_NO_PROBE` | _(unset)_ | Set to `1` to skip the hardware probe at the end |
