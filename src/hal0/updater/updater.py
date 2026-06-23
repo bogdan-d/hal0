@@ -326,6 +326,26 @@ def _version_tuple(v: str) -> tuple[int, ...]:
     return tuple(parts) or (0,)
 
 
+def _is_newer(candidate: str, current: str) -> bool:
+    """Return True if PEP 440 version ``candidate`` is strictly newer than ``current``.
+
+    Uses ``packaging.version.Version`` so pip-normalised forms (``0.8.0b3``) order
+    correctly against tag-derived manifest forms (``0.8.1-beta.1``). The naive
+    ``_version_tuple`` digit-parser conflated the beta number with the patch
+    component (``0.8.0b3`` → ``(0, 8, 3)``), so every box on a ``0.8.0bN`` beta saw
+    ``0.8.1-beta.1`` as "not newer" and ``hal0 update`` reported nothing to apply.
+    Falls back to the tuple compare only when a string is not valid PEP 440.
+    """
+    try:
+        from packaging.version import InvalidVersion, Version
+    except Exception:  # packaging absent — keep the best-effort tuple compare
+        return _version_tuple(candidate) > _version_tuple(current)
+    try:
+        return Version(candidate) > Version(current)
+    except InvalidVersion:
+        return _version_tuple(candidate) > _version_tuple(current)
+
+
 # ── Atomic helpers ─────────────────────────────────────────────────────────────
 
 
@@ -903,11 +923,7 @@ class Updater:
         # operator should not be nudged toward a release we've pulled. The
         # version is still surfaced (revoked + reason) so the dashboard can
         # explain why no update is offered. See docs/internal/release-manifest.md.
-        update_available = (
-            bool(latest)
-            and not revoked
-            and _version_tuple(latest) > _version_tuple(hal0.__version__)
-        )
+        update_available = bool(latest) and not revoked and _is_newer(latest, hal0.__version__)
         if revoked and bool(latest):
             log.warning(
                 "updater.latest_revoked",
