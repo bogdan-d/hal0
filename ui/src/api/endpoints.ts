@@ -294,6 +294,17 @@ export const ENDPOINTS = {
   profiles: '/api/profiles',
   profile: (name: string) => `/api/profiles/${encodeURIComponent(name)}`,
 
+  // ── Stacks (named, portable slot+profile+model bundles) ─────────
+  // GET list (+ active + drift) | POST create. Per-stack: GET detail | PUT |
+  // DELETE | POST apply (?dry_run=true → diff) | POST export (envelope).
+  // import/snapshot are collection-level POSTs.
+  stacks: '/api/stacks',
+  stack: (slug: string) => `/api/stacks/${encodeURIComponent(slug)}`,
+  stackApply: (slug: string) => `/api/stacks/${encodeURIComponent(slug)}/apply`,
+  stackExport: (slug: string) => `/api/stacks/${encodeURIComponent(slug)}/export`,
+  stackImport: '/api/stacks/import',
+  stackSnapshot: '/api/stacks/snapshot',
+
   // Install state — backs the post-install banner and passive install-state hook.
   // Retained for useInstallState.ts (banner/status surface). The FirstRun picker
   // endpoints (apply, complete, curated-models, pick-default, services, etc.) were

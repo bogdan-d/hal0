@@ -105,6 +105,9 @@ from hal0.api.routes import (
 from hal0.api.routes import (
     secrets as secrets_routes,
 )
+from hal0.api.routes import (
+    stacks as stacks_routes,
+)
 from hal0.capabilities.orchestrator import CapabilityOrchestrator
 from hal0.config.loader import ConfigParseError, load_hal0_config, load_upstreams_config
 from hal0.config.paths import activity_db
@@ -1219,6 +1222,12 @@ def create_app() -> FastAPI:
     # from /etc/hal0/profiles.toml (falling back to the built-in seeds on a
     # fresh install). Profiles are P1 container-runtime templates (issue #653).
     app.include_router(profiles_routes.router, prefix="/api/profiles", tags=["profiles"])
+
+    # Stack catalog — named, portable bundles of slots + profiles + model
+    # assignments + capability selections. Read + declarative apply (dry-run
+    # diff → atomic commit → lifecycle converge) + export/import/snapshot.
+    # Public on the local network (ADR-0012), same rationale as profiles.
+    app.include_router(stacks_routes.router, prefix="/api/stacks", tags=["stacks"])
 
     # Chat-template catalog — bundled templates seeded into the model store at
     # startup; operator can add custom templates via POST. Read + write, public

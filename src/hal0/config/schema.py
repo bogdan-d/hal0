@@ -1089,9 +1089,118 @@ class StacksConfig(BaseModel):
     stack: dict[str, StackConfig] = Field(default_factory=dict)
 
 
-# Built-in seed stacks (immutable, clone-only). Empty until PR-6 fills it with
-# saber/forge/pi. StacksCatalog consults this for the seed-immutability guard.
-SEED_STACKS: dict[str, StackConfig] = {}
+# Built-in seed stacks (immutable, clone-only) — the day-one catalog the
+# Stacks page ships with (spec §10). Returned by ``load_stacks_config`` when no
+# stacks.toml exists yet, and consulted by ``StacksCatalog`` for the
+# seed-immutability guard. Grounded in the live Strix-Halo model roster and the
+# canonical ``agent``/``utility`` slots (ADR-0023; the spec's pre-ADR ``chat``/
+# ``primary``/``util`` slot names are mapped onto these). Each carries embed +
+# rerank capability rows so memory recall works out of the box. Model metadata
+# (``models{}``) is intentionally left empty — ``export_envelope`` fills it from
+# the live registry at export time, keeping the in-code seed lean.
+#
+# These reference this host's real registry ids; cloned-and-edited is the
+# intended path, and apply's dry-run surfaces any model that isn't local.
+
+
+def _embed_rerank_rows(device: str = "gpu-rocm") -> list[StackCapabilityRow]:
+    """The shared embed + rerank capability pair every seed ships with."""
+    return [
+        StackCapabilityRow(
+            child="embed",
+            device=device,
+            provider="llama-server",
+            model="qwen3-embedding-0-6b-q8-0",
+            enabled=True,
+        ),
+        StackCapabilityRow(
+            child="rerank",
+            device=device,
+            provider="llama-server",
+            model="bge-reranker-v2-m3-q4_k_m",
+            enabled=True,
+        ),
+    ]
+
+
+SEED_STACKS: dict[str, StackConfig] = {
+    # saber — max-throughput agentic MoE. Decode-per-GB leader on the board.
+    "saber": StackConfig(
+        name="Saber",
+        description="High-speed agentic MoE: a 35B-A3B agent on ROCm with a fast "
+        "Vulkan utility helper, plus memory recall.",
+        author="hal0",
+        icon="⚡",
+        tags=["agentic", "moe", "fast"],
+        slots=[
+            StackSlotEntry(
+                slot="agent",
+                model="qwen3-6-35b-a3b-nsc-ace-saber-mtp-f16-to-rocmfp4-strix-lean",
+                device="gpu-rocm",
+                profile="rocm-moe",
+                mtp=True,
+                capabilities=_embed_rerank_rows(),
+            ),
+            StackSlotEntry(
+                slot="utility",
+                model="gemma-4-12b-it-ud-q4-k-xl",
+                device="gpu-vulkan",
+                profile="vulkan",
+            ),
+        ],
+    ),
+    # forge — coding-first developer loadout: a coder agent + a fast draft coder.
+    "forge": StackConfig(
+        name="Forge",
+        description="Coding-first: a 27B coder agent on ROCm with a small fast "
+        "draft coder as the utility, plus codebase retrieval.",
+        author="hal0",
+        icon="🛠️",
+        tags=["coding", "developer"],
+        slots=[
+            StackSlotEntry(
+                slot="agent",
+                model="qwopus3-6-27b-coder-mtp-q6-k",
+                device="gpu-rocm",
+                profile="rocm",
+                mtp=True,
+                capabilities=_embed_rerank_rows(),
+            ),
+            StackSlotEntry(
+                slot="utility",
+                model="qwopus3-5-4b-coder-mtp-q6-k",
+                device="gpu-vulkan",
+                profile="vulkan",
+                mtp=True,
+            ),
+        ],
+    ),
+    # pi — always-on support: faithful compaction, memory recall (quality > speed).
+    "pi": StackConfig(
+        name="Pi",
+        description="Always-on support: a q-rich 27B utility for faithful "
+        "compaction and recall, with a light Vulkan agent.",
+        author="hal0",
+        icon="🥧",
+        tags=["support", "memory", "compaction"],
+        slots=[
+            StackSlotEntry(
+                slot="utility",
+                model="chadrock3-6-27b-pi-agent-mtp-rocmfp4-strix-lean",
+                device="gpu-rocm",
+                profile="rocm",
+                mtp=True,
+                capabilities=_embed_rerank_rows(),
+            ),
+            StackSlotEntry(
+                slot="agent",
+                model="gemma-4-12b-it-ud-q4-k-xl",
+                device="gpu-vulkan",
+                profile="vulkan",
+            ),
+        ],
+    ),
+}
 
 
 def resolve_profile_flags(profile: ProfileConfig, mtp_override: bool | None = None) -> str:

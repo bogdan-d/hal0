@@ -229,6 +229,8 @@ AUTONOMOUS_READ_TOOLS: frozenset[str] = frozenset(
         "capability_list",
         "provider_list",
         "version_info",
+        "stack_list",
+        "stack_status",
         # Host-introspection probes (issue #237). Pure-read against
         # /sys/, /proc/, and lsmod — no REST round-trip, no mutation.
         # Hermes-Agent bootstrap consumes these in its env_probe phase.
@@ -264,6 +266,12 @@ GATED_TOOLS: frozenset[str] = frozenset(
         "capability_set",
         "config_write",
         "provider_credential_write",
+        # Stacks: applying/importing reconfigures the whole inference surface
+        # (loads/swaps/unloads slots) and deleting drops a saved bundle —
+        # owner-approval gated, mirroring slot_create/capability_set.
+        "stack_apply",
+        "stack_import",
+        "stack_delete",
         # logs_tail is gated until the redactor in logs.py covers
         # Bearer + X-API-Key + provider keys (sk-/hf-/etc.) — see
         # docs/internal/phase-8-pending/mcp-backend.md §2.
@@ -307,6 +315,8 @@ _REST_MAP: dict[str, tuple[str, str]] = {
     "capability_list": ("GET", "/api/capabilities"),
     "provider_list": ("GET", "/api/providers"),
     "version_info": ("GET", "/api/status"),
+    "stack_list": ("GET", "/api/stacks"),
+    "stack_status": ("GET", "/api/stacks/{slug}"),
     # Autonomous write
     "model_swap": ("POST", "/api/slots/{name}/swap"),
     # Gated write
@@ -317,6 +327,9 @@ _REST_MAP: dict[str, tuple[str, str]] = {
     "slot_restart": ("POST", "/api/slots/{name}/restart"),
     "capability_set": ("POST", "/api/capabilities/{slot}/{child}"),
     "config_write": ("PUT", "/api/settings"),
+    "stack_apply": ("POST", "/api/stacks/{slug}/apply"),
+    "stack_import": ("POST", "/api/stacks/import"),
+    "stack_delete": ("DELETE", "/api/stacks/{slug}"),
     # No live route yet — Memory-engine / Provider team must land the
     # endpoint. We register the tool anyway so the catalog matches the
     # ADR; calls land in a 404 surface until the route exists.
@@ -335,6 +348,9 @@ _PATH_ARGS: dict[str, tuple[str, ...]] = {
     "slot_restart": ("name",),
     "capability_set": ("slot", "child"),
     "provider_credential_write": ("name",),
+    "stack_status": ("slug",),
+    "stack_apply": ("slug",),
+    "stack_delete": ("slug",),
 }
 
 
@@ -622,6 +638,12 @@ _ANNOTATIONS: dict[str, ToolAnnotations] = {
     "version_info": ToolAnnotations(
         readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
     ),
+    "stack_list": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "stack_status": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
     # Host-introspection probes — pure sysfs/procfs reads.
     "gpu_target_version": ToolAnnotations(
         readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
@@ -649,6 +671,14 @@ _ANNOTATIONS: dict[str, ToolAnnotations] = {
     "capability_set": ToolAnnotations(
         readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False
     ),
+    # Apply converges to a declared end-state (idempotent); import creates a
+    # new catalog entry (non-idempotent — re-import conflicts on slug).
+    "stack_apply": ToolAnnotations(
+        readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "stack_import": ToolAnnotations(
+        readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False
+    ),
     "config_write": ToolAnnotations(
         readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False
     ),
@@ -674,6 +704,9 @@ _ANNOTATIONS: dict[str, ToolAnnotations] = {
         readOnlyHint=False, destructiveHint=True, idempotentHint=True, openWorldHint=False
     ),
     "slot_delete": ToolAnnotations(
+        readOnlyHint=False, destructiveHint=True, idempotentHint=True, openWorldHint=False
+    ),
+    "stack_delete": ToolAnnotations(
         readOnlyHint=False, destructiveHint=True, idempotentHint=True, openWorldHint=False
     ),
     "memory_delete": ToolAnnotations(
@@ -745,6 +778,8 @@ def build_server(
     _register("capability_list", "Capability overlay state — backends + selections.")
     _register("provider_list", "List configured providers.")
     _register("version_info", "hal0 version + runtime status.")
+    _register("stack_list", "List every stack, with the active stack + drift status.")
+    _register("stack_status", "Get one stack's detail, active flag, and drift status.")
     # Host-introspection probes (issue #237)
     _register(
         "gpu_target_version",
@@ -779,6 +814,12 @@ def build_server(
     _register("slot_restart", "Restart a slot's systemd unit (gated).")
     _register("capability_set", "Assign a capability child to a slot (gated).")
     _register("config_write", "Update hal0.toml top-level settings (gated).")
+    _register(
+        "stack_apply",
+        "Apply a stack — commit its slot config and converge runtime to match (gated).",
+    )
+    _register("stack_import", "Import a stack from a .hal0stack.json envelope (gated).")
+    _register("stack_delete", "Delete a custom stack from the catalog (gated).")
     _register(
         "provider_credential_write",
         "Write provider credentials (gated; secrets never echoed back).",

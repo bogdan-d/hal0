@@ -210,6 +210,7 @@ function useNavItems() {
     { id: "slots", label: "Slots", icon: Icons.slots, cnt: slotCount, children: [
       { id: "slots/endpoints", label: "Endpoints" },
       { id: "slots/profiles",  label: "Profiles" },
+      { id: "slots/stacks",    label: "Stacks" },
     ] },
     { id: "models", label: "Models", icon: Icons.models, cnt: modelCount },
     // Operator Board (#board) — hal0-skinned kanban over the Hermes kanban

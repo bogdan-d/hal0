@@ -15,9 +15,15 @@ from hal0.config.schema import StackConfig, StacksConfig, StackSlotEntry
 
 
 class TestLoadStacksConfig:
-    def test_missing_file_returns_empty(self, tmp_path: Path) -> None:
+    def test_missing_file_returns_seed_catalog(self, tmp_path: Path) -> None:
+        # Absent stacks.toml → the built-in seed catalog (SEED_STACKS), so a
+        # fresh install ships a usable Stacks page (PR-6). Mirrors
+        # load_profiles_config's seed fallback.
+        from hal0.config.schema import SEED_STACKS
+
         cfg = load_stacks_config(path=tmp_path / "nonexistent.toml")
-        assert cfg.stack == {}
+        assert cfg.stack == SEED_STACKS
+        assert set(cfg.stack) == {"saber", "forge", "pi"}
 
     def test_round_trip_save_then_load(self, tmp_path: Path) -> None:
         target = tmp_path / "stacks.toml"

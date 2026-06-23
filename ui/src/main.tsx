@@ -69,6 +69,9 @@ import './dash/connections.css'
 import './dash/connections.jsx'
 // issue #658 — Profiles: container-slot template catalog + iGPU intent labels.
 import './dash/profiles.jsx'
+// Stacks (PR-5): named, portable slot+profile+model bundles — registers
+// window.StacksView, rendered as the third Slots tab.
+import './dash/stacks.jsx'
 import './dash/settings.jsx'
 
 import './dash/extras.jsx'
