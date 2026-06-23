@@ -498,7 +498,7 @@ def test_install_phase_skips_venv_when_binary_exists(
     # copied — it hardcoded an :8000 base_url that has no listener and
     # the composite ``hal0`` upstream in hal0.api supersedes it.
     assert not (hermes_home / "plugins" / "model-providers" / "hal0").exists()
-    assert (hermes_home / "plugins" / "memory" / "hal0-memory" / "__init__.py").is_file()
+    assert (hermes_home / "plugins" / "hal0-memory" / "__init__.py").is_file()
 
 
 def test_install_phase_runs_venv_install_when_binary_missing(
@@ -1076,7 +1076,7 @@ def test_hal0_memory_provider_plugin_file_present() -> None:
     assert "Hal0MemoryProvider" in body
     assert "MemoryProvider" in body
     # ADR-0014: graph defaults OFF; ADR-0013-aware namespace.
-    assert "graph" in body
+    assert "register" in body  # entry point; graph forwarding is server-side now (ADR-0023)
     assert "private:" in body or "private:hermes-agent" in body
     # Lifecycle methods upstream calls.
     for method in ("system_prompt_block", "prefetch", "sync_turn"):
@@ -1195,7 +1195,7 @@ def test_namespace_register_refreshes_existing_card(
             return {
                 "ok": True,
                 "result": {
-                    "items": [{"id": "old_mem_id", "metadata": {"agent_id": "hermes-agent"}}]
+                    "items": [{"id": "old_mem_id", "metadata": {"agent_id": "hermes"}}]
                 },
             }
         if name == "memory_delete":

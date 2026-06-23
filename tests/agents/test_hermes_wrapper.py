@@ -549,14 +549,14 @@ def test_hermes_wrapper_does_not_pin_hermes_home() -> None:
     assert "HERMES_HOME=" not in text
     assert "export HERMES_HOME" not in text
     # It does default + export the agent id.
-    assert 'HAL0_AGENT_ID="${HAL0_AGENT_ID:-hermes-agent}"' in text
+    assert 'HAL0_AGENT_ID="${HAL0_AGENT_ID:-hermes}"' in text
     assert "export HAL0_AGENT_ID" in text
 
 
 def test_new_hermes_wrapper_injects_agent_id_and_no_home(tmp_path: Path) -> None:
     """Run the `hermes` wrapper with --hal0-ready (sentinel short-circuit,
     never execs the real binary) under a stub bin + a probe that dumps the
-    env. Assert HAL0_AGENT_ID defaults to hermes-agent and is exported,
+    env. Assert HAL0_AGENT_ID defaults to hermes and is exported,
     and HERMES_HOME is NOT set."""
     # `--hal0-ready` exits 0 before exec, so a missing bin is fine; but we
     # also verify the env the wrapper would export by sourcing a probe.
@@ -587,7 +587,7 @@ def test_new_hermes_wrapper_injects_agent_id_and_no_home(tmp_path: Path) -> None
         check=False,
     )
     env_dump = out.stdout
-    assert "HAL0_AGENT_ID=hermes-agent" in env_dump
+    assert "HAL0_AGENT_ID=hermes" in env_dump
     # The wrapper must not have introduced HERMES_HOME.
     assert "HERMES_HOME=" not in env_dump
 
