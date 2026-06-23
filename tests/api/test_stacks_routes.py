@@ -242,6 +242,54 @@ def test_apply_commit_converges_and_sets_active(app: FastAPI, tmp_hal0_home: str
         assert active_item["drift"] == "clean"
 
 
+# ── create-on-apply (slots that don't exist yet) ───────────────────────────────
+
+
+def test_apply_dry_run_lists_slots_to_create(client: TestClient) -> None:
+    # "quick" has no slot TOML → dry-run flags it under `creates`.
+    client.post(
+        "/api/stacks",
+        json={
+            "slug": "coding",
+            "stack": _stack_body(slots=[{"slot": "quick", "model": "m", "device": "gpu-vulkan"}]),
+        },
+    )
+    r = client.post("/api/stacks/coding/apply", params={"dry_run": "true"})
+    assert r.status_code == 200
+    assert r.json()["creates"] == ["quick"]
+
+
+def test_apply_commit_creates_missing_slot(app: FastAPI, tmp_hal0_home: str) -> None:
+    with TestClient(app) as c:
+        c.post(
+            "/api/stacks",
+            json={
+                "slug": "coding",
+                "stack": _stack_body(
+                    slots=[
+                        {"slot": "quick", "model": "m", "device": "gpu-vulkan", "profile": "vulkan"}
+                    ]
+                ),
+            },
+        )
+        fake_sm = AsyncMock()
+        fake_sm.list = AsyncMock(return_value=[])
+        app.state.slot_manager = fake_sm
+        app.state.capability_orchestrator = AsyncMock()
+
+        r = c.post("/api/stacks/coding/apply")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["created"] == ["quick"]
+        # The slot was created through the live slot-create path before converge.
+        fake_sm.create.assert_awaited()
+        created_name = fake_sm.create.await_args.args[0]
+        assert created_name == "quick"
+        # A port was auto-assigned by _normalize_create_body.
+        created_body = fake_sm.create.await_args.args[1]
+        assert isinstance(created_body.get("port"), int) and created_body["port"] > 0
+
+
 # ── export / import round-trip ─────────────────────────────────────────────────
 
 

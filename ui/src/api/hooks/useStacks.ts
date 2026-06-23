@@ -93,6 +93,10 @@ export interface StackApplyResult {
   dry_run: boolean
   summary: string[]
   changes: StackDiffRow[]
+  /** Dry-run: slot names the stack will create (don't exist yet). */
+  creates?: string[]
+  /** Commit: slot names that were created during apply. */
+  created?: string[]
   converged?: StackConvergeReport
 }
 

@@ -34,6 +34,7 @@ from fastapi import APIRouter, Request
 from pydantic import BaseModel, Field
 
 from hal0.api._audit import record_action
+from hal0.config import paths
 from hal0.config.schema import StackConfig
 from hal0.errors import BadRequest
 from hal0.stacks import ResolvedStack, StacksCatalog
@@ -138,6 +139,66 @@ def _registry(request: Request) -> Any:
             code="stacks.registry_unavailable",
         )
     return reg
+
+
+# A stack may name a slot that doesn't exist yet (e.g. a "quick" coder slot in a
+# cloned/imported stack). Apply must create it before the converge load, the way
+# the spec's seed copy expects. Without a profile a fresh slot fails to load
+# ("profile '' not found"), so default a coherent profile from the device.
+_PROFILE_BY_DEVICE = {
+    "gpu-rocm": "rocm",
+    "gpu-vulkan": "vulkan",
+    "npu": "flm",
+    "cpu": "",
+}
+
+
+def _slot_toml_exists(slot: str) -> bool:
+    return (paths.slots_config_dir() / f"{slot}.toml").exists()
+
+
+def _missing_slot_names(cfg: StackConfig) -> list[str]:
+    """Stack slots (with a model) whose TOML doesn't exist yet."""
+    return [e.slot for e in cfg.slots if e.model and not _slot_toml_exists(e.slot)]
+
+
+async def _create_missing_slots(
+    cfg: StackConfig, slot_manager: Any
+) -> tuple[list[str], list[dict[str, str]]]:
+    """Create any stack slot whose TOML is absent, via the live slot-create path.
+
+    Reuses ``routes/slots._normalize_create_body`` (flat→nested + free-port
+    assignment) and ``SlotManager.create`` so a created slot is identical to one
+    made through POST /api/slots. Per-slot failures are collected, not raised, so
+    one bad entry doesn't sink the whole apply. Returns ``(created, errors)``.
+    """
+    from hal0.api.routes.slots import _normalize_create_body
+
+    created: list[str] = []
+    errors: list[dict[str, str]] = []
+    for entry in cfg.slots:
+        if not entry.model or _slot_toml_exists(entry.slot):
+            continue
+        device = entry.device or "gpu-vulkan"
+        profile = entry.profile or _PROFILE_BY_DEVICE.get(device, "")
+        body: dict[str, Any] = {
+            "name": entry.slot,
+            "type": "llm",
+            "model": entry.model,
+            "device": device,
+            "profile": profile,
+            "vision": bool(entry.vision),
+        }
+        if entry.mtp is not None:
+            body["mtp"] = bool(entry.mtp)
+        if entry.server_extra_args:
+            body["server"] = {"extra_args": entry.server_extra_args}
+        try:
+            await slot_manager.create(entry.slot, _normalize_create_body(body))
+            created.append(entry.slot)
+        except Exception as exc:
+            errors.append({"target": entry.slot, "error": str(exc)})
+    return created, errors
 
 
 def _diff_rows(plan: Any) -> list[dict[str, Any]]:
@@ -284,6 +345,8 @@ async def apply_stack(slug: str, request: Request, dry_run: bool = False) -> dic
             "dry_run": True,
             "summary": plan.summary,
             "changes": _diff_rows(plan),
+            # Slots the stack names that don't exist yet — apply will create them.
+            "creates": _missing_slot_names(cfg),
         }
 
     slot_manager = getattr(request.app.state, "slot_manager", None)
@@ -291,6 +354,15 @@ async def apply_stack(slug: str, request: Request, dry_run: bool = False) -> dic
     engine = StackApplyEngine(slot_manager=slot_manager, orchestrator=orchestrator)
 
     async with record_action(request, category="stack", action="stack.apply", target=slug) as rec:
+        # Create-on-apply: a stack may reference a slot that doesn't exist yet.
+        # Create it BEFORE planning so Phase A reconciles it and converge loads
+        # it (spec §10 "non-seed slots are created on apply"). Needs a live slot
+        # manager; without one (degraded), missing slots are simply skipped.
+        created: list[str] = []
+        create_errors: list[dict[str, str]] = []
+        if slot_manager is not None:
+            created, create_errors = await _create_missing_slots(cfg, slot_manager)
+
         plan = engine.plan(slug, cfg)
         engine.apply_config(plan)
         engine.record_active(plan, applied_at=time.time())
@@ -303,12 +375,17 @@ async def apply_stack(slug: str, request: Request, dry_run: bool = False) -> dic
                 "skipped": report.skipped,
                 "unloaded": report.unloaded,
                 "capabilities_applied": report.capabilities_applied,
-                "errors": [{"target": t, "error": e} for t, e in report.errors],
+                "errors": [{"target": t, "error": e} for t, e in report.errors] + create_errors,
             }
-        rec.after = {"slug": slug, "changed": sum(1 for r in _diff_rows(plan) if r["changed"])}
+        rec.after = {
+            "slug": slug,
+            "changed": sum(1 for r in _diff_rows(plan) if r["changed"]),
+            "created": created,
+        }
 
     return {
         "stack": slug,
+        "created": created,
         "dry_run": False,
         "summary": plan.summary,
         "changes": _diff_rows(plan),

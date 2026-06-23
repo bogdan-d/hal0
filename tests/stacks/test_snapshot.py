@@ -60,6 +60,46 @@ class TestSnapshot:
         assert agent.device == "gpu-rocm"
         assert stack.name == "Live"
 
+    def test_captures_flat_shape_slot(self, reg: ModelRegistry, tmp_hal0_home: str) -> None:
+        # The live runtime writes the FLAT slot shape (no [slot] section). The
+        # strict load_slot_config mishandles it (drops port, raises) which
+        # silently emptied every live snapshot — regression guard for that.
+        from pathlib import Path
+
+        d = Path(tmp_hal0_home) / "etc" / "hal0" / "slots"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "agent.toml").write_text(
+            'name = "agent"\n'
+            'type = "llm"\n'
+            'device = "gpu-rocm"\n'
+            'backend = "rocm"\n'
+            'profile = "rocm-moe"\n'
+            "port = 8082\n"
+            "mtp = true\n\n"
+            "[model]\n"
+            'default = "ace-saber"\n',
+            encoding="utf-8",
+        )
+        stack = snapshot_live_stack(registry=reg, name="Live")
+        agent = next(e for e in stack.slots if e.slot == "agent")
+        assert agent.model == "ace-saber"
+        assert agent.device == "gpu-rocm"
+        assert agent.profile == "rocm-moe"
+        assert agent.mtp is True
+
+    def test_legacy_backend_device_dropped(self, reg: ModelRegistry, tmp_hal0_home: str) -> None:
+        # A non-canonical device (legacy "rocm" backend) would fail
+        # StackSlotEntry validation → it's read as None, not raised.
+        _write_slot(
+            tmp_hal0_home,
+            "old",
+            ['name = "old"', "port = 8088", 'device = "rocm"', "[model]", 'default = "m"'],
+        )
+        stack = snapshot_live_stack(registry=reg)
+        entry = next(e for e in stack.slots if e.slot == "old")
+        assert entry.model == "m"
+        assert entry.device is None
+
     def test_captures_capability_rows(self, reg: ModelRegistry, tmp_hal0_home: str) -> None:
         _write_slot(
             tmp_hal0_home, "embed", ['name = "embed"', "port = 8082", "[model]", 'default = ""']

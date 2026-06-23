@@ -3101,3 +3101,10 @@ select.pf-input { cursor: pointer; }
   .st-slot-edit { grid-template-columns: 1fr 1fr; }
   .st-diff-row { grid-template-columns: 1fr; gap: 2px; }
 }
+
+/* Stacks editor — "new slot" badge (a slot name not in the live set). */
+.st-slot-new {
+  font-size: 9px; letter-spacing: 0.05em; text-transform: uppercase;
+  color: var(--accent); background: var(--accent-soft); border: 1px solid var(--accent-line);
+  border-radius: 5px; padding: 1px 5px; align-self: center; white-space: nowrap;
+}
