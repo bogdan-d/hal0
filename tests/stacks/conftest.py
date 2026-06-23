@@ -10,7 +10,25 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+import pytest
+
 from hal0.slots.state import SlotState
+
+
+@pytest.fixture(autouse=True)
+def _no_seed_stacks(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Isolate the engine unit tests from the shipped seed catalog (PR-6).
+
+    These tests assert exact catalog contents and use the slug ``saber`` (now a
+    real seed) — they exercise catalog/apply/drift/import *mechanics*, not the
+    shipped seeds, so we null the seed set for the whole package. The catalog
+    reads ``schema.SEED_STACKS`` dynamically and the loader reads its own bound
+    ``SEED_STACKS``; patch both. TestSeedGuard re-adds an entry via setitem.
+    """
+    from hal0.config import loader, schema
+
+    monkeypatch.setattr(schema, "SEED_STACKS", {})
+    monkeypatch.setattr(loader, "SEED_STACKS", {})
 
 
 @dataclass

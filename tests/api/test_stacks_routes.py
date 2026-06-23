@@ -60,11 +60,16 @@ def client(app: FastAPI) -> Iterator[TestClient]:
 # ── GET (list) ─────────────────────────────────────────────────────────────────
 
 
-def test_list_empty_envelope(client: TestClient) -> None:
+def test_list_ships_seed_catalog(client: TestClient) -> None:
+    # Fresh install (no stacks.toml) → the built-in seed stacks (PR-6).
     r = client.get("/api/stacks")
     assert r.status_code == 200
     body = r.json()
-    assert body == {"stacks": [], "active": None, "drift": "none"}
+    assert body["active"] is None
+    assert body["drift"] == "none"
+    slugs = {s["slug"] for s in body["stacks"]}
+    assert {"saber", "forge", "pi"} <= slugs
+    assert all(s["seed"] is True for s in body["stacks"] if s["slug"] in {"saber", "forge", "pi"})
 
 
 # ── POST (create) ──────────────────────────────────────────────────────────────
@@ -153,7 +158,8 @@ def test_update_missing_404(client: TestClient) -> None:
 def test_delete_204(client: TestClient) -> None:
     client.post("/api/stacks", json={"slug": "coding", "stack": _stack_body()})
     assert client.delete("/api/stacks/coding").status_code == 204
-    assert not client.get("/api/stacks").json()["stacks"]
+    slugs = {s["slug"] for s in client.get("/api/stacks").json()["stacks"]}
+    assert "coding" not in slugs  # seeds remain; the custom stack is gone
 
 
 def test_delete_missing_404(client: TestClient) -> None:

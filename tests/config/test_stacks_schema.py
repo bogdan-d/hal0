@@ -105,5 +105,18 @@ class TestStacksConfig:
 
 
 class TestSeedStacks:
-    def test_seed_stacks_is_empty_until_pr6(self) -> None:
-        assert SEED_STACKS == {}
+    def test_seed_stacks_shipped(self) -> None:
+        # PR-6 ships saber/forge/pi as immutable, clone-only seeds.
+        assert set(SEED_STACKS) == {"saber", "forge", "pi"}
+
+    def test_seed_stacks_well_formed(self) -> None:
+        for slug, stack in SEED_STACKS.items():
+            assert isinstance(stack, StackConfig)
+            assert stack.name, f"{slug}: seed needs a display name"
+            assert stack.slots, f"{slug}: seed needs at least one slot"
+            # Seeds use the canonical agent/utility slots (ADR-0023).
+            assert {e.slot for e in stack.slots} <= {"agent", "utility"}
+            # Every slot carries a model and a valid device.
+            for entry in stack.slots:
+                assert entry.model, f"{slug}/{entry.slot}: seed slot needs a model"
+                assert entry.device in {"gpu-rocm", "gpu-vulkan", "cpu", "npu"}
