@@ -1,22 +1,16 @@
-// hal0 dashboard — Stacks view (PR-5; spec §9).
+// hal0 dashboard — Stacks view (Focus layout).
 //
 // A Stack is a named, portable bundle of slots + their profiles + model
-// assignments + capability selections — the runtime successor to the first-run
-// Bundles picker. This view mirrors the Profiles page family: a header +
-// summary strip, seed/custom card grids, a slide-in editor drawer, and a
-// styled delete confirm. Stacks add three things Profiles don't:
+// assignments. The Focus layout (design handoff: stacks_overhaul) surfaces the
+// currently-applied stack as a full-width hero with per-slot live state, then
+// lists the rest as a compact library grid below — keeping attention on what's
+// running while giving fast access to swap.
 //
-//   • Apply — declarative load: a dry-run diff modal (before→after per slot)
-//     that, on confirm, commits the slot config and converges the runtime.
-//   • Active + drift — the applied stack wears an Active ribbon; a drift badge
-//     flags when live config has been hand-edited since apply.
-//   • Export / Import — a portable .hal0stack.json round-trip with a resolve
-//     report (present / pullable / unresolvable) for missing models.
-//
-// Data: GET /api/stacks (useStacks). Reuses the .pf-* card/drawer/confirm
-// styling from Profiles plus a small .st-* layer (overhaul stacks block in
-// dashboard.css) for the active ribbon, drift badge, slot rows, and resolve
-// report. Seeds are immutable: Edit becomes "Edit a copy"; Delete is disabled.
+// Real data: GET /api/stacks (useStacks) + live slot state (useSlots) + the
+// local registry (useModels, for "model not available → pull"). Load goes
+// through the real apply (commit + converge, create-on-apply); Pull starts a
+// real model pull job; Export downloads the portable envelope; Import / New /
+// Snapshot reuse the existing flows. Styles: .stk-* in stacks.css.
 
 import { useState, useEffect } from 'react'
 import {
@@ -32,8 +26,10 @@ import {
 import { useModels } from '@/api/hooks/useModels'
 import { useProfiles } from '@/api/hooks/useProfiles'
 import { useSlots } from '@/api/hooks/useSlots'
+import { api } from '@/api/client'
+import { ENDPOINTS } from '@/api/endpoints'
 
-// Device hue, mirroring the Profiles backend palette (#751 tokens).
+// Device hue, for the editor selectors.
 const DEVICE_META = {
   'gpu-rocm':   { label: 'ROCm',   color: 'var(--dev-rocm)' },
   'gpu-vulkan': { label: 'Vulkan', color: 'var(--dev-vulkan)' },
@@ -48,216 +44,242 @@ const NAME_RE = /^[a-z0-9][a-z0-9_-]{0,31}$/;
 const BLANK_SLOT = { slot: '', model: '', device: 'gpu-rocm', profile: '', mtp: false, capabilities: [] };
 const BLANK = { name: '', description: '', icon: '', tags: '', slots: [{ ...BLANK_SLOT }] };
 
+const DOT_STATES = new Set(['serving', 'ready', 'warming', 'idle', 'offline']);
+function dotCls(state) { return DOT_STATES.has(state) ? state : 'offline'; }
+
 function toast(msg, kind = 'info') {
   if (typeof window !== 'undefined' && window.__hal0Toast) window.__hal0Toast(msg, kind);
 }
 
-function dev(name) { return DEVICE_META[name] || DEVICE_META.cpu; }
+// ── status dot ────────────────────────────────────────────────────────────────
 
-// ── slot chip ───────────────────────────────────────────────────────────────
-
-function SlotChip({ entry }) {
-  const meta = dev(entry.device || 'cpu');
-  return (
-    <span className="st-slotchip" style={{ '--bk': meta.color }}>
-      <span className="pf-chip-dot" />
-      <span className="mono st-slotchip-name">{entry.slot}</span>
-      {entry.model && <span className="mono st-slotchip-model">{entry.model}</span>}
-    </span>
-  );
+function D({ state, sz = 6 }) {
+  return <span className={'dot ' + dotCls(state)} style={{ width: sz, height: sz, flexShrink: 0 }} />;
 }
 
-// ── Stack card ──────────────────────────────────────────────────────────────
+// ── view-model: project a stack into the Focus shape ──────────────────────────
+// slots: [{ name, model, profile, state, available }]. `state` is the live slot
+// status for the active stack, "offline" otherwise. `available` is false only
+// when a referenced model isn't in the local registry (→ pull affordance).
 
-function StackCard({ s, index, onApply, onEdit, onClone, onExport, onDelete }) {
-  const isSeed = !!s.seed;
-  const slots = s.slots || [];
-  const accent = (slots[0] && DEVICE_META[slots[0].device]?.color) || 'var(--accent)';
-
-  return (
-    <div className={'pf-card st-card' + (s.active ? ' st-active' : '')}
-      style={{ '--bk': accent, animationDelay: (index * 34) + 'ms' }}>
-      <span className="pf-accent" />
-      {s.active && (
-        <span className={'st-ribbon' + (s.drift === 'modified' ? ' drift' : '')}>
-          {s.drift === 'modified' ? 'Active · modified' : 'Active'}
-        </span>
-      )}
-      <div className="pf-card-top">
-        <div className="pf-headline">
-          <div className="pf-intent">{s.icon ? s.icon + ' ' : ''}{s.name || s.slug}</div>
-          <div className="pf-slug-row mono">
-            <span className="pf-slug">{s.slug}</span>
-          </div>
-        </div>
-        <div className="pf-metric">
-          <span className="pf-tps num">{slots.length}</span>
-          <span className="pf-tps-u mono">slot{slots.length === 1 ? '' : 's'}</span>
-        </div>
-      </div>
-
-      {s.description && <div className="st-desc">{s.description}</div>}
-
-      <div className="st-slots">
-        {slots.length
-          ? slots.map(e => <SlotChip key={e.slot} entry={e} />)
-          : <span className="pf-unused mono">no slots</span>}
-      </div>
-
-      <div className="pf-chips">
-        {(s.tags || []).map(t => <span className="pf-chip" key={t}>{t}</span>)}
-        <span className="pf-grow" />
-        {isSeed
-          ? <span className="pf-chip seed immutable" title="Seed stacks are read-only">{Icons.lock} seed</span>
-          : <span className="pf-chip custom">custom</span>}
-      </div>
-
-      <div className="pf-foot">
-        <div className="pf-actions" style={{ width: '100%' }}>
-          <button className="pf-btn primary" onClick={() => onApply(s)}
-            title="Preview the diff, then load this stack" data-testid={`st-btn-apply-${s.slug}`}>
-            {Icons.start} Apply
-          </button>
-          <button className="pf-btn" onClick={() => onExport(s)} title="Export .hal0stack.json"
-            data-testid={`st-btn-export-${s.slug}`}>{Icons.download}</button>
-          {isSeed ? (
-            <button className="pf-btn" onClick={() => onClone(s)} title="Seeds are immutable — fork a copy"
-              data-testid={`st-btn-editcopy-${s.slug}`}>{Icons.copy} Edit a copy</button>
-          ) : (
-            <>
-              <button className="pf-btn" onClick={() => onClone(s)} title="Clone"
-                data-testid={`st-btn-clone-${s.slug}`}>{Icons.copy}</button>
-              <button className="pf-btn" onClick={() => onEdit(s)} title="Edit"
-                data-testid={`st-btn-edit-${s.slug}`}>{Icons.edit} Edit</button>
-            </>
-          )}
-          <span className="pf-grow" />
-          <button className="pf-btn danger" onClick={() => onDelete(s)} disabled={isSeed}
-            title={isSeed ? 'Seed stacks cannot be deleted' : 'Delete'}
-            data-testid={`st-btn-delete-${s.slug}`}>{Icons.trash}</button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// ── Section ─────────────────────────────────────────────────────────────────
-
-function Section({ title, count, hint, children }) {
-  return (
-    <div className="pf-section">
-      <div className="sec">
-        <h2>{title}<span className="ct num">{count}</span></h2>
-        {hint && <span className="pf-sec-hint mono">{hint}</span>}
-        <span className="rule" />
-      </div>
-      <div className="pf-grid">{children}</div>
-    </div>
-  );
-}
-
-// ── Apply modal (dry-run diff → commit) ─────────────────────────────────────
-
-function ApplyModal({ stack, onClose }) {
-  const apply = useStackApply();
-  const [phase, setPhase] = useState('loading');   // loading | preview | applying | done
-  const [diff, setDiff] = useState(null);
-  const [report, setReport] = useState(null);
-  const [created, setCreated] = useState([]);
-
-  useEffect(() => {
-    let alive = true;
-    apply.mutateAsync({ slug: stack.slug, dryRun: true })
-      .then(r => { if (alive) { setDiff(r); setPhase('preview'); } })
-      .catch(err => { if (alive) { toast(err?.message || 'Preview failed', 'err'); onClose(); } });
-    return () => { alive = false; };
-    /* eslint-disable-next-line */
-  }, [stack.slug]);
-
-  async function commit() {
-    setPhase('applying');
-    try {
-      const r = await apply.mutateAsync({ slug: stack.slug, dryRun: false });
-      setReport(r.converged || null);
-      setCreated(r.created || []);
-      setPhase('done');
-      const errs = r.converged?.errors?.length || 0;
-      toast(errs ? `Applied ${stack.slug} with ${errs} slot error(s)` : `Applied ${stack.slug}`,
-        errs ? 'warn' : 'ok');
-    } catch (err) {
-      toast(err?.message || 'Apply failed', 'err');
-      setPhase('preview');
+function buildVM(stack, modelSet, liveByName, activeSlug) {
+  const active = stack.slug === activeSlug;
+  const slots = [];
+  for (const sl of stack.slots || []) {
+    if (sl.model) {
+      slots.push({
+        name: sl.slot,
+        model: sl.model,
+        profile: sl.profile || sl.device || '',
+        state: active ? dotCls(liveByName[sl.slot]?.status) : 'offline',
+        available: modelSet.has(sl.model),
+      });
+    }
+    for (const row of sl.capabilities || []) {
+      if (!row.model) continue;
+      slots.push({
+        name: row.child,
+        model: row.model,
+        profile: row.device || '',
+        state: 'offline',
+        available: modelSet.has(row.model),
+      });
     }
   }
+  return {
+    id: stack.slug,
+    slug: stack.slug,
+    name: stack.name || stack.slug,
+    intent: stack.description || '',
+    seed: !!stack.seed,
+    active,
+    drift: active ? (stack.drift || 'clean') : null,
+    tags: stack.tags || [],
+    slots,
+  };
+}
 
-  const changes = (diff?.changes || []).filter(c => c.changed);
+function missingCount(vm) { return vm.slots.filter(s => !s.available).length; }
 
+// ── Pull-missing-models dialog ────────────────────────────────────────────────
+
+function PullDialog({ vm, onPull, pulled, onClose }) {
+  const missing = vm.slots.filter(s => !s.available);
   return (
-    <div className="pf-scrim center" onMouseDown={onClose}>
-      <div className="pf-confirm st-apply" onMouseDown={e => e.stopPropagation()} role="dialog"
-        aria-label={`Apply ${stack.slug}`} aria-busy={phase === 'applying'}>
-        <div className="pf-confirm-h pf-confirm-title mono">{Icons.start} Apply · {stack.name || stack.slug}</div>
-
-        {phase === 'loading' && <div className="pf-confirm-b"><div className="empty mono">Computing diff…</div></div>}
-
-        {(phase === 'preview' || phase === 'applying') && (
-          <div className="pf-confirm-b">
-            {diff?.creates?.length > 0 && (
-              <div className="st-apply-sub mono" style={{ color: 'var(--accent)' }}>
-                {Icons.plus} creates {diff.creates.length} new slot{diff.creates.length > 1 ? 's' : ''}: {diff.creates.join(', ')}
-              </div>
-            )}
-            {changes.length ? (
-              <>
-                <div className="st-apply-sub mono">{changes.length} slot{changes.length > 1 ? 's' : ''} will change · un-named slots are unloaded</div>
-                <div className="st-diff">
-                  {changes.map(c => (
-                    <div className="st-diff-row" key={c.slot}>
-                      <span className="mono st-diff-slot">{c.slot}</span>
-                      <span className="mono st-diff-from">{c.before_model || '∅'}</span>
-                      <span className="st-diff-arrow">→</span>
-                      <span className="mono st-diff-to">{c.after_model || '∅'}</span>
-                    </div>
-                  ))}
-                </div>
-              </>
-            ) : (
-              <div className="pf-confirm-sub">No slot changes — applying records this as the active stack and converges the runtime.</div>
-            )}
+    <div className="stk-scrim" onMouseDown={onClose}>
+      <div className="stk-dialog" onMouseDown={e => e.stopPropagation()} role="dialog" aria-label="Pull missing models">
+        <div className="stk-dlg-h">
+          <span className="stk-dlg-eye">Pull missing models · {vm.name}</span>
+          <button className="stk-dlg-x" onClick={onClose} aria-label="Close">{Icons.close}</button>
+        </div>
+        <div className="stk-dlg-b">
+          <div className="stk-dlg-hint">
+            These models aren't available locally. Pull them before loading this stack.
           </div>
-        )}
-
-        {phase === 'done' && (
-          <div className="pf-confirm-b">
-            <div className="st-apply-sub mono ok">Applied.</div>
-            {report && (
-              <div className="st-report">
-                {created.length > 0 && <div className="mono">created · {created.join(', ')}</div>}
-                {report.loaded.length > 0 && <div className="mono">loaded · {report.loaded.join(', ')}</div>}
-                {report.swapped.length > 0 && <div className="mono">swapped · {report.swapped.join(', ')}</div>}
-                {report.unloaded.length > 0 && <div className="mono">unloaded · {report.unloaded.join(', ')}</div>}
-                {report.capabilities_applied.length > 0 && <div className="mono">capabilities · {report.capabilities_applied.join(', ')}</div>}
-                {report.errors.length > 0 && (
-                  <div className="mono" style={{ color: 'var(--err)' }}>
-                    errors · {report.errors.map(e => `${e.target}: ${e.error}`).join('; ')}
-                  </div>
-                )}
+          {missing.map(s => {
+            const done = pulled.includes(s.model);
+            return (
+              <div key={s.name + s.model} className="stk-pull-item">
+                <span className="stk-pull-slot">{s.name}</span>
+                <span className="stk-pull-model">{s.model}</span>
+                {done
+                  ? <span className="stk-pull-done">{Icons.check} queued</span>
+                  : <button className="btn sm" onClick={() => onPull(s.model)}>{Icons.download} Pull</button>}
               </div>
-            )}
-          </div>
-        )}
-
-        <div className="pf-confirm-foot">
-          <button className="pf-btn" onClick={onClose} disabled={phase === 'applying'}>
-            {phase === 'done' ? 'Close' : 'Cancel'}
-          </button>
-          {phase !== 'done' && (
-            <button className="pf-btn primary solid" onClick={commit}
-              disabled={phase !== 'preview'} data-testid="st-btn-apply-confirm">
-              {phase === 'applying' ? 'Applying…' : 'Apply stack'}
+            );
+          })}
+        </div>
+        <div className="stk-dlg-f">
+          <button className="btn ghost sm" onClick={onClose}>Close</button>
+          {missing.some(s => !pulled.includes(s.model)) && (
+            <button className="btn sm" onClick={() => missing.forEach(s => onPull(s.model))}>
+              Queue all {missing.length}
             </button>
           )}
         </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Load-stack confirm dialog ─────────────────────────────────────────────────
+
+function LoadDialog({ vm, onLoad, onPull, busy, onClose }) {
+  const missing = vm.slots.filter(s => !s.available);
+  const hasMissing = missing.length > 0;
+  return (
+    <div className="stk-scrim" onMouseDown={() => { if (!busy) onClose(); }}>
+      <div className="stk-dialog" onMouseDown={e => e.stopPropagation()} role="dialog" aria-label="Load stack" aria-busy={busy}>
+        <div className="stk-dlg-h">
+          <span className="stk-dlg-eye">Load stack</span>
+          <button className="stk-dlg-x" onClick={onClose} aria-label="Close" disabled={busy}>{Icons.close}</button>
+        </div>
+        <div className="stk-dlg-b">
+          <div>
+            <div className="stk-dlg-stack">{vm.name}</div>
+            <div className="stk-dlg-hint" style={{ marginTop: 4 }}>{vm.intent}</div>
+          </div>
+          {hasMissing && (
+            <div className="stk-dlg-warn">
+              {Icons.alert}
+              {missing.length} model{missing.length > 1 ? 's' : ''} not found locally — those slots are skipped unless pulled first.
+            </div>
+          )}
+          <div className="stk-slot-list">
+            {vm.slots.map(s => (
+              <div key={s.name + s.model} className={'stk-slot-row' + (!s.available ? ' miss' : '')}>
+                <D state={s.available ? 'ready' : 'offline'} sz={6} />
+                <span className="sname">{s.name}</span>
+                <span className="smodel">{s.model}</span>
+                {!s.available && <span className="smiss">not found</span>}
+              </div>
+            ))}
+          </div>
+        </div>
+        <div className="stk-dlg-f">
+          <button className="btn ghost sm" onClick={onClose} disabled={busy}>Cancel</button>
+          {hasMissing && (
+            <button className="btn sm" style={{ background: 'transparent', color: 'var(--warn)', borderColor: 'var(--warn-line)' }}
+              onClick={() => { onClose(); onPull(vm); }} disabled={busy}>
+              Pull missing first
+            </button>
+          )}
+          <button className="btn sm" onClick={() => onLoad(vm)} disabled={busy} data-testid="st-load-confirm">
+            {busy ? 'Loading…' : hasMissing ? 'Load anyway' : 'Load stack'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Focus hero (active stack) ─────────────────────────────────────────────────
+
+function HeroPanel({ vm, isCustom, onPull, onExport, onReapply, onEdit }) {
+  const miss = missingCount(vm);
+  return (
+    <div className="stk-hero">
+      <div className="stk-hero-h">
+        <div>
+          <div className="stk-hero-eye">Active stack</div>
+          <div className="stk-hero-name">{vm.name}</div>
+          <div className="stk-hero-intent">{vm.intent || 'no description'}</div>
+        </div>
+        <div className="stk-hero-meta">
+          <span className="stk-badge live"><D state="serving" sz={6} />running</span>
+          <span className="stk-hero-ver">{vm.drift === 'modified' ? 'modified since apply' : 'clean'}</span>
+        </div>
+      </div>
+      <div className="stk-hero-slots">
+        {vm.slots.map(s => (
+          <div key={s.name + s.model} className="stk-hero-slot">
+            <div className="stk-hs-row">
+              <D state={s.state} sz={7} />
+              <span className="stk-hs-name">{s.name}</span>
+              <span className={'stk-hs-state ' + s.state}>{s.available ? s.state : 'no model'}</span>
+            </div>
+            <div className="stk-hs-profile">{s.profile}</div>
+            <div className="stk-hs-model">{s.model}</div>
+          </div>
+        ))}
+      </div>
+      <div className="stk-hero-f">
+        <div className="stk-hero-tags">
+          {vm.tags.map(t => <span key={t} className="stk-tag">{t}</span>)}
+          <span className="stk-tag shared">{vm.seed ? 'seed' : 'custom'}</span>
+        </div>
+        <span className="stk-spacer" />
+        {miss > 0 && (
+          <button className="stk-missing-btn" onClick={() => onPull(vm)}>{Icons.alert} {miss} missing</button>
+        )}
+        {isCustom && <button className="btn ghost sm" onClick={() => onEdit(vm)}>{Icons.edit} Edit</button>}
+        <button className="btn ghost sm" onClick={() => onExport(vm)}>{Icons.download} Export</button>
+        <button className="btn sm" onClick={() => onReapply(vm)} data-testid={`st-reapply-${vm.slug}`}>Re-apply</button>
+      </div>
+    </div>
+  );
+}
+
+// ── Library card (inactive stacks) ────────────────────────────────────────────
+
+function LibCard({ vm, idx, isCustom, onLoad, onPull, onExport, onClone, onEdit, onDelete }) {
+  const miss = missingCount(vm);
+  return (
+    <div className="stk-lib-card" style={{ animationDelay: idx * 35 + 'ms' }}>
+      <div className="stk-lib-h">
+        <div className="stk-lib-id">
+          <div className="stk-lib-name">{vm.name}</div>
+          <div className="stk-lib-intent">{vm.intent || 'no description'}</div>
+        </div>
+        <span className="mono" style={{ fontSize: 9.5, color: 'var(--fg-5)', paddingTop: 2, flexShrink: 0 }}>
+          {vm.seed ? 'seed' : 'custom'}
+        </span>
+      </div>
+      <div className="stk-lib-slotlist">
+        {vm.slots.map(s => (
+          <div key={s.name + s.model} className={'stk-lib-slotrow' + (!s.available ? ' miss' : '')}>
+            <D state="offline" sz={5} />
+            <span className="stk-csr-name mono">{s.name}</span>
+            <span className="stk-csr-model mono">{s.model}</span>
+            {!s.available && Icons.alert}
+          </div>
+        ))}
+        {vm.slots.length === 0 && <div className="stk-lib-slotrow"><span className="stk-csr-model mono" style={{ color: 'var(--fg-5)' }}>no slots</span></div>}
+      </div>
+      <div className="stk-lib-f">
+        {miss > 0 && (
+          <button className="stk-missing-btn sm" onClick={() => onPull(vm)}>{Icons.alert} {miss} missing</button>
+        )}
+        <span className="stk-spacer" />
+        <button className="stk-icon-btn" style={{ width: 26, height: 26 }} title="Clone" onClick={() => onClone(vm)}>{Icons.copy}</button>
+        {isCustom && (
+          <>
+            <button className="stk-icon-btn" style={{ width: 26, height: 26 }} title="Edit" onClick={() => onEdit(vm)}>{Icons.edit}</button>
+            <button className="stk-icon-btn" style={{ width: 26, height: 26 }} title="Delete" onClick={() => onDelete(vm)}>{Icons.trash}</button>
+          </>
+        )}
+        <button className="stk-icon-btn" style={{ width: 26, height: 26 }} title="Export" onClick={() => onExport(vm)}>{Icons.download}</button>
+        <button className="btn sm" onClick={() => onLoad(vm)} data-testid={`st-load-${vm.slug}`}>Load</button>
       </div>
     </div>
   );
@@ -281,7 +303,6 @@ function ImportModal({ existing, onClose, onImported }) {
       setEnvelope(env);
       const r = await imp.mutateAsync({ envelope: env, dry_run: true });
       setReport(r);
-      // Suggest a slug from the file name, kebab-cased.
       const base = (file.name || '').replace(/\.hal0stack\.json$|\.json$/i, '')
         .toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 32);
       setSlug(base || 'imported-stack');
@@ -307,58 +328,59 @@ function ImportModal({ existing, onClose, onImported }) {
   }
 
   return (
-    <div className="pf-scrim center" onMouseDown={() => { if (!busy) onClose(); }}>
-      <div className="pf-confirm st-apply" onMouseDown={e => e.stopPropagation()} role="dialog" aria-label="Import stack">
-        <div className="pf-confirm-h pf-confirm-title mono">{Icons.download} Import stack</div>
-        <div className="pf-confirm-b">
+    <div className="stk-scrim" onMouseDown={() => { if (!busy) onClose(); }}>
+      <div className="stk-dialog" onMouseDown={e => e.stopPropagation()} role="dialog" aria-label="Import stack">
+        <div className="stk-dlg-h">
+          <span className="stk-dlg-eye">Import stack</span>
+          <button className="stk-dlg-x" onClick={onClose} aria-label="Close" disabled={busy}>{Icons.close}</button>
+        </div>
+        <div className="stk-dlg-b">
           {!report ? (
-            <label className="st-drop">
+            <label className="stk-drop">
               <input type="file" accept=".json,application/json" style={{ display: 'none' }}
-                onChange={e => e.target.files?.[0] && onFile(e.target.files[0])}
-                data-testid="st-import-file" />
-              <span className="st-drop-glyph">{Icons.download}</span>
+                onChange={e => e.target.files?.[0] && onFile(e.target.files[0])} data-testid="st-import-file" />
+              <span className="stk-drop-glyph">{Icons.attach}</span>
               <span className="mono">Choose a .hal0stack.json file</span>
-              {err && <span className="pf-msg err mono hint err">{Icons.alert}{err}</span>}
+              {err && <span className="stk-dlg-warn">{Icons.alert}{err}</span>}
             </label>
           ) : (
             <>
-              <div className="st-apply-sub mono">
+              <div className="stk-dlg-hint">
                 {report.name || 'stack'} · schema v{report.schema_version} · checksum {report.checksum_ok ? 'ok' : '⚠ mismatch'}
               </div>
-              <div className="st-resolve">
+              <div className="stk-slot-list">
                 {(report.resolutions || []).map(r => (
-                  <div className={'st-resolve-row ' + r.status} key={r.model_id}>
-                    <span className="mono st-resolve-id">{r.model_id}</span>
-                    <span className={'pf-chip st-resolve-st ' + r.status}>{r.status}</span>
-                    {r.status === 'pullable' && (
-                      <button className="pf-btn" type="button"
-                        onClick={() => { window.location.hash = '#models'; }}
-                        title="Pull this model on the Models page">{Icons.download} Pull</button>
-                    )}
+                  <div key={r.model_id} className={'stk-slot-row' + (r.status === 'unresolvable' ? ' miss' : '')}>
+                    <span className="smodel">{r.model_id}</span>
+                    <span className="smiss" style={{ color: r.status === 'present' ? 'var(--ok)' : r.status === 'pullable' ? 'var(--info)' : 'var(--err)' }}>{r.status}</span>
                   </div>
                 ))}
                 {(!report.resolutions || report.resolutions.length === 0) && (
-                  <div className="pf-unused mono">no model references</div>
+                  <div className="stk-dlg-hint" style={{ color: 'var(--fg-5)' }}>no model references</div>
                 )}
               </div>
               {report.unresolvable?.length > 0 && (
-                <div className="pf-msg warn mono">{Icons.alert}{report.unresolvable.length} model(s) unresolvable — those slots import disabled.</div>
+                <div className="stk-dlg-warn">{Icons.alert}{report.unresolvable.length} model(s) unresolvable — those slots import disabled.</div>
               )}
-              <label className="st-slugrow">
-                <span className="pf-row-lbl">Save as</span>
-                <input className={'pf-input mono' + (slug && !slugValid ? ' err' : '')} value={slug}
-                  onChange={e => setSlug(e.target.value)} maxLength={32} placeholder="my-stack"
-                  data-testid="st-import-slug" />
-              </label>
-              {slugTaken && <span className="pf-msg err mono hint err">{Icons.alert}“{slug}” already exists</span>}
+              <div className="stk-slot-list">
+                <div className="stk-slot-row">
+                  <span className="sname">Save as</span>
+                  <input className={'pf-input mono' + (slug && !slugValid ? ' err' : '')} value={slug}
+                    onChange={e => setSlug(e.target.value)} maxLength={32} placeholder="my-stack"
+                    style={{ flex: 1, background: 'transparent', border: 'none', color: 'var(--fg)', fontFamily: 'var(--jbm)' }}
+                    data-testid="st-import-slug" />
+                </div>
+              </div>
+              {slugTaken && <div className="stk-dlg-warn">{Icons.alert}“{slug}” already exists</div>}
             </>
           )}
         </div>
-        <div className="pf-confirm-foot">
-          <button className="pf-btn" onClick={onClose} disabled={busy}>Cancel</button>
+        <div className="stk-dlg-f">
+          <button className="btn ghost sm" onClick={onClose} disabled={busy}>Cancel</button>
           {report && (
-            <button className="pf-btn primary solid" onClick={commit} disabled={!slugValid || busy}
-              data-testid="st-import-confirm">{busy ? 'Importing…' : 'Import'}</button>
+            <button className="btn sm" onClick={commit} disabled={!slugValid || busy} data-testid="st-import-confirm">
+              {busy ? 'Importing…' : 'Import'}
+            </button>
           )}
         </div>
       </div>
@@ -371,11 +393,11 @@ function ImportModal({ existing, onClose, onImported }) {
 function fromStack(s) {
   return {
     name: s.name || '',
-    description: s.description || '',
+    description: s.description || s.intent || '',
     icon: s.icon || '',
     tags: (s.tags || []).join(', '),
     slots: (s.slots || []).map(e => ({
-      slot: e.slot || '',
+      slot: e.slot || e.name || '',
       model: e.model || '',
       device: e.device || 'gpu-rocm',
       profile: e.profile || '',
@@ -389,8 +411,6 @@ function Drawer({ mode, source, existing = [], onClose, onSaved }) {
   const isEdit = mode === 'edit';
   const models = useModels().data || [];
   const profiles = useProfiles().data || [];
-  // Existing live slots feed the slot-name datalist: pick an existing slot from
-  // the dropdown, or type a new name to create one on apply.
   const liveSlots = (useSlots().data || []).filter(s => (s.kind ?? 'local') === 'local');
 
   const initial = (() => {
@@ -421,9 +441,7 @@ function Drawer({ mode, source, existing = [], onClose, onSaved }) {
     : form.slots.some(s => !s.slot.trim()) ? 'every slot needs a name' : '';
   const blocking = (!isEdit && !!slugErr) || !!slotErr;
 
-  const setSlot = (i, k, v) => setForm(f => ({
-    ...f, slots: f.slots.map((s, j) => j === i ? { ...s, [k]: v } : s),
-  }));
+  const setSlot = (i, k, v) => setForm(f => ({ ...f, slots: f.slots.map((s, j) => j === i ? { ...s, [k]: v } : s) }));
   const addSlot = () => setForm(f => ({ ...f, slots: [...f.slots, { ...BLANK_SLOT }] }));
   const rmSlot = (i) => setForm(f => ({ ...f, slots: f.slots.filter((_, j) => j !== i) }));
   const close = () => { if (submitting) return; setClosing(true); setTimeout(onClose, 200); };
@@ -488,17 +506,12 @@ function Drawer({ mode, source, existing = [], onClose, onSaved }) {
           </FormRow>
           <FormRow label="Name" sub="display label">
             <input className="pf-input" value={form.name}
-              onChange={e => setForm(f => ({ ...f, name: e.target.value }))}
-              placeholder="Coding" data-testid="st-input-name" />
+              onChange={e => setForm(f => ({ ...f, name: e.target.value }))} placeholder="Coding" data-testid="st-input-name" />
           </FormRow>
           <FormRow label="Description" sub="what it's for">
             <textarea className="pf-input pf-textarea" rows={2} value={form.description}
               onChange={e => setForm(f => ({ ...f, description: e.target.value }))}
               placeholder="Fast coder + agentic muscle + repo retrieval" />
-          </FormRow>
-          <FormRow label="Icon" sub="emoji or accent">
-            <input className="pf-input" value={form.icon}
-              onChange={e => setForm(f => ({ ...f, icon: e.target.value }))} placeholder="⚡" maxLength={8} />
           </FormRow>
           <FormRow label="Tags" sub="comma-separated">
             <input className="pf-input mono" value={form.tags}
@@ -515,33 +528,29 @@ function Drawer({ mode, source, existing = [], onClose, onSaved }) {
             {form.slots.map((s, i) => {
               const isNew = !!s.slot && !liveSlots.some(ls => ls.name === s.slot);
               return (
-              <div className="st-slot-edit" key={i}>
-                <input className="pf-input mono st-slot-name" value={s.slot} list="st-existing-slots"
-                  onChange={e => setSlot(i, 'slot', e.target.value)}
-                  placeholder="pick or name…" maxLength={32}
-                  title={isNew ? 'New slot — created on apply' : 'Existing slot'}
-                  data-testid={`st-slot-name-${i}`} />
-                {isNew && <span className="st-slot-new mono" title="Created on apply">new</span>}
-                <select className="pf-input mono st-slot-model" value={s.model}
-                  onChange={e => setSlot(i, 'model', e.target.value)} data-testid={`st-slot-model-${i}`}>
-                  <option value="">— model —</option>
-                  {models.map(m => <option key={m.id} value={m.id}>{m.id}</option>)}
-                </select>
-                <select className="pf-input mono st-slot-dev" value={s.device}
-                  onChange={e => setSlot(i, 'device', e.target.value)}>
-                  {DEVICES.map(d => <option key={d} value={d}>{DEVICE_META[d].label}</option>)}
-                </select>
-                <select className="pf-input mono st-slot-prof" value={s.profile}
-                  onChange={e => setSlot(i, 'profile', e.target.value)}>
-                  <option value="">— profile —</option>
-                  {profiles.map(p => <option key={p.name} value={p.name}>{p.name}</option>)}
-                </select>
-                <button type="button" className={'pf-switch sm' + (s.mtp ? ' on' : '')}
-                  onClick={() => setSlot(i, 'mtp', !s.mtp)} role="switch" aria-checked={s.mtp}
-                  title="MTP speculative decode"><span className="pf-switch-knob" /><span className="mono">MTP</span></button>
-                <button type="button" className="pf-btn danger" onClick={() => rmSlot(i)} title="Remove slot"
-                  data-testid={`st-slot-rm-${i}`}>{Icons.trash}</button>
-              </div>
+                <div className="st-slot-edit" key={i}>
+                  <input className="pf-input mono st-slot-name" value={s.slot} list="st-existing-slots"
+                    onChange={e => setSlot(i, 'slot', e.target.value)} placeholder="pick or name…" maxLength={32}
+                    title={isNew ? 'New slot — created on apply' : 'Existing slot'} data-testid={`st-slot-name-${i}`} />
+                  {isNew && <span className="st-slot-new mono" title="Created on apply">new</span>}
+                  <select className="pf-input mono st-slot-model" value={s.model}
+                    onChange={e => setSlot(i, 'model', e.target.value)} data-testid={`st-slot-model-${i}`}>
+                    <option value="">— model —</option>
+                    {models.map(m => <option key={m.id} value={m.id}>{m.id}</option>)}
+                  </select>
+                  <select className="pf-input mono st-slot-dev" value={s.device} onChange={e => setSlot(i, 'device', e.target.value)}>
+                    {DEVICES.map(d => <option key={d} value={d}>{DEVICE_META[d].label}</option>)}
+                  </select>
+                  <select className="pf-input mono st-slot-prof" value={s.profile} onChange={e => setSlot(i, 'profile', e.target.value)}>
+                    <option value="">— profile —</option>
+                    {profiles.map(p => <option key={p.name} value={p.name}>{p.name}</option>)}
+                  </select>
+                  <button type="button" className={'pf-switch sm' + (s.mtp ? ' on' : '')}
+                    onClick={() => setSlot(i, 'mtp', !s.mtp)} role="switch" aria-checked={s.mtp} title="MTP speculative decode">
+                    <span className="pf-switch-knob" /><span className="mono">MTP</span>
+                  </button>
+                  <button type="button" className="pf-btn danger" onClick={() => rmSlot(i)} title="Remove slot" data-testid={`st-slot-rm-${i}`}>{Icons.trash}</button>
+                </div>
               );
             })}
             <button type="button" className="pf-btn" onClick={addSlot} data-testid="st-slot-add">{Icons.plus} Add slot</button>
@@ -560,7 +569,6 @@ function Drawer({ mode, source, existing = [], onClose, onSaved }) {
   );
 }
 
-// A trimmed FormRow (Profiles' has bench-specific affordances we don't need).
 function FormRow({ label, sub, req, children, error }) {
   return (
     <div className={'pf-row' + (error ? ' has-err' : '')}>
@@ -578,14 +586,14 @@ function FormRow({ label, sub, req, children, error }) {
 
 // ── Delete confirm ──────────────────────────────────────────────────────────
 
-function DeleteConfirm({ s, onCancel, onConfirmed }) {
+function DeleteConfirm({ vm, onCancel, onConfirmed }) {
   const del = useStackDelete();
   const [busy, setBusy] = useState(false);
   async function handle() {
     setBusy(true);
     try {
-      await del.mutateAsync(s.slug);
-      toast(`Stack ${s.slug} deleted`, 'ok');
+      await del.mutateAsync(vm.slug);
+      toast(`Stack ${vm.slug} deleted`, 'ok');
       onConfirmed();
     } catch (err) {
       toast(err?.code === 'stacks.seed_immutable' ? 'Seed stacks cannot be deleted' : (err?.message || 'Delete failed'), 'err');
@@ -593,52 +601,20 @@ function DeleteConfirm({ s, onCancel, onConfirmed }) {
     } finally { setBusy(false); }
   }
   return (
-    <div className="pf-scrim center pf-confirm-scrim" onMouseDown={() => { if (!busy) onCancel(); }}>
-      <div className="pf-confirm" onMouseDown={e => e.stopPropagation()} role="dialog" aria-label="Confirm delete" aria-busy={busy}>
-        <div className="pf-confirm-h pf-confirm-title mono">{Icons.trash} Delete · {s.slug}?</div>
-        <div className="pf-confirm-b">
-          <div className="pf-confirm-sub">This removes the stack permanently. Loaded slots are unaffected — only the saved bundle is deleted.</div>
+    <div className="stk-scrim" onMouseDown={() => { if (!busy) onCancel(); }}>
+      <div className="stk-dialog" style={{ maxWidth: 420 }} onMouseDown={e => e.stopPropagation()} role="dialog" aria-label="Confirm delete" aria-busy={busy}>
+        <div className="stk-dlg-h"><span className="stk-dlg-eye">Delete · {vm.slug}?</span>
+          <button className="stk-dlg-x" onClick={onCancel} aria-label="Close" disabled={busy}>{Icons.close}</button>
         </div>
-        <div className="pf-confirm-foot">
-          <button className="pf-btn" onClick={onCancel} disabled={busy}>Cancel</button>
-          <button className="pf-btn danger solid" onClick={handle} disabled={busy} data-testid="st-btn-delete-confirm">
-            {busy ? 'Deleting…' : 'Delete stack'}
-          </button>
+        <div className="stk-dlg-b">
+          <div className="stk-dlg-hint">This removes the stack permanently. Loaded slots are unaffected — only the saved bundle is deleted.</div>
+        </div>
+        <div className="stk-dlg-f">
+          <button className="btn ghost sm" onClick={onCancel} disabled={busy}>Cancel</button>
+          <button className="btn sm" style={{ background: 'transparent', color: 'var(--err)', borderColor: 'var(--err-line)' }}
+            onClick={handle} disabled={busy} data-testid="st-btn-delete-confirm">{busy ? 'Deleting…' : 'Delete stack'}</button>
         </div>
       </div>
-    </div>
-  );
-}
-
-// ── Header / summary ────────────────────────────────────────────────────────
-
-function Stat({ value, label, accent }) {
-  return (
-    <div className="pf-stat">
-      <span className="pf-stat-v num" style={accent ? { color: accent } : null}>{value}</span>
-      <span className="pf-stat-l mono">{label}</span>
-    </div>
-  );
-}
-
-function StacksHeader({ count, active, onNew, onImport, onSnapshot }) {
-  return (
-    <div className="engine-h pf-engine-h">
-      <span className="engine-glyph">{Icons.slots}</span>
-      <span className="cpane-titles">
-        <span className="engine-title">Stacks</span>
-        <span className="engine-sub">portable loadouts · slots + profiles + models, applied in one action</span>
-      </span>
-      {count != null && (
-        <span className="cpill"><span className="dot" />{count} stack{count === 1 ? '' : 's'}</span>
-      )}
-      {active && <span className="cpill st-active-pill"><span className="dot" />active · {active}</span>}
-      <span className="grow" />
-      <span className="eh-right">
-        <button className="pf-btn" onClick={onSnapshot} data-testid="st-btn-snapshot">{Icons.copy} Snapshot live</button>
-        <button className="pf-btn" onClick={onImport} data-testid="st-btn-import">{Icons.download} Import</button>
-        <button className="pf-btn primary" onClick={onNew} data-testid="st-btn-new">{Icons.plus} New stack</button>
-      </span>
     </div>
   );
 }
@@ -647,108 +623,167 @@ function StacksHeader({ count, active, onNew, onImport, onSnapshot }) {
 
 function StacksView() {
   const query = useStacks();
+  const slotsQuery = useSlots();
+  const modelsQuery = useModels();
   const snapshot = useStackSnapshot();
-  const data = query.data;
-  const stacks = data?.stacks ?? [];
-
-  const [drawer, setDrawer] = useState(null);    // {mode, source}
-  const [confirm, setConfirm] = useState(null);
-  const [applying, setApplying] = useState(null);
-  const [importing, setImporting] = useState(false);
-
+  const apply = useStackApply();
   const exportMut = useStackExport();
 
-  const seeds = stacks.filter(s => s.seed);
-  const custom = stacks.filter(s => !s.seed);
+  const data = query.data;
+  const rawStacks = data?.stacks ?? [];
 
-  async function onExport(s) {
+  const [drawer, setDrawer] = useState(null);
+  const [confirm, setConfirm] = useState(null);
+  const [loadTgt, setLoadTgt] = useState(null);
+  const [pullTgt, setPullTgt] = useState(null);
+  const [pulledQ, setPulledQ] = useState([]);
+  const [importing, setImporting] = useState(false);
+  const [loadBusy, setLoadBusy] = useState(false);
+
+  const modelSet = new Set((modelsQuery.data ?? []).map(m => m.id));
+  const liveByName = {};
+  for (const s of slotsQuery.data ?? []) liveByName[s.name] = s;
+
+  const vms = rawStacks.map(s => buildVM(s, modelSet, liveByName, data?.active));
+  const activeVM = vms.find(v => v.active) || null;
+  const library = vms.filter(v => !v.active);
+  const totalMiss = vms.reduce((n, v) => n + missingCount(v), 0);
+  const existing = rawStacks.map(s => s.slug);
+  const isCustom = (vm) => !vm.seed;
+
+  async function onExport(vm) {
     try {
-      const env = await exportMut.mutateAsync(s.slug);
+      const env = await exportMut.mutateAsync(vm.slug);
       const blob = new Blob([JSON.stringify(env, null, 2)], { type: 'application/json' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
-      a.href = url; a.download = `${s.slug}.hal0stack.json`;
+      a.href = url; a.download = `${vm.slug}.hal0stack.json`;
       document.body.appendChild(a); a.click(); a.remove();
       URL.revokeObjectURL(url);
-      toast(`Exported ${s.slug}`, 'ok');
+      toast(`Exported ${vm.slug}`, 'ok');
     } catch (err) { toast(err?.message || 'Export failed', 'err'); }
   }
 
   async function onSnapshot() {
     try {
       const r = await snapshot.mutateAsync({ name: 'Snapshot' });
-      // Open the editor prefilled with the live config for naming + saving.
       setDrawer({ mode: 'create', source: r.stack });
       toast('Captured live config — name it and save', 'info');
     } catch (err) { toast(err?.message || 'Snapshot failed', 'err'); }
   }
 
+  function openPull(vm) { setPulledQ([]); setPullTgt(vm); }
+
+  async function queuePull(model) {
+    setPulledQ(q => q.includes(model) ? q : [...q, model]);
+    try {
+      await api(ENDPOINTS.modelPull(model), { method: 'POST', raw: true });
+      toast(`Pulling ${model}…`, 'info');
+    } catch (err) {
+      toast(err?.message || `Pull failed: ${model}`, 'err');
+    }
+  }
+
+  async function confirmLoad(vm) {
+    setLoadBusy(true);
+    try {
+      const r = await apply.mutateAsync({ slug: vm.slug, dryRun: false });
+      const errs = r?.converged?.errors?.length || 0;
+      toast(errs ? `Loaded ${vm.name} with ${errs} slot error(s)` : `Stack “${vm.name}” loaded`, errs ? 'warn' : 'ok');
+      setLoadTgt(null);
+    } catch (err) {
+      toast(err?.message || 'Load failed', 'err');
+    } finally { setLoadBusy(false); }
+  }
+
   if (query.isLoading) {
-    return <div className="view"><div className="pf-engine"><StacksHeader /></div><div className="empty mono">Loading stacks…</div></div>;
+    return <div className="view"><Header /><div className="empty mono" style={{ marginTop: 20 }}>Loading stacks…</div></div>;
   }
   if (query.isError) {
     return (
-      <div className="view"><div className="pf-engine"><StacksHeader /></div>
-        <div className="empty mono" style={{ color: 'var(--err)' }}>Failed to load stacks: {query.error?.message || 'unknown error'}</div>
+      <div className="view"><Header />
+        <div className="empty mono" style={{ marginTop: 20, color: 'var(--err)' }}>Failed to load stacks: {query.error?.message || 'unknown error'}</div>
       </div>
     );
   }
 
-  const existing = stacks.map(s => s.slug);
+  function Header() {
+    return (
+      <div className="vh">
+        <span className="vh-eye mono">RUNTIME</span>
+        <h1>Stacks</h1>
+        <div className="vh-spacer" />
+        <span className="hint mono">preconfigured slot + profile + model bundles</span>
+        <button className="btn ghost sm" onClick={() => setImporting(true)} data-testid="st-btn-import">{Icons.attach} Import</button>
+        <button className="btn ghost sm" onClick={onSnapshot} data-testid="st-btn-snapshot">{Icons.copy} Snapshot</button>
+        <button className="btn sm" onClick={() => setDrawer({ mode: 'create' })} data-testid="st-btn-new">{Icons.plus} New stack</button>
+      </div>
+    );
+  }
+
+  const libProps = {
+    isCustomFn: isCustom,
+    onLoad: setLoadTgt, onPull: openPull, onExport,
+    onClone: vm => setDrawer({ mode: 'clone', source: rawStacks.find(s => s.slug === vm.slug) }),
+    onEdit: vm => setDrawer({ mode: 'edit', source: rawStacks.find(s => s.slug === vm.slug) }),
+    onDelete: setConfirm,
+  };
 
   return (
     <div className="view">
-      <div className="pf-engine">
-        <StacksHeader count={stacks.length} active={data?.active}
-          onNew={() => setDrawer({ mode: 'create' })}
-          onImport={() => setImporting(true)}
-          onSnapshot={onSnapshot} />
-        <div className="pf-summary">
-          <Stat value={stacks.length} label="stacks" />
-          <span className="pf-stat-div" />
-          <Stat value={seeds.length} label="seed templates" />
-          <Stat value={custom.length} label="custom" accent="var(--accent)" />
-          <span className="pf-stat-div" />
-          <Stat value={data?.active || '—'} label="active"
-            accent={data?.drift === 'modified' ? 'var(--warn)' : 'var(--ok)'} />
-          {data?.active && data?.drift && <Stat value={data.drift} label="drift" />}
+      <Header />
+
+      <div className="stk-toolbar">
+        <div className="stk-summary">
+          <span className="stk-sum-item"><b className="num">{vms.length}</b><span className="mono"> stacks</span></span>
+          <span className="stk-sum-sep">·</span>
+          <span className="stk-sum-item"><b className="num" style={{ color: activeVM ? 'var(--ok)' : 'var(--fg-4)' }}>{activeVM ? 1 : 0}</b><span className="mono"> active</span></span>
+          {totalMiss > 0 && <>
+            <span className="stk-sum-sep">·</span>
+            <span className="stk-sum-item"><b className="num" style={{ color: 'var(--warn)' }}>{totalMiss}</b><span className="mono"> missing models</span></span>
+          </>}
         </div>
       </div>
 
-      {stacks.length === 0 ? (
+      {vms.length === 0 ? (
         <div className="empty mono">No stacks yet — create one, snapshot the live config, or import a .hal0stack.json.</div>
       ) : (
-        <>
-          {seeds.length > 0 && (
-            <Section title="Seed stacks" count={seeds.length} hint="immutable · ship with hal0">
-              {seeds.map((s, i) => (
-                <StackCard key={s.slug} s={s} index={i}
-                  onApply={setApplying}
-                  onClone={ss => setDrawer({ mode: 'clone', source: ss })}
-                  onExport={onExport} onDelete={setConfirm} onEdit={() => {}} />
-              ))}
-            </Section>
-          )}
-          <Section title="Custom stacks" count={custom.length} hint="authored, cloned, snapshotted or imported on this box">
-            {custom.length === 0
-              ? <div className="empty mono" style={{ gridColumn: '1/-1' }}>None yet — clone a seed or snapshot the live config.</div>
-              : custom.map((s, i) => (
-                <StackCard key={s.slug} s={s} index={i}
-                  onApply={setApplying}
-                  onEdit={ss => setDrawer({ mode: 'edit', source: ss })}
-                  onClone={ss => setDrawer({ mode: 'clone', source: ss })}
-                  onExport={onExport} onDelete={setConfirm} />
-              ))}
-          </Section>
-        </>
+        <div className="stk-focus">
+          {activeVM
+            ? <HeroPanel vm={activeVM} isCustom={isCustom(activeVM)} onPull={openPull} onExport={onExport}
+                onReapply={setLoadTgt} onEdit={libProps.onEdit} />
+            : <div className="stk-hero" style={{ borderColor: 'var(--line)' }}>
+                <div className="stk-hero-h">
+                  <div>
+                    <div className="stk-hero-eye">No active stack</div>
+                    <div className="stk-hero-name" style={{ color: 'var(--fg-3)' }}>Nothing applied</div>
+                    <div className="stk-hero-intent">Load a stack below to set the platform's models, embed, and voice in one action.</div>
+                  </div>
+                </div>
+              </div>}
+
+          <div className="sec" style={{ marginTop: 28, marginBottom: 14 }}>
+            <h2>Library <span className="ct num">{library.length}</span></h2>
+            <span className="rule" />
+          </div>
+
+          {library.length === 0
+            ? <div className="empty mono">Every stack is the active one. Clone a seed or snapshot the live config to add more.</div>
+            : <div className="stk-lib-grid">
+                {library.map((vm, i) => (
+                  <LibCard key={vm.slug} vm={vm} idx={i} isCustom={isCustom(vm)}
+                    onLoad={libProps.onLoad} onPull={libProps.onPull} onExport={libProps.onExport}
+                    onClone={libProps.onClone} onEdit={libProps.onEdit} onDelete={libProps.onDelete} />
+                ))}
+              </div>}
+        </div>
       )}
 
-      {drawer && (
-        <Drawer mode={drawer.mode} source={drawer.source} existing={existing}
-          onClose={() => setDrawer(null)} onSaved={() => setDrawer(null)} />
-      )}
-      {confirm && <DeleteConfirm s={confirm} onCancel={() => setConfirm(null)} onConfirmed={() => setConfirm(null)} />}
-      {applying && <ApplyModal stack={applying} onClose={() => setApplying(null)} />}
+      {drawer && <Drawer mode={drawer.mode} source={drawer.source} existing={existing}
+        onClose={() => setDrawer(null)} onSaved={() => setDrawer(null)} />}
+      {confirm && <DeleteConfirm vm={confirm} onCancel={() => setConfirm(null)} onConfirmed={() => setConfirm(null)} />}
+      {loadTgt && <LoadDialog vm={loadTgt} busy={loadBusy} onLoad={confirmLoad} onPull={openPull} onClose={() => setLoadTgt(null)} />}
+      {pullTgt && <PullDialog vm={pullTgt} pulled={pulledQ} onPull={queuePull} onClose={() => setPullTgt(null)} />}
       {importing && <ImportModal existing={existing} onClose={() => setImporting(false)} onImported={() => setImporting(false)} />}
     </div>
   );
