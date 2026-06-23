@@ -75,115 +75,75 @@ function SlotPill({ name }) {
 
 // ── Profile card ──────────────────────────────────────────────────────────────
 
+// Info row in the stacks-card "slotlist" idiom: hued dot · label · value.
+function PfRow({ label, value, hue }) {
+  return (
+    <div className="stk-lib-slotrow">
+      <span className="pf-row-dot" style={hue ? { background: hue, boxShadow: `0 0 6px ${hue}` } : null} />
+      <span className="stk-csr-name mono">{label}</span>
+      <span className="stk-csr-model mono">{value}</span>
+    </div>
+  );
+}
+
+// Profile card — adopts the Stacks library-card shell (.stk-lib-*) so the
+// Profiles and Stacks grids read as one family. Same data + actions as before.
 function ProfileCard({ p, index, onEdit, onClone, onDelete }) {
   const meta = bk(backendOf(p));
   const isSeed = !!p.seed;
   const usedBy = p.used_by || [];
   const inUse = usedBy.length;
+  const metric = p.tps != null ? `${p.tps.toFixed(1)} tok/s`
+    : p.rtf != null ? `${p.rtf.toFixed(2)}× rtf` : null;
 
   return (
-    <div className="pf-card" style={{ '--bk': meta.color, animationDelay: (index * 34) + 'ms' }}>
-      <span className="pf-accent" />
-      <div className="pf-card-top">
-        <div className="pf-headline">
-          <div className="pf-intent">{intentOf(p)}</div>
-          <div className="pf-slug-row mono">
-            <span className="pf-slug">{p.name}</span>
-            {p.cloned_from && <span className="pf-based">↳ {p.cloned_from}</span>}
+    <div className="stk-lib-card" style={{ animationDelay: (index * 34) + 'ms' }}>
+      <div className="stk-lib-h">
+        <div className="stk-lib-id">
+          <div className="stk-lib-name">{p.name}</div>
+          <div className="stk-lib-intent">
+            {intentOf(p)}{p.cloned_from && <span className="pf-based mono"> · ↳ {p.cloned_from}</span>}
           </div>
         </div>
-        <div className="pf-metric">
-          {p.tps != null ? (
-            <>
-              <span className="pf-tps num">{p.tps.toFixed(1)}</span>
-              <span className="pf-tps-u mono">tok/s · bench</span>
-            </>
-          ) : p.rtf != null ? (
-            <>
-              <span className="pf-tps num">{p.rtf.toFixed(2)}×</span>
-              <span className="pf-tps-u mono">RTF · synth</span>
-            </>
-          ) : (
-            <span className="pf-tps-u mono">—</span>
-          )}
+        <div className="pf-card-meta">
+          <span className="stk-tag pf-bk" style={{ '--bk': meta.color, color: meta.color, borderColor: 'color-mix(in srgb, ' + meta.color + ' 34%, transparent)', background: 'color-mix(in srgb, ' + meta.color + ' 10%, transparent)' }}>
+            {meta.label}
+          </span>
+          {metric && <span className="mono pf-card-metric">{metric}</span>}
         </div>
       </div>
 
-      <div className="pf-chips">
-        <span className="pf-chip backend" style={{ '--bk': meta.color }}>
-          <span className="pf-chip-dot" />{meta.label}
-        </span>
-        {p.quant && <span className="pf-chip">{p.quant}</span>}
-        {p.mtp && <span className="pf-chip mtp">{Icons.zap} MTP</span>}
-        <span className="pf-grow" />
+      <div className="stk-lib-slotlist">
+        {p.quant && <PfRow label="quant" value={p.quant} />}
+        {p.mtp && <PfRow label="mtp" value="speculative" hue="var(--accent)" />}
+        <PfRow label="image" value={p.image} />
+        {p.resolved_flags && <PfRow label="flags" value={p.resolved_flags} />}
+      </div>
+
+      <div className="stk-lib-f">
+        {inUse
+          ? <span className="stk-tag" title={'used by ' + usedBy.join(', ')}>used by {inUse}</span>
+          : <span className="mono pf-card-unused">unused</span>}
         {isSeed
-          ? <span className="pf-chip seed immutable" title="Seed profiles are read-only">{Icons.lock} seed</span>
-          : <span className="pf-chip custom">custom</span>}
-      </div>
-
-      <div className="pf-image mono">
-        <span className="pf-image-lbl">image</span>
-        <span className="pf-image-uri">{p.image}</span>
-      </div>
-
-      {p.resolved_flags && (
-        <div className="pf-flags">
-          <span className="pf-flags-lbl mono">flags</span>
-          <code className="pf-flags-code">{p.resolved_flags}</code>
-        </div>
-      )}
-
-      <div className="pf-foot">
-        <div className="pf-usage">
-          {inUse ? (
-            <>
-              <span className="pf-usage-lbl mono">used by</span>
-              <span className="pf-slots">{usedBy.map(s => <SlotPill key={s} name={s} />)}</span>
-            </>
-          ) : (
-            <span className="pf-unused mono">unused · safe to delete</span>
-          )}
-        </div>
-        <div className="pf-actions">
-          {isSeed ? (
-            <button
-              className="pf-btn"
-              onClick={() => onClone(p)}
-              title="Seeds are immutable — fork a custom copy"
-              data-testid={`pf-btn-editcopy-${p.name}`}
-            >
-              {Icons.copy} Edit a copy
-            </button>
-          ) : (
-            <>
-              <button
-                className="pf-btn"
-                onClick={() => onClone(p)}
-                title="Clone this profile"
-                data-testid={`pf-btn-clone-${p.name}`}
-              >
-                {Icons.copy}
-              </button>
-              <button
-                className="pf-btn"
-                onClick={() => onEdit(p)}
-                title="Edit"
-                data-testid={`pf-btn-edit-${p.name}`}
-              >
-                {Icons.edit} Edit
-              </button>
-            </>
-          )}
-          <button
-            className="pf-btn danger"
-            onClick={() => onDelete(p)}
-            disabled={isSeed}
-            title={isSeed ? 'Seed profiles cannot be deleted' : inUse ? 'In use — detach slots first' : 'Delete'}
-            data-testid={`pf-btn-delete-${p.name}`}
-          >
-            {Icons.trash}
+          ? <span className="stk-tag pf-seed" title="Seed profiles are read-only">{Icons.lock} seed</span>
+          : <span className="stk-tag shared pf-custom">custom</span>}
+        <span className="stk-spacer" />
+        {isSeed ? (
+          <button className="stk-icon-btn" style={{ width: 26, height: 26 }} onClick={() => onClone(p)}
+            title="Seeds are immutable — fork a custom copy" data-testid={`pf-btn-editcopy-${p.name}`}>
+            {Icons.copy}
           </button>
-        </div>
+        ) : (
+          <>
+            <button className="stk-icon-btn" style={{ width: 26, height: 26 }} onClick={() => onClone(p)}
+              title="Clone this profile" data-testid={`pf-btn-clone-${p.name}`}>{Icons.copy}</button>
+            <button className="stk-icon-btn" style={{ width: 26, height: 26 }} onClick={() => onEdit(p)}
+              title="Edit" data-testid={`pf-btn-edit-${p.name}`}>{Icons.edit}</button>
+          </>
+        )}
+        <button className="stk-icon-btn" style={{ width: 26, height: 26 }} onClick={() => onDelete(p)} disabled={isSeed}
+          title={isSeed ? 'Seed profiles cannot be deleted' : inUse ? 'In use — detach slots first' : 'Delete'}
+          data-testid={`pf-btn-delete-${p.name}`}>{Icons.trash}</button>
       </div>
     </div>
   );

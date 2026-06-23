@@ -2709,7 +2709,13 @@ select.npu-sel {
 .pf-section { margin-bottom: 26px; }
 .pf-section .sec { display: flex; align-items: baseline; gap: 14px; margin: 0 0 14px; }
 .pf-sec-hint { font-size: 10.5px; color: var(--fg-4); }
-.pf-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: 14px; }
+/* Match the Stacks library-card grid: compact, denser columns. */
+.pf-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 10px; }
+/* Profile-card bits layered on the shared .stk-lib-card shell (stacks.css). */
+.pf-card-meta { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; flex-shrink: 0; }
+.pf-card-metric { font-size: 9.5px; color: var(--fg-5); }
+.pf-card-unused { font-size: 10px; color: var(--fg-5); }
+.pf-row-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--fg-5); flex-shrink: 0; }
 
 /* Profile card */
 .pf-card {

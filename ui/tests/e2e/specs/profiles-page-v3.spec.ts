@@ -95,40 +95,40 @@ test.describe('Profiles page (#658)', () => {
 
   test('Profiles page renders profile cards', async ({ page }) => {
     // Wait for at least one profile card to appear
-    await page.waitForSelector('.pf-card', { timeout: 10_000 })
-    const cards = page.locator('.pf-card')
+    await page.waitForSelector('.stk-lib-card', { timeout: 10_000 })
+    const cards = page.locator('.stk-lib-card')
     await expect(cards).toHaveCount(MOCK_DATA.profiles.length)
   })
 
   test('Profile card shows intent label for known profiles', async ({ page }) => {
-    await page.waitForSelector('.pf-card', { timeout: 10_000 })
-    const firstCard = page.locator('.pf-card').first()
-    const intent = firstCard.locator('.pf-intent')
+    await page.waitForSelector('.stk-lib-card', { timeout: 10_000 })
+    const firstCard = page.locator('.stk-lib-card').first()
+    const intent = firstCard.locator('.stk-lib-intent')
     await expect(intent).toContainText('MoE agents')
   })
 
   test('Profile card shows image tag as secondary metadata', async ({ page }) => {
-    await page.waitForSelector('.pf-card', { timeout: 10_000 })
-    const firstCard = page.locator('.pf-card').first()
+    await page.waitForSelector('.stk-lib-card', { timeout: 10_000 })
+    const firstCard = page.locator('.stk-lib-card').first()
     // Image tag should be the portion after the colon
     await expect(firstCard).toContainText('rocm-7.2.4-rocmfp4-server')
   })
 
   test('vulkan profile shows fallback intent label', async ({ page }) => {
-    await page.waitForSelector('.pf-card', { timeout: 10_000 })
-    const vulkanCard = page.locator('.pf-card', {
-      has: page.locator('.pf-slug', { hasText: /^vulkan$/ }),
+    await page.waitForSelector('.stk-lib-card', { timeout: 10_000 })
+    const vulkanCard = page.locator('.stk-lib-card', {
+      has: page.locator('.stk-lib-name', { hasText: /^vulkan$/ }),
     })
-    await expect(vulkanCard.locator('.pf-intent')).toContainText('Vulkan std · fallback')
+    await expect(vulkanCard.locator('.stk-lib-intent')).toContainText('Vulkan std · fallback')
   })
 
   test('overhaul: summary strip + sectioned cards + backend chip + bench metric', async ({ page }) => {
-    await page.waitForSelector('.pf-card', { timeout: 10_000 })
+    await page.waitForSelector('.stk-lib-card', { timeout: 10_000 })
     await expect(page.locator('.pf-summary')).toBeVisible()
     const seedSection = page.locator('.pf-section', { hasText: 'Seed templates' })
-    await expect(seedSection.locator('.pf-card')).toHaveCount(MOCK_DATA.profiles.length)
-    const rocm = page.locator('.pf-card', { has: page.locator('.pf-slug', { hasText: /^rocm$/ }) })
-    await expect(rocm.locator('.pf-chip.backend')).toContainText('ROCm')
+    await expect(seedSection.locator('.stk-lib-card')).toHaveCount(MOCK_DATA.profiles.length)
+    const rocm = page.locator('.stk-lib-card', { has: page.locator('.stk-lib-name', { hasText: /^rocm$/ }) })
+    await expect(rocm.locator('.pf-bk')).toContainText('ROCm')
     await expect(rocm.locator('.pf-tps')).toHaveText('52.8')
   })
 })

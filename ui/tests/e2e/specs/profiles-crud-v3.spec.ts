@@ -46,14 +46,14 @@ async function gotoProfiles(page: any) {
   await page.waitForFunction(
     () => typeof (window as any).ProfilesView === 'function',
   )
-  await page.waitForSelector('.pf-card', { timeout: 10_000 })
+  await page.waitForSelector('.stk-lib-card', { timeout: 10_000 })
 }
 
 // Helper: locate a card by its exact slug — hasText would also match cards
 // whose "based on <source>" provenance line names this profile.
 function cardBySlug(page: any, slug: string) {
-  return page.locator('.pf-card').filter({
-    has: page.locator(`.pf-slug:text-is("${slug}")`),
+  return page.locator('.stk-lib-card').filter({
+    has: page.locator(`.stk-lib-name:text-is("${slug}")`),
   })
 }
 
@@ -155,7 +155,7 @@ test.describe('Profiles CRUD — Phase C6', () => {
     await expect(vulkanCard).toBeVisible()
 
     // Seed badge.
-    await expect(vulkanCard.locator('.pf-chip.seed.immutable')).toBeVisible()
+    await expect(vulkanCard.locator('.pf-seed')).toBeVisible()
 
     // "Edit a copy" replaces both the disabled Edit and the Clone button.
     const editCopyBtn = vulkanCard.locator('[data-testid="pf-btn-editcopy-vulkan"]')
@@ -221,7 +221,7 @@ test.describe('Profiles CRUD — Phase C6', () => {
     await gotoProfiles(page)
 
     // Click Clone on the custom card (seeds no longer have a Clone button).
-    const customCard = page.locator('.pf-card', { hasText: 'my-custom' })
+    const customCard = page.locator('.stk-lib-card', { hasText: 'my-custom' })
     await customCard.locator('[data-testid="pf-btn-clone-my-custom"]').click()
     await expect(page.locator('.pf-form-panel')).toBeVisible()
 
@@ -280,7 +280,7 @@ test.describe('Profiles CRUD — Phase C6', () => {
 
     await gotoProfiles(page)
 
-    const customCard = page.locator('.pf-card', { hasText: 'my-custom' })
+    const customCard = page.locator('.stk-lib-card', { hasText: 'my-custom' })
     await expect(customCard).toBeVisible()
 
     // Click Delete.
@@ -320,7 +320,7 @@ test.describe('Profiles CRUD — Phase C6', () => {
 
     await gotoProfiles(page)
 
-    const customCard = page.locator('.pf-card', { hasText: 'my-custom' })
+    const customCard = page.locator('.stk-lib-card', { hasText: 'my-custom' })
     await expect(customCard).toBeVisible()
 
     await customCard.locator('[data-testid="pf-btn-delete-my-custom"]').click()
