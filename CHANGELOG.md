@@ -10,7 +10,7 @@ Tags older than v0.2.0 ship release notes inside the GitHub release
 page; this CHANGELOG starts at v0.2.0 (the Lemonade migration cut).
 For ADR-level architecture context see `docs/internal/adr/`.
 
-## [Unreleased]
+## [v0.8.0-beta.3] — 2026-06-23
 
 Canonical LLM roles + Hindsight-native memory extraction
 ([ADR-0023](docs/internal/adr/0023-canonical-llm-roles-agent-utility.md)). The two
