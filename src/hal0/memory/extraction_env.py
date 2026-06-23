@@ -95,7 +95,9 @@ def apply_extraction_slot(slot: str, *, restart: bool = True) -> dict[str, Any]:
             result[step] = True
         except (OSError, subprocess.SubprocessError) as exc:
             stderr = getattr(exc, "stderr", "") or ""
-            result["error"] = f"{' '.join(args)} failed: {exc}{(' — ' + stderr.strip()) if stderr else ''}"
+            result["error"] = (
+                f"{' '.join(args)} failed: {exc}{(' — ' + stderr.strip()) if stderr else ''}"
+            )
             log.warning(
                 "hal0.memory.extraction_restart_failed",
                 slot=slot,
