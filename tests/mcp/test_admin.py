@@ -147,7 +147,13 @@ def test_destructive_tools_match_gated_destructive_set() -> None:
     """ADR-0004 §4's "destructive" classification must match the
     destructiveHint annotations exactly. The annotation is the
     client-facing surface; ADR-0004 is the policy. They cannot drift."""
-    destructive_per_adr = {"model_delete", "slot_delete", "memory_delete", "stack_delete"}
+    destructive_per_adr = {
+        "model_delete",
+        "slot_delete",
+        "memory_delete",
+        "stack_delete",
+        "profile_delete",
+    }
     destructive_per_annotation = {
         name for name, ann in admin._ANNOTATIONS.items() if ann.destructiveHint
     }

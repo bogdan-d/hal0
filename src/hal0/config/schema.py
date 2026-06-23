@@ -920,6 +920,10 @@ class ProfilesConfig(BaseModel):
 # stamped on every StackConfig and on the export envelope (PR-3).
 STACK_SCHEMA_VERSION_CURRENT = 1
 
+#: Profile export envelopes carry their own schema version (independent of
+#: hal0.toml meta.schema_version), stamped on every ``.hal0profile.json`` export.
+PROFILE_SCHEMA_VERSION_CURRENT = 1
+
 _STACK_NAME_RE = r"^[a-z0-9][a-z0-9_-]{0,31}$"
 
 
@@ -2197,6 +2201,7 @@ __all__ = [
     "DEVICE_DEFAULT_PROFILES",
     "MTP_FLAG_BUNDLE",
     "PROFILE_BENCH",
+    "PROFILE_SCHEMA_VERSION_CURRENT",
     "SEED_PROFILES",
     "ActivityConfig",
     "AgentAuthConfig",

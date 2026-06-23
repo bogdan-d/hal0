@@ -293,6 +293,9 @@ export const ENDPOINTS = {
   // ── Profiles (container slot templates) ─────────────────────────
   profiles: '/api/profiles',
   profile: (name: string) => `/api/profiles/${encodeURIComponent(name)}`,
+  // POST export (envelope) | import (collection-level POST: dry-run, then create).
+  profileExport: (name: string) => `/api/profiles/${encodeURIComponent(name)}/export`,
+  profileImport: '/api/profiles/import',
 
   // ── Stacks (named, portable slot+profile+model bundles) ─────────
   // GET list (+ active + drift) | POST create. Per-stack: GET detail | PUT |

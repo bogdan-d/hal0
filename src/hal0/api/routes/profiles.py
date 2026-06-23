@@ -2,10 +2,13 @@
 
 Mounted under /api/profiles:
 
-    GET    ""          — list all profiles
-    POST   ""          — create a custom profile (201)
-    PUT    "/{name}"   — update a custom profile (200)
-    DELETE "/{name}"   — delete a custom profile (204)
+    GET    ""              — list all profiles
+    POST   ""              — create a custom profile (201)
+    POST   "/import"       — import a profile from a portable envelope
+    GET    "/{name}"       — resolve a single profile
+    POST   "/{name}/export"— export a profile to a portable envelope
+    PUT    "/{name}"       — update a custom profile (200)
+    DELETE "/{name}"       — delete a custom profile (204)
 
 Seed profiles (defined in SEED_PROFILES) are immutable via the API.
 
@@ -17,6 +20,7 @@ atomic writes.
 from __future__ import annotations
 
 import re
+from datetime import UTC, datetime
 from typing import Any, Literal
 
 from fastapi import APIRouter, Request
@@ -24,7 +28,14 @@ from pydantic import BaseModel, Field, field_validator
 
 from hal0.api._audit import record_action
 from hal0.config.schema import ProfileConfig
+from hal0.errors import BadRequest
 from hal0.profiles import ProfileCatalog, ProfilePatch
+from hal0.profiles.portable import (
+    export_envelope,
+    import_profile,
+    parse_envelope,
+    verify_checksum,
+)
 
 router = APIRouter()
 
@@ -165,6 +176,102 @@ async def create_profile(body: ProfileBody, request: Request) -> dict[str, Any]:
             "backend": body.backend,
         }
     return profile.to_dict()
+
+
+@router.post("/import")
+async def import_profile_route(request: Request) -> dict[str, Any]:
+    """Import a profile from an uploaded ``.hal0profile.json`` envelope.
+
+    Body::
+
+        { "envelope": {...}, "name": "name", "dry_run": false }
+
+    ``dry_run`` validates the envelope + checksum and reports whether the target
+    name already exists, without creating anything. A commit creates the profile
+    under ``name`` and returns the resolved profile item.
+
+    Raises:
+        400 profiles.bad_envelope: not a valid hal0.profile envelope.
+        400 profiles.import_no_name: commit requested without a name.
+        409 profiles.exists: name already exists.
+    """
+    try:
+        body = await request.json()
+    except Exception as exc:
+        raise BadRequest(
+            "request body must be valid JSON",
+            code="request.invalid_json",
+            details={"error": str(exc)},
+        ) from exc
+    if not isinstance(body, dict):
+        raise BadRequest("request body must be a JSON object", code="request.not_an_object")
+
+    envelope = body.get("envelope", body)
+    dry_run = bool(body.get("dry_run", False))
+    name = body.get("name")
+
+    if dry_run:
+        env = parse_envelope(envelope)
+        existing = {p.name for p in ProfileCatalog().list()}
+        target = name or env.name
+        collides = bool(target) and target in existing
+        return {
+            "dry_run": True,
+            "valid": True,
+            "checksum_ok": verify_checksum(envelope) if isinstance(envelope, dict) else False,
+            "name": env.name or "",
+            "schema_version": env.schema_version,
+            "collides": collides,
+        }
+
+    if not name or not isinstance(name, str):
+        raise BadRequest(
+            "import commit requires a 'name'",
+            code="profiles.import_no_name",
+        )
+
+    async with record_action(
+        request, category="profile", action="profile.import", target=name
+    ) as rec:
+        resolved = import_profile(envelope, name, ProfileCatalog())
+        rec.after = {"name": name}
+    return {"dry_run": False, "profile": resolved.to_dict()}
+
+
+@router.get("/{name}")
+def get_profile(name: str) -> dict[str, Any]:
+    """Resolve a single profile by name.
+
+    Returns the profile item (same shape as list).
+
+    Raises:
+        404 profiles.not_found: no such profile.
+    """
+    return ProfileCatalog().resolve(name).to_dict()
+
+
+@router.post("/{name}/export")
+def export_profile(name: str) -> dict[str, Any]:
+    """Serialize a profile into its portable ``.hal0profile.json`` envelope.
+
+    Embeds the profile template only (no secrets, no host paths) and stamps
+    ``exported_at`` + a content checksum.
+
+    Raises:
+        404 profiles.not_found: no such profile.
+    """
+    resolved = ProfileCatalog().resolve(name)
+    cfg = ProfileConfig(
+        image=resolved.image,
+        flags=resolved.flags,
+        mtp=resolved.mtp,
+        device_class=resolved.device_class,
+        backend=resolved.backend,
+        cloned_from=resolved.cloned_from,
+        intent=resolved.intent,
+        quant=resolved.quant,
+    )
+    return export_envelope(name, cfg, exported_at=datetime.now(UTC).isoformat())
 
 
 @router.put("/{name}")
