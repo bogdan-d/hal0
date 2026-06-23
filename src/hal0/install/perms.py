@@ -97,9 +97,12 @@ def ownership_table(
     *mutable* contents become ``service_user``-owned so the daemon can atomically
     rewrite them (temp-file + ``rename``, which needs *directory* write — not
     just file write). The config root itself is ``2775`` (setgid) so files the
-    service or the ``hal0`` group create there inherit the shared group. The
-    privileged seam from #943 (``hal0-slotctl`` + sudoers + ``container.py`` euid
-    routing) is the prerequisite that lets the dropped daemon still manage slots.
+    service or the ``hal0`` group create there inherit the shared group.
+
+    NOTE: the hardened "unprivileged service_user" install mode and its
+    ``hal0-slotctl`` privilege seam were removed — hal0-api runs as root. This
+    table is now exercised only with ``service_user="root"`` (by ``hal0 doctor``);
+    the non-root branches are retained for reference but no longer wired in.
 
     Two subtrees stay ``root:root`` even under the flip:
       * ``agents/`` — the dashboard-only Hermes allow-list world (#843); the API
