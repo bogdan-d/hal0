@@ -125,7 +125,7 @@ class BootstrapState:
     hermes_version: str | None = None
     hermes_home: str = "/var/lib/hal0/.hermes"
     venv: str = "/var/lib/hal0/venvs/hermes"
-    agent_id: str = "hermes-agent"
+    agent_id: str = "hermes"
     phases: dict[str, dict[str, Any]] = field(default_factory=dict)
     errors: list[str] = field(default_factory=list)
 
@@ -605,8 +605,8 @@ def _copy_plugin_tree(src: Path, dst: Path) -> None:
 def _phase_install(ctx: PhaseContext) -> PhaseResult:
     """Provision the managed Hermes venv + wrapper + plugin stubs.
 
-    The plugin stub at ``installer/agents/hermes/plugins/hal0-memory/``
-    is copied verbatim into ``$HERMES_HOME/plugins/memory/hal0-memory/``.
+    The plugin package at ``installer/agents/hermes/plugins/hal0-memory/`` (a local
+    fork of ``memory_hindsight``) is copied into ``$HERMES_HOME/plugins/hal0-memory/``.
     The legacy ``hal0`` model-provider plugin was removed (R4 H4): it
     hardcoded ``base_url=http://127.0.0.1:8000/api/v1`` which has no
     listener, and the composite ``hal0`` upstream in :mod:`hal0.api`
@@ -675,7 +675,7 @@ def _phase_install(ctx: PhaseContext) -> PhaseResult:
     if not claimed:
         return PhaseResult(status=PhaseStatus.FAIL, reason=reason)
     plugin_targets = {
-        "hal0-memory": hermes_home / "plugins" / "memory" / "hal0-memory",
+        "hal0-memory": hermes_home / "plugins" / "hal0-memory",
     }
     # Remove the legacy broken ``hal0`` model-provider plugin if a
     # previous bootstrap left it behind. Idempotent — silently no-op if

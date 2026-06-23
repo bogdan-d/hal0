@@ -407,60 +407,21 @@ def _seed_hermes(agent_id: str) -> Persona:
     )
 
 
-def _seed_coder(agent_id: str) -> Persona:
-    return Persona(
-        id="coder",
-        display_name="Coder",
-        summary="Software-focused persona — code reading, refactors, file:line citations.",
-        system_prompt=(
-            "You are the hal0 coder persona — a focused software collaborator running "
-            "on the hal0 home AI box. Cite source as file:line whenever you discuss "
-            "code. Prefer small, reversible changes; prefer reading before writing. "
-            "You have hal0-admin for inspecting platform state and a kanban MCP "
-            "(when registered) for task tracking. Use hal0-memory under a separate "
-            "namespace so coding context doesn't pollute the operator's general chat."
-        ),
-        tools_allowed=("*",),
-        memory_namespace=f"private:{agent_id}-coder",
-        approval=PersonaApproval(
-            default_policy="ask",
-            auto_approve=(
-                "memory.read.*",
-                "search.*",
-                "slot.read.*",
-                "files.read.*",
-                "shell.read.*",
-                "hal0_admin.read.*",
-                "kanban.read.*",
-            ),
-            require_approval=(
-                "files.write.*",
-                "shell.write.*",
-                "admin.*",
-                "hal0_admin.write.*",
-                "kanban.write.*",
-            ),
-        ),
-        preferred_upstream="hal0",
-        preferred_model="",
-    )
-
-
 def seed_default_personas(
-    agent_id: str = "hermes-agent",
+    agent_id: str = "hermes",
     *,
     root: Path | None = None,
     overwrite: bool = False,
 ) -> list[Persona]:
-    """Idempotently seed the ``hermes`` + ``coder`` personas + active pointer.
+    """Idempotently seed the ``hermes`` persona + active pointer.
 
-    On first install both files are written and ``active.txt`` is set to
-    ``hermes``. On re-run (``overwrite=False``) existing files are left
-    alone so operator edits survive — only missing personas get written.
-    With ``overwrite=True`` the seeds are forcibly re-written; used by
-    ``--repair`` to recover from a corrupted operator edit.
+    On first install the persona file is written and ``active.txt`` is set
+    to ``hermes``. On re-run (``overwrite=False``) an existing file is left
+    alone so operator edits survive. With ``overwrite=True`` the seed is
+    forcibly re-written; used by ``--repair`` to recover from a corrupted
+    operator edit.
     """
-    seeds = [_seed_hermes(agent_id), _seed_coder(agent_id)]
+    seeds = [_seed_hermes(agent_id)]
     written: list[Persona] = []
     for persona in seeds:
         path = _personas_root(root) / f"{persona.id}.toml"
