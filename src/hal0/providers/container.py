@@ -109,12 +109,6 @@ log = logging.getLogger(__name__)
 # template.  Writing a complete file means the manager never has to
 # know whether the base exists.
 _SYSTEMD_SYSTEM_DIR = Path("/etc/systemd/system")
-# Privileged seam (D hardened-perms): when hal0-api runs as the unprivileged
-# `hal0` user it cannot write per-slot units or run systemctl on hal0-slot@.
-# It delegates exactly those two root operations to this helper, invoked via
-# `sudo -n`. Overridable so tests can point at a stub. Routing is gated on
-# os.geteuid() != 0 — running as root keeps today's direct path unchanged.
-_HAL0_SLOTCTL = os.environ.get("HAL0_SLOTCTL", "/usr/lib/hal0/bin/hal0-slotctl")
 # Back-compat alias for the historic default. The *effective* mount root is
 # resolved per-render via model_store_root() ([models].store / HAL0_MODEL_STORE
 # / this default) so a custom model directory actually reaches the container.
@@ -621,27 +615,6 @@ class ContainerProvider(Provider):
         """Run a subprocess synchronously (load/unload are blocking ops anyway)."""
         return subprocess.run(list(args), capture_output=True, text=True, check=check)
 
-    def _privileged(
-        self, verb: str, slot_name: str, *, stdin: str | None = None
-    ) -> subprocess.CompletedProcess[str]:
-        """Run a hal0-slotctl verb via the privileged seam (D hardened-perms).
-
-        When the API runs as the unprivileged ``hal0`` user (euid != 0) the
-        verb is dispatched through ``sudo -n <_HAL0_SLOTCTL> <verb> <slot>``;
-        the helper does the actual root op (write-unit, remove-unit, the
-        systemctl lifecycle verbs, or reload). ``stdin`` carries the unit text
-        for ``write-unit``. This method is only ever called from the non-root
-        branches — the root path keeps the historic direct ``write_text`` /
-        ``systemctl`` behavior, so there is no behavior change for euid == 0.
-        """
-        return subprocess.run(
-            ["sudo", "-n", _HAL0_SLOTCTL, verb, slot_name],
-            input=stdin,
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-
     async def health(self, port: int) -> dict[str, Any]:
         """Probe GET /health on the container port.
 
@@ -725,19 +698,11 @@ class ContainerProvider(Provider):
             "container.unit_write",
             extra={"slot": slot_name, "unit_path": str(unit_path)},
         )
-        if os.geteuid() == 0:
-            unit_path.write_text(unit_text)
-            self._run("systemctl", "daemon-reload")
-            # Enable so it survives reboots (best-effort — don't fail if already enabled).
-            self._run("systemctl", "enable", self._unit_name(slot_name), check=False)
-            self._run("systemctl", "restart", self._unit_name(slot_name))
-        else:
-            # Unprivileged hal0-api: write-unit writes the file + daemon-reload
-            # through the seam; enable/restart go through the same helper.
-            self._privileged("write-unit", slot_name, stdin=unit_text)
-            with contextlib.suppress(subprocess.CalledProcessError):
-                self._privileged("enable", slot_name)
-            self._privileged("restart", slot_name)
+        unit_path.write_text(unit_text)
+        self._run("systemctl", "daemon-reload")
+        # Enable so it survives reboots (best-effort — don't fail if already enabled).
+        self._run("systemctl", "enable", self._unit_name(slot_name), check=False)
+        self._run("systemctl", "restart", self._unit_name(slot_name))
         log.info(
             "container.unit_started",
             extra={"slot": slot_name, "unit": self._unit_name(slot_name)},
@@ -820,24 +785,14 @@ class ContainerProvider(Provider):
         slot_name: str = str(slot_cfg.get("name", ""))
         unit = self._unit_name(slot_name)
         log.info("container.unit_stop", extra={"slot": slot_name, "unit": unit})
-        if os.geteuid() == 0:
-            self._run("systemctl", "stop", unit, check=False)
-            # Disable so it doesn't re-start on reboot.
-            self._run("systemctl", "disable", unit, check=False)
-            # Remove unit file so daemon-reload leaves no stale entry.
-            unit_path = self._unit_path(slot_name)
-            if unit_path.exists():
-                unit_path.unlink()
-                self._run("systemctl", "daemon-reload")
-        else:
-            # Unprivileged hal0-api: stop/disable through the seam (best-effort,
-            # the unit may already be gone), then remove-unit does the unlink +
-            # daemon-reload in one root op.
-            with contextlib.suppress(subprocess.CalledProcessError):
-                self._privileged("stop", slot_name)
-            with contextlib.suppress(subprocess.CalledProcessError):
-                self._privileged("disable", slot_name)
-            self._privileged("remove-unit", slot_name)
+        self._run("systemctl", "stop", unit, check=False)
+        # Disable so it doesn't re-start on reboot.
+        self._run("systemctl", "disable", unit, check=False)
+        # Remove unit file so daemon-reload leaves no stale entry.
+        unit_path = self._unit_path(slot_name)
+        if unit_path.exists():
+            unit_path.unlink()
+            self._run("systemctl", "daemon-reload")
 
     def is_active(self, slot_name: str) -> bool:
         """Return True if the systemd unit is in an active state."""
