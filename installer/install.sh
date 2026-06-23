@@ -9,8 +9,6 @@
 # Env overrides:
 #   HAL0_PREFIX        installation root (default /opt/hal0)
 #   HAL0_PORT          API port (default 8080)
-#   HAL0_USER          system user (default root — slot template uses root
-#                      because the container is the real sandbox boundary)
 #   HAL0_PYTHON        python interpreter (default python3)
 #   HAL0_NO_PROBE=1    skip the hardware probe at the end
 #   HAL0_TOOLBOX_IMAGE_VULKAN, HAL0_TOOLBOX_IMAGE_ROCM, ...
@@ -110,7 +108,6 @@ done
 ui_banner
 
 HAL0_PORT="${HAL0_PORT:-8080}"
-HAL0_USER="${HAL0_USER:-root}"
 PY="${HAL0_PYTHON:-python3}"
 
 # API binds 0.0.0.0:8080 unconditionally. TLS is upstream's job — see
@@ -224,7 +221,7 @@ ui_step "Pre-flight checks"
 if [[ "${DEV_MODE}" -eq 0 && "$(id -u)" -ne 0 ]]; then
     if command -v sudo >/dev/null; then
         warn "Re-exec under sudo"
-        exec sudo -E HAL0_PORT="${HAL0_PORT}" HAL0_USER="${HAL0_USER}" HAL0_PYTHON="${PY}" \
+        exec sudo -E HAL0_PORT="${HAL0_PORT}" HAL0_PYTHON="${PY}" \
             HAL0_PREFIX="${HAL0_PREFIX:-}" HAL0_NO_PROBE="${HAL0_NO_PROBE:-}" \
             bash "$0" "$@"
     else
@@ -591,7 +588,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=${HAL0_USER}
+User=root
 # Group-writable umask so files the API writes into a shared editable tree stay
 # editable by the hal0 group (Hermes & in-runtime agents) — part of the #843
 # root-clobber fix. Harmless on an immutable FHS install.
@@ -610,30 +607,13 @@ WantedBy=multi-user.target
 EOF
 info "wrote ${API_UNIT}"
 
-# D hardened-perms flip (gated on HAL0_USER != root). The base unit above
-# already substitutes `User=${HAL0_USER}` inline; this drop-in re-asserts it and
-# adds the matching `Group=` (the generated unit carries no Group= line) so the
-# dropped daemon's group on the shared setgid /etc/hal0 + /var/lib/hal0 trees is
-# deterministic. With the default HAL0_USER=root the drop-in is NOT installed, so
-# existing root installs are byte-for-byte unchanged. The privileged seam
-# (PR #943) is what lets the unprivileged daemon still manage slots.
-API_DROPIN_SRC="${REPO_ROOT}/installer/systemd/hal0-api.service.d/20-run-as-hal0.conf"
+# Hardened mode removed: hal0-api now always runs as root (User=root above), so
+# updates / systemd drop-in writes / service restarts work without a privileged
+# seam. Remove any stale run-as-hal0 drop-in left by an older hardened-perms
+# install so upgrading such a box reverts the unit cleanly to User=root.
 API_DROPIN_DST_DIR="${UNIT_DIR}/hal0-api.service.d"
-if [[ "${HAL0_USER}" != "root" ]]; then
-    if [[ -f "${API_DROPIN_SRC}" ]]; then
-        mkdir -p "${API_DROPIN_DST_DIR}"
-        sed "s/__HAL0_USER__/${HAL0_USER}/g" "${API_DROPIN_SRC}" \
-            > "${API_DROPIN_DST_DIR}/20-run-as-hal0.conf"
-        info "wrote ${API_DROPIN_DST_DIR}/20-run-as-hal0.conf (run hal0-api as ${HAL0_USER})"
-    else
-        warn "${API_DROPIN_SRC} not found — hal0-api run-as drop-in not installed"
-    fi
-else
-    # Idempotent downgrade path: if a previous flip wrote the drop-in but this
-    # run is back on root, drop it so the unit reverts cleanly to User=root.
-    rm -f "${API_DROPIN_DST_DIR}/20-run-as-hal0.conf" 2>/dev/null || true
-    rmdir "${API_DROPIN_DST_DIR}" 2>/dev/null || true
-fi
+rm -f "${API_DROPIN_DST_DIR}/20-run-as-hal0.conf" 2>/dev/null || true
+rmdir "${API_DROPIN_DST_DIR}" 2>/dev/null || true
 
 OPENWEBUI_UNIT_SRC="${REPO_ROOT}/packaging/systemd/hal0-openwebui.service"
 OPENWEBUI_UNIT_DST="${UNIT_DIR}/hal0-openwebui.service"
@@ -1173,9 +1153,9 @@ else
     # ${VAR_DIR} (per useradd above), so HF's default cache lands at
     # ${VAR_DIR}/.cache/huggingface/hub. Pre-create the leaf dir + give
     # hal0 ownership of the cache tree (NOT the whole VAR_DIR — slot
-    # state.json + registry are written by hal0-api which runs as
-    # ${HAL0_USER}, default root) so hal0-user processes can download
-    # HF assets without a PermissionError on first use.
+    # state.json + registry are written by hal0-api, which runs as root)
+    # so hal0-user processes (agents) can download HF assets without a
+    # PermissionError on first use.
     mkdir -p "${VAR_DIR}/.cache/huggingface/hub"
     chown -R hal0:hal0 "${VAR_DIR}/.cache"
 
@@ -1198,68 +1178,16 @@ else
     touch "${VAR_DIR}/STATE.md"
     chown hal0:hal0 "${VAR_DIR}/STATE.md"
 
-    # ── D hardened-perms flip (gated on HAL0_USER != root) ────────────────────
-    # When hal0-api runs unprivileged, /etc/hal0 + its mutable contents must be
-    # owned by the service user so the daemon's atomic temp-file+rename rewrites
-    # (slots/*.toml, capabilities.toml, hal0.toml, api.env, chat-templates,
-    # profiles.toml) succeed — rename needs *directory* write, not just file
-    # write. This mirrors src/hal0/install/perms.py::ownership_table(
-    # service_user=...) exactly: the config root is setgid 2775 so the shared
-    # hal0 group keeps write; agents/ + secrets/ stay root:root (the API only
-    # reads agents/, and systemd reads the secrets/ EnvironmentFile AS ROOT
-    # before dropping to ${HAL0_USER}). With HAL0_USER=root this whole block is
-    # skipped, so existing installs are unchanged. Idempotent: chown/chmod
-    # converge to the same state on every re-run.
-    if [[ "${HAL0_USER}" != "root" ]]; then
-        info "hardened-perms flip: chowning config + state to ${HAL0_USER}"
-
-        # Ensure the root-pinned secret-bearing dirs EXIST before the re-pin
-        # below. On a blank install secrets/ doesn't exist yet (the early mkdir
-        # seeds registry/slots/cache, not secrets/), so the `[[ -d ]]`-guarded
-        # `chown -R root:root` further down would silently no-op and the hermes
-        # provisioner's first .env write could land owned by ${HAL0_USER}. Create
-        # them root:root NOW (installer is root) so the find-prunes match and the
-        # re-pin always runs. These are also the dirs the hal0-agentenv seam
-        # writes into.
-        mkdir -p "${ETC_DIR}/agents" "${VAR_DIR}/secrets/agents"
-
-        # /etc/hal0 config root + ALL its contents -> ${HAL0_USER}:hal0,
-        # RECURSIVELY: a root->hal0 UPGRADE must flip pre-existing root-owned
-        # files (slots/*.toml, hal0.toml, capabilities.toml, ...), not just a
-        # fresh install. agents/ is pruned (stays root:root, re-pinned below).
-        # Config root + slots/ are setgid 2775 so the shared hal0 group keeps
-        # write across the daemon's atomic temp-file+rename rewrites (rename
-        # needs *directory* write). -h so a symlink's target isn't chased.
-        find "${ETC_DIR}" -path "${ETC_DIR}/agents" -prune -o \
-            -exec chown -h "${HAL0_USER}:hal0" {} +
-        chmod 2775 "${ETC_DIR}"
-        [[ -d "${ETC_DIR}/slots" ]] && chmod 2775 "${ETC_DIR}/slots"
-
-        # /var/lib/hal0 state root -> service-owned, RECURSIVELY (registry/,
-        # slots/, cache/, .hermes/, memory/, ...). Prune secrets/ (systemd
-        # reads its EnvironmentFile AS ROOT before dropping to ${HAL0_USER})
-        # and the model store (huge; dir-only handling below). MODELS_DIR may
-        # live under VAR_DIR (default /var/lib/hal0/models) or outside
-        # (/mnt/ai-models); the prune path is a harmless no-op when outside.
-        find "${VAR_DIR}" \( -path "${VAR_DIR}/secrets" -o -path "${MODELS_DIR}" \) -prune -o \
-            -exec chown -h "${HAL0_USER}:hal0" {} +
-
-        # agents/ + secrets/ pinned root:root (re-assert recursively in case a
-        # prior run flipped them — keeps the block self-correcting).
-        [[ -d "${ETC_DIR}/agents" ]] && chown -R root:root "${ETC_DIR}/agents"
-        [[ -d "${VAR_DIR}/secrets" ]] && chown -R root:root "${VAR_DIR}/secrets"
-
-        # Model store: root-owned but group-writable so the daemon can create
-        # pull subdirs + chat-templates/. We do NOT chown the (huge) existing
-        # model files — they stay world-readable; only the store dir itself
-        # gets root:hal0 0775. MODELS_DIR may live outside VAR_DIR (e.g.
-        # /mnt/ai-models) per --models-dir / [models].pull_root.
-        if [[ -d "${MODELS_DIR}" ]]; then
-            chown root:hal0 "${MODELS_DIR}"
-            chmod 0775 "${MODELS_DIR}"
-            info "hardened-perms flip: ${MODELS_DIR} -> root:hal0 0775 (group-writable)"
-        fi
-    fi
+    # Seed the agent config + secret dirs (root-owned; the agent driver reads
+    # agents/, and systemd reads the secrets/ EnvironmentFile as root). The hermes
+    # provisioner also creates these, but seeding them here keeps them present
+    # before provisioning.
+    #
+    # NOTE: the former HAL0_USER!=root "hardened-perms flip" — which chowned the
+    # whole /etc/hal0 + /var/lib/hal0 tree to an unprivileged service user so a
+    # dropped hal0-api could rewrite config — was removed. hal0-api runs as root,
+    # so it writes config/state, applies updates, and restarts services directly.
+    mkdir -p "${ETC_DIR}/agents" "${VAR_DIR}/secrets/agents"
 
 fi
 
@@ -1529,7 +1457,23 @@ else
 
 fi
 
-HOST="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
+# Real LAN IPv4 addresses — filtered to skip container / virtual bridge
+# interfaces (podman/cni/docker/veth/flannel/virbr/...). Without this filter,
+# `hostname -I` leaks noise like the podman 10.88.0.1 gateway into the "Reach
+# hal0 at" list and can even pick it as the primary HOST. Falls back to
+# `hostname -I` (then localhost) when iproute2 is unavailable.
+lan_ipv4s() {
+    if command -v ip >/dev/null 2>&1; then
+        ip -o -4 addr show scope global 2>/dev/null | awk '
+            $2 ~ /^(lo|podman|cni|docker|veth|br-|flannel|kube|virbr|tailscale)/ { next }
+            { sub(/\/.*/, "", $4); print $4 }'
+    else
+        hostname -I 2>/dev/null | tr ' ' '\n'
+    fi
+}
+
+HOST="$(lan_ipv4s | head -1)"
+[[ -z "${HOST}" ]] && HOST="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
 [[ -z "${HOST}" ]] && HOST=localhost
 
 # ── Reachability discovery ─────────────────────────────────────────────────
@@ -1540,13 +1484,10 @@ HOST="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
 REACH_LINES=()
 
 DASHBOARD_URL="http://${HOST}:${HAL0_PORT}/"
-# All IPv4 addresses on this host. `hostname -I` already excludes
-# loopback.
-if command -v hostname >/dev/null 2>&1; then
-    for ip in $(hostname -I 2>/dev/null); do
-        REACH_LINES+=("LAN"$'\t'"http://${ip}:${HAL0_PORT}/")
-    done
-fi
+# Real LAN IPv4s (container/bridge interfaces filtered out — see lan_ipv4s).
+for ip in $(lan_ipv4s); do
+    REACH_LINES+=("LAN"$'\t'"http://${ip}:${HAL0_PORT}/")
+done
 # Tailscale — show whichever tailnet IPs are present. Never fatal.
 if command -v tailscale >/dev/null 2>&1; then
     for ts in $(tailscale ip -4 2>/dev/null) $(tailscale ip -6 2>/dev/null); do
@@ -1568,105 +1509,6 @@ if command -v ip >/dev/null 2>&1; then
     done
 fi
 
-# ── Live hello prompt ──────────────────────────────────────────────────────
-# Fires only when ALL of the following are true:
-#   * not --dev
-#   * not --no-start
-#   * HAL0_NO_HELLO is unset
-#   * the hal0 API is responding to /api/health
-#   * at least one model is already pulled (so we don't silently spend
-#     5+ minutes downloading on first install — cheap operators can
-#     `hal0 model pull qwen3-4b` and re-run the installer to see the
-#     greeting fire)
-# Every step is wrapped so failure logs a single info line and moves on.
-HELLO_RESULT=""
-if [[ "${DEV_MODE}" -eq 0 && "${NO_START}" -eq 0 && -z "${HAL0_NO_HELLO:-}" ]]; then
-    HELLO_BASE="http://127.0.0.1:${HAL0_PORT}"
-    # `wait_active hal0-api` only proves systemd marked the unit active —
-    # uvicorn may still be importing the app and not yet bound to the
-    # port. A single probe here races that cold start and prints a false
-    # "API not responding"; poll /api/health for a few seconds first.
-    HELLO_API_UP=0
-    for _ in $(seq 1 15); do
-        if curl -sf --max-time 2 "${HELLO_BASE}/api/health" >/dev/null 2>&1; then
-            HELLO_API_UP=1
-            break
-        fi
-        sleep 1
-    done
-    if [[ "${HELLO_API_UP}" -eq 1 ]]; then
-        # Find a pulled model. `hal0 model list --installed` returns one
-        # id per line. We pick the first; on a fresh install this is
-        # empty and we skip with a hint.
-        FIRST_MODEL="$("${HAL0_BIN}" model list --installed 2>/dev/null | awk 'NR==1{print $1}' || true)"
-        if [[ -z "${FIRST_MODEL}" || "${FIRST_MODEL}" == "ID" ]]; then
-            HELLO_RESULT="skipped: no model pulled — try '${HAL0_BIN} model pull qwen3-4b' then rerun installer"
-        else
-            HELLO_SLOT="hello"
-            # Best-effort slot create + load. Errors don't stop us.
-            "${HAL0_BIN}" slot create "${HELLO_SLOT}" --backend cpu --provider llama-server >/dev/null 2>&1 || true
-            "${HAL0_BIN}" model assign "${FIRST_MODEL}" --slot "${HELLO_SLOT}" >/dev/null 2>&1 || true
-            "${HAL0_BIN}" slot load "${HELLO_SLOT}" >/dev/null 2>&1 || true
-
-            # Wait up to 30 s for the slot to report ready.
-            HELLO_DEADLINE=$((SECONDS + 30))
-            HELLO_READY=0
-            while (( SECONDS < HELLO_DEADLINE )); do
-                if curl -sf --max-time 2 "${HELLO_BASE}/api/slots/${HELLO_SLOT}" 2>/dev/null \
-                   | grep -q '"state":"ready"'; then
-                    HELLO_READY=1
-                    break
-                fi
-                sleep 1
-            done
-
-            if [[ "${HELLO_READY}" -eq 1 ]]; then
-                # Stream the greeting. python -c parses SSE and echoes
-                # content deltas in real time. 20 s ceiling on the
-                # whole exchange so a sluggish backend doesn't stall
-                # the installer.
-                printf '\n   %shal0 says:%s\n\n   %s' "${BOLD}" "${RST}" "${AMBER}"
-                set +e
-                timeout 20 curl -sN -X POST \
-                    -H 'Content-Type: application/json' \
-                    -d "{\"model\":\"${HELLO_SLOT}\",\"stream\":true,\"messages\":[{\"role\":\"system\",\"content\":\"You are hal0, just installed on a new machine. Greet the user in one short friendly sentence.\"},{\"role\":\"user\",\"content\":\"Say hi.\"}]}" \
-                    "${HELLO_BASE}/v1/chat/completions" 2>/dev/null \
-                | "${VENV_DIR}/bin/python" -c '
-import json, sys
-for raw in sys.stdin:
-    raw = raw.strip()
-    if not raw.startswith("data: "):
-        continue
-    payload = raw[6:]
-    if payload == "[DONE]":
-        break
-    try:
-        delta = json.loads(payload)["choices"][0]["delta"].get("content", "")
-    except Exception:
-        continue
-    if delta:
-        sys.stdout.write(delta)
-        sys.stdout.flush()
-'
-                rc=$?
-                set -e
-                printf '%s\n\n' "${RST}"
-                if [[ $rc -ne 0 ]]; then
-                    HELLO_RESULT="hello stream errored (exit ${rc}) — slot stayed up; try the dashboard"
-                else
-                    HELLO_RESULT="ok"
-                fi
-            else
-                HELLO_RESULT="skipped: slot ${HELLO_SLOT} not ready within 30s — check 'journalctl -u hal0-slot@${HELLO_SLOT}'"
-            fi
-        fi
-    else
-        HELLO_RESULT="skipped: API not responding at ${HELLO_BASE}/api/health"
-    fi
-fi
-if [[ -n "${HELLO_RESULT}" && "${HELLO_RESULT}" != "ok" ]]; then
-    info "live hello ${HELLO_RESULT}"
-fi
 
 # ── QR code ────────────────────────────────────────────────────────────────
 # Render a QR for DASHBOARD_URL above the summary box if qrencode is on
@@ -1717,10 +1559,13 @@ fi
 SUMMARY_LINES+=(
     ""
     "$(printf '%sNext steps:%s' "${BOLD}" "${RST}")"
-    "$(printf '  %shal0 status%s         system + slot summary' "${BOLD}" "${RST}")"
-    "$(printf '  %shal0 slot list%s      list configured slots' "${BOLD}" "${RST}")"
-    "$(printf '  %shal0 model list%s     list known models' "${BOLD}" "${RST}")"
-    "$(printf '  %shal0 config show%s    inspect %s/hal0.toml' "${BOLD}" "${RST}" "${ETC_DIR}")"
+    "$(printf '  %shal0 setup%s          guided first-run: pick a bundle + pull models' "${BOLD}" "${RST}")"
+    "$(printf '  %shal0 model pull <id>%s download a model (browse with %shal0 model list%s)' "${BOLD}" "${RST}" "${BOLD}" "${RST}")"
+    "$(printf '  %shal0 status%s         system + slot + memory summary' "${BOLD}" "${RST}")"
+    "$(printf '  %shal0 slot list%s      inspect configured slots' "${BOLD}" "${RST}")"
+    "$(printf '  %shal0 update%s         check for + apply updates' "${BOLD}" "${RST}")"
+    ""
+    "$(printf '%sDocs %shttps://github.com/Hal0ai/hal0%s  ·  %sLogs %sjournalctl -fu hal0-api%s' "${DIM}" "${BLU}" "${RST}" "${DIM}" "${BLU}" "${RST}")"
 )
 
 ui_box "hal0 is ready" "${SUMMARY_LINES[@]}"
