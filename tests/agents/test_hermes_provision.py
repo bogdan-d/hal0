@@ -1194,9 +1194,7 @@ def test_namespace_register_refreshes_existing_card(
         if name == "memory_search":
             return {
                 "ok": True,
-                "result": {
-                    "items": [{"id": "old_mem_id", "metadata": {"agent_id": "hermes"}}]
-                },
+                "result": {"items": [{"id": "old_mem_id", "metadata": {"agent_id": "hermes"}}]},
             }
         if name == "memory_delete":
             return {"ok": True, "result": {"deleted": 1}}

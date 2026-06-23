@@ -72,7 +72,9 @@ def hal0_memory_module():
         sys.modules["agent.memory_provider"] = memprov_mod
 
     # Clean any prior load so each test gets a fresh package tree.
-    for name in [n for n in sys.modules if n == "hal0_memory_plugin" or n.startswith("hal0_memory_plugin.")]:
+    for name in [
+        n for n in sys.modules if n == "hal0_memory_plugin" or n.startswith("hal0_memory_plugin.")
+    ]:
         del sys.modules[name]
 
     spec = importlib.util.spec_from_file_location(
