@@ -31,6 +31,7 @@ import {
 } from '@/api/hooks/useStacks'
 import { useModels } from '@/api/hooks/useModels'
 import { useProfiles } from '@/api/hooks/useProfiles'
+import { useSlots } from '@/api/hooks/useSlots'
 
 // Device hue, mirroring the Profiles backend palette (#751 tokens).
 const DEVICE_META = {
@@ -162,6 +163,7 @@ function ApplyModal({ stack, onClose }) {
   const [phase, setPhase] = useState('loading');   // loading | preview | applying | done
   const [diff, setDiff] = useState(null);
   const [report, setReport] = useState(null);
+  const [created, setCreated] = useState([]);
 
   useEffect(() => {
     let alive = true;
@@ -177,6 +179,7 @@ function ApplyModal({ stack, onClose }) {
     try {
       const r = await apply.mutateAsync({ slug: stack.slug, dryRun: false });
       setReport(r.converged || null);
+      setCreated(r.created || []);
       setPhase('done');
       const errs = r.converged?.errors?.length || 0;
       toast(errs ? `Applied ${stack.slug} with ${errs} slot error(s)` : `Applied ${stack.slug}`,
@@ -199,6 +202,11 @@ function ApplyModal({ stack, onClose }) {
 
         {(phase === 'preview' || phase === 'applying') && (
           <div className="pf-confirm-b">
+            {diff?.creates?.length > 0 && (
+              <div className="st-apply-sub mono" style={{ color: 'var(--accent)' }}>
+                {Icons.plus} creates {diff.creates.length} new slot{diff.creates.length > 1 ? 's' : ''}: {diff.creates.join(', ')}
+              </div>
+            )}
             {changes.length ? (
               <>
                 <div className="st-apply-sub mono">{changes.length} slot{changes.length > 1 ? 's' : ''} will change · un-named slots are unloaded</div>
@@ -224,6 +232,7 @@ function ApplyModal({ stack, onClose }) {
             <div className="st-apply-sub mono ok">Applied.</div>
             {report && (
               <div className="st-report">
+                {created.length > 0 && <div className="mono">created · {created.join(', ')}</div>}
                 {report.loaded.length > 0 && <div className="mono">loaded · {report.loaded.join(', ')}</div>}
                 {report.swapped.length > 0 && <div className="mono">swapped · {report.swapped.join(', ')}</div>}
                 {report.unloaded.length > 0 && <div className="mono">unloaded · {report.unloaded.join(', ')}</div>}
@@ -380,6 +389,9 @@ function Drawer({ mode, source, existing = [], onClose, onSaved }) {
   const isEdit = mode === 'edit';
   const models = useModels().data || [];
   const profiles = useProfiles().data || [];
+  // Existing live slots feed the slot-name datalist: pick an existing slot from
+  // the dropdown, or type a new name to create one on apply.
+  const liveSlots = (useSlots().data || []).filter(s => (s.kind ?? 'local') === 'local');
 
   const initial = (() => {
     if (mode === 'create') return source ? fromStack(source) : { ...BLANK, slots: [{ ...BLANK_SLOT }] };
@@ -497,11 +509,19 @@ function Drawer({ mode, source, existing = [], onClose, onSaved }) {
             <div className="pf-row-lbl" style={{ marginBottom: 6 }}>
               <span>Slots{slotErr && <span className="pf-msg err mono hint err" style={{ marginLeft: 8 }}>{Icons.alert}{slotErr}</span>}</span>
             </div>
-            {form.slots.map((s, i) => (
+            <datalist id="st-existing-slots">
+              {liveSlots.map(s => <option key={s.name} value={s.name} />)}
+            </datalist>
+            {form.slots.map((s, i) => {
+              const isNew = !!s.slot && !liveSlots.some(ls => ls.name === s.slot);
+              return (
               <div className="st-slot-edit" key={i}>
-                <input className="pf-input mono st-slot-name" value={s.slot}
-                  onChange={e => setSlot(i, 'slot', e.target.value)} placeholder="agent" maxLength={32}
+                <input className="pf-input mono st-slot-name" value={s.slot} list="st-existing-slots"
+                  onChange={e => setSlot(i, 'slot', e.target.value)}
+                  placeholder="pick or name…" maxLength={32}
+                  title={isNew ? 'New slot — created on apply' : 'Existing slot'}
                   data-testid={`st-slot-name-${i}`} />
+                {isNew && <span className="st-slot-new mono" title="Created on apply">new</span>}
                 <select className="pf-input mono st-slot-model" value={s.model}
                   onChange={e => setSlot(i, 'model', e.target.value)} data-testid={`st-slot-model-${i}`}>
                   <option value="">— model —</option>
@@ -522,7 +542,8 @@ function Drawer({ mode, source, existing = [], onClose, onSaved }) {
                 <button type="button" className="pf-btn danger" onClick={() => rmSlot(i)} title="Remove slot"
                   data-testid={`st-slot-rm-${i}`}>{Icons.trash}</button>
               </div>
-            ))}
+              );
+            })}
             <button type="button" className="pf-btn" onClick={addSlot} data-testid="st-slot-add">{Icons.plus} Add slot</button>
           </div>
         </form>

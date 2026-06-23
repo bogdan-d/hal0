@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -20,10 +21,10 @@ from pydantic import BaseModel
 
 from hal0 import __version__
 from hal0.capabilities.config import load_capabilities_config
+from hal0.config import paths
 from hal0.config.loader import (
     list_slots,
     load_profiles_config,
-    load_slot_config,
     save_profiles_config,
 )
 from hal0.config.schema import (
@@ -270,6 +271,52 @@ def import_stack(
 # ── snapshot from live ───────────────────────────────────────────────────────
 
 
+def _read_slot_raw(slot_name: str) -> dict[str, Any] | None:
+    """Tolerantly read a slot TOML into the fields a snapshot needs.
+
+    Deliberately does NOT go through :func:`load_slot_config` /
+    ``SlotConfig`` validation: the strict loader assumes the legacy nested
+    ``[slot]`` shape and rejects the live flat shape the runtime writes (it
+    drops ``port`` and raises) — which silently emptied every snapshot. A
+    snapshot only needs the inference-surface fields, so we read the raw dict
+    and accept BOTH shapes: top-level keys (flat) and a ``[slot]`` section
+    (nested). ``[model]`` is a top-level section in both. Returns ``None`` only
+    when the file is absent or unparseable.
+    """
+    path = paths.slots_config_dir() / f"{slot_name}.toml"
+    try:
+        with open(path, "rb") as f:
+            raw = tomllib.load(f)
+    except (FileNotFoundError, OSError, tomllib.TOMLDecodeError):
+        return None
+
+    slot_sec = raw.get("slot") if isinstance(raw.get("slot"), dict) else {}
+
+    def g(key: str, default: Any = None) -> Any:
+        return raw.get(key, slot_sec.get(key, default))
+
+    model_tbl = raw.get("model")
+    if not isinstance(model_tbl, dict):
+        model_tbl = slot_sec.get("model") if isinstance(slot_sec.get("model"), dict) else {}
+    model = (model_tbl.get("default") if isinstance(model_tbl, dict) else None) or None
+
+    server = raw.get("server") if isinstance(raw.get("server"), dict) else {}
+    device = g("device")
+    return {
+        "model": model,
+        # device must be a canonical _VALID_DEVICES value or None — a legacy
+        # backend string (e.g. "rocm") would fail StackSlotEntry validation.
+        "device": device if device in _VALID_DEVICES else None,
+        "provider": g("provider"),
+        "role": g("role"),
+        "profile": g("profile"),
+        "vision": bool(g("vision", False)),
+        "mtp": g("mtp"),
+        "enable_thinking": g("enable_thinking"),
+        "server_extra_args": server.get("extra_args"),
+    }
+
+
 def snapshot_live_stack(
     *,
     name: str = "",
@@ -283,17 +330,18 @@ def snapshot_live_stack(
     and projects each configured slot into a StackSlotEntry. Empty seeded slots
     (no model, no capability rows) are skipped so the snapshot stays clean.
     Blank-picker capability selections (device unset) are dropped — they would
-    fail StackCapabilityRow validation and carry no real config. The result is
-    run through :func:`embed_references` so it is self-contained.
+    fail StackCapabilityRow validation and carry no real config. Slot TOMLs are
+    read tolerantly (see :func:`_read_slot_raw`) so the live flat shape is
+    captured, not silently dropped. The result is run through
+    :func:`embed_references` so it is self-contained.
     """
     caps = load_capabilities_config()
     entries: list[StackSlotEntry] = []
 
     for slot_name in list_slots():
-        try:
-            sc = load_slot_config(slot_name)
-        except Exception:
-            # A malformed slot TOML never breaks the whole snapshot.
+        sc = _read_slot_raw(slot_name)
+        if sc is None:
+            # A missing/unparseable slot TOML never breaks the whole snapshot.
             continue
 
         rows: list[StackCapabilityRow] = []
@@ -310,7 +358,7 @@ def snapshot_live_stack(
                 )
             )
 
-        model = sc.model.default or None
+        model = sc["model"]
         if model is None and not rows:
             continue  # empty seeded slot
 
@@ -318,14 +366,14 @@ def snapshot_live_stack(
             StackSlotEntry(
                 slot=slot_name,
                 model=model,
-                device=sc.device,
-                provider=sc.provider,
-                role=sc.role,
-                vision=sc.vision,
-                mtp=sc.mtp,
-                enable_thinking=sc.enable_thinking,
-                server_extra_args=sc.server.extra_args,
-                profile=sc.profile,
+                device=sc["device"],
+                provider=sc["provider"],
+                role=sc["role"],
+                vision=sc["vision"],
+                mtp=sc["mtp"],
+                enable_thinking=sc["enable_thinking"],
+                server_extra_args=sc["server_extra_args"],
+                profile=sc["profile"],
                 capabilities=rows,
             )
         )
