@@ -466,7 +466,9 @@ function SlotsView({ slotVariant, slotParam, onGo }) {
   // slots, and is mutually exclusive with the LLM stack — so it gets its own
   // tab instead of a SlotCard in the Image group.
   const [tab, setTab] = useStateS(
-    slotParam === "endpoints" || slotParam === "profiles" ? slotParam : "inference",
+    slotParam === "endpoints" || slotParam === "profiles" || slotParam === "stacks"
+      ? slotParam
+      : "inference",
   );
   const comfyQuery = useComfyui({ active: tab === "image" });
   const comfyLive = comfyQuery.data?.container?.state === "running";
@@ -519,8 +521,8 @@ function SlotsView({ slotVariant, slotParam, onGo }) {
   // matching tab; navigating back to bare #slots (or a slot-name param) drops
   // out of a sub-tab back to Inference.
   React.useEffect(() => {
-    if (slotParam === "endpoints" || slotParam === "profiles") setTab(slotParam);
-    else setTab((t) => (t === "endpoints" || t === "profiles" ? "inference" : t));
+    if (slotParam === "endpoints" || slotParam === "profiles" || slotParam === "stacks") setTab(slotParam);
+    else setTab((t) => (t === "endpoints" || t === "profiles" || t === "stacks" ? "inference" : t));
   }, [slotParam]);
 
   // Listen for the N hotkey via global event (wired by main.jsx)
@@ -692,9 +694,16 @@ function SlotsView({ slotVariant, slotParam, onGo }) {
     );
   }
 
+  // Sub-tabs (Endpoints / Profiles / Stacks) are slot-independent surfaces —
+  // they must stay reachable even while /api/slots is loading or has resolved
+  // empty (a fresh box with no slots is exactly when you want to apply a Stack
+  // or pick a Profile). Only the slot-centric Inference/Image tabs fall through
+  // to the loading skeleton / empty state below.
+  const onSubTab = tab === "endpoints" || tab === "profiles" || tab === "stacks";
+
   // Loading skeleton — shown while /api/slots is still resolving so no
   // fake/stub slot cards flash before real data arrives.
-  if (slotsLoading) {
+  if (slotsLoading && !onSubTab) {
     return (
       <div className="view">
         <div className="vh">
@@ -720,8 +729,8 @@ function SlotsView({ slotVariant, slotParam, onGo }) {
   }
 
   // Real zero-slots empty state — only when the query has resolved to a
-  // confirmed empty array (not still-loading).
-  if (slotsEmpty) {
+  // confirmed empty array (not still-loading), and only on a slot-centric tab.
+  if (slotsEmpty && !onSubTab) {
     return (
       <div className="view">
         <div className="vh">
@@ -864,6 +873,14 @@ function SlotsView({ slotVariant, slotParam, onGo }) {
         >
           <span>Profiles</span>
         </button>
+        <button
+          role="tab"
+          aria-selected={tab === "stacks"}
+          className={"slot-tab" + (tab === "stacks" ? " on" : "")}
+          onClick={() => { window.location.hash = "#slots/stacks"; }}
+        >
+          <span>Stacks</span>
+        </button>
       </div>
 
       {tab === "endpoints" ? (
@@ -872,6 +889,8 @@ function SlotsView({ slotVariant, slotParam, onGo }) {
         </div>
       ) : tab === "profiles" ? (
         window.ProfilesView ? <window.ProfilesView /> : null
+      ) : tab === "stacks" ? (
+        window.StacksView ? <window.StacksView /> : null
       ) : (
       <div className="dash">
         <div className="dash-main">
