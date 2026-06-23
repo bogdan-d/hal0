@@ -10,6 +10,22 @@ Tags older than v0.2.0 ship release notes inside the GitHub release
 page; this CHANGELOG starts at v0.2.0 (the Lemonade migration cut).
 For ADR-level architecture context see `docs/internal/adr/`.
 
+## [v0.8.1-beta.2] — 2026-06-23
+
+Bugfix on the 0.8.1 beta line — restores fleet auto-update. Safe upgrade from
+v0.8.1-beta.1.
+
+### Fixed
+- **Updater version comparison uses PEP 440.** `hal0 update` compared versions with
+  a digit-tuple parser that split on `.` and stripped non-digits per segment, so the
+  pip-normalised installed beta `0.8.0b3` parsed to `(0, 8, 3)` and the tag-form
+  manifest `0.8.1-beta.1` to `(0, 8, 1, 1)` — `(0,8,1,1) > (0,8,3)` is false, so
+  every box on a `0.8.0bN` beta saw the new release as "not newer" and `hal0 update`
+  reported nothing to apply (the installed beta number was misread as the patch
+  component). The comparator now uses `packaging.version.Version` in both the updater
+  and the API route, falling back to the digit-tuple only for non-PEP-440 nightly
+  tags (whose timestamp ordering still relies on it). (#957)
+
 ## [v0.8.1-beta.1] — 2026-06-23
 
 Installer/privilege simplification + Hermes durable memory on by default. The
