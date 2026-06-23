@@ -421,6 +421,10 @@ def _seed_coder(agent_id: str) -> Persona:
             "namespace so coding context doesn't pollute the operator's general chat."
         ),
         tools_allowed=("*",),
+        # A separate private bank keeps coding context out of general chat. The
+        # bank itself is created lazily by Hindsight on the coder persona's first
+        # write — provisioning never pre-creates it (see _phase_namespace_register,
+        # which only writes the agent identity card to the shared agents dataset).
         memory_namespace=f"private:{agent_id}-coder",
         approval=PersonaApproval(
             default_policy="ask",
@@ -447,7 +451,7 @@ def _seed_coder(agent_id: str) -> Persona:
 
 
 def seed_default_personas(
-    agent_id: str = "hermes-agent",
+    agent_id: str = "hermes",
     *,
     root: Path | None = None,
     overwrite: bool = False,
