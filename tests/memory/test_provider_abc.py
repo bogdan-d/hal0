@@ -39,10 +39,10 @@ def test_abc_optional_methods_have_safe_defaults():
         assert callable(getattr(MemoryProvider, name))
 
 
-def test_add_signature_matches_cognee_call_sites():
+def test_add_signature_matches_call_sites():
     sig = inspect.signature(MemoryProvider.add)
     params = list(sig.parameters)
-    # Mirrors CogneeWrapper.add + the REST/MCP callers.
+    # Mirrors the REST/MCP callers (routes/memory.py + mcp/memory.py).
     assert params == [
         "self",
         "text",
@@ -55,8 +55,22 @@ def test_add_signature_matches_cognee_call_sites():
     ]
 
 
-def test_cognee_wrapper_is_a_memory_provider():
-    from hal0.memory.cognee_wrapper import CogneeWrapper
+def test_memory_record_is_alias_of_memory_item():
+    # ADR-0023: the cognee-era ``MemoryRecord`` name survives as an alias of
+    # ``MemoryItem`` so existing importers keep working after the wrapper removal.
+    from hal0.memory import MemoryRecord as MemoryRecordFromPkg
+    from hal0.memory.provider import MemoryItem, MemoryRecord
+
+    assert MemoryRecord is MemoryItem
+    assert MemoryRecordFromPkg is MemoryItem
+
+
+def test_concrete_providers_are_memory_providers():
+    # ADR-0023: the cognee wrapper is gone; the shipped engines are Hindsight
+    # (primary) + PgVector (boot-degrade fallback). Both must satisfy the ABC.
+    from hal0.memory.hindsight_provider import HindsightProvider
+    from hal0.memory.pgvector_provider import PgVectorProvider
     from hal0.memory.provider import MemoryProvider
 
-    assert issubclass(CogneeWrapper, MemoryProvider)
+    assert issubclass(HindsightProvider, MemoryProvider)
+    assert issubclass(PgVectorProvider, MemoryProvider)

@@ -32,12 +32,12 @@ from hal0.cli._shared import (
 )
 from hal0.memory.migrate import migrate_cognee_to_hindsight_dryrun
 
-app = typer.Typer(help="Manage hal0 memory (Cognee — ADR-0005 + ADR-0014).")
+app = typer.Typer(help="Manage hal0 memory (Hindsight engine).")
 console = Console()
 
 # ``graph`` sub-sub-app so ``hal0 memory graph --help`` renders cleanly
 # alongside ``hal0 memory --help``. Same pattern as ``hal0 agent approvals``.
-graph_app = typer.Typer(help="Graph-extraction gate (ADR-0014).")
+graph_app = typer.Typer(help="Graph-extraction settings (ADR-0023).")
 app.add_typer(graph_app, name="graph")
 
 
@@ -70,20 +70,23 @@ def graph_status_cmd(
 
     enabled = bool(s.get("enabled"))
     state = "[bold green]ON[/bold green]" if enabled else "[bold]OFF[/bold]"
-    route = s.get("route", "—")
-    upstream = s.get("upstream") or {}
-    upstream_line = (
-        f"{upstream.get('provider', '?')} · {upstream.get('model', '?')}"
-        if upstream
-        else "[dim]not configured[/dim]"
-    )
+    slot = s.get("extraction_slot", s.get("route", "—"))
+    resolves = s.get("slot_resolves")
+    if resolves is True:
+        slot_line = f"[bold]{slot}[/bold] [green](resolves)[/green]"
+    elif resolves is False:
+        slot_line = f"[bold]{slot}[/bold] [red](no matching enabled llm slot)[/red]"
+    else:
+        slot_line = f"[bold]{slot}[/bold]"
+    available = s.get("available_slots") or []
 
     t = Table.grid(padding=(0, 2))
     t.add_column("k", style="dim")
     t.add_column("v")
     t.add_row("State", state)
-    t.add_row("Route", str(route))
-    t.add_row("Upstream", upstream_line)
+    t.add_row("Extraction slot", slot_line)
+    if available:
+        t.add_row("Available slots", ", ".join(available))
     t.add_row("Builds OK", str(s.get("builds_ok", 0)))
     t.add_row("Errors", str(s.get("errors", 0)))
     t.add_row("In-flight", str(s.get("in_flight", 0)))
@@ -99,41 +102,22 @@ def graph_status_cmd(
 
 @graph_app.command("enable")
 def graph_enable_cmd(
-    route: str = typer.Option(
-        "upstream",
-        "--route",
-        help="Where to dispatch graph extraction: upstream | primary | agent.",
-    ),
-    provider: str | None = typer.Option(
+    slot: str | None = typer.Option(
         None,
-        "--provider",
-        help="Upstream provider id (required when --route=upstream).",
-    ),
-    model: str | None = typer.Option(
-        None,
-        "--model",
-        help="Upstream model id (required when --route=upstream).",
+        "--slot",
+        help="Local llm slot used for graph extraction (e.g. 'utility'). "
+        "Must be an enabled type=llm slot; the server validates against the live "
+        "slot set and restarts hindsight-api to point its extraction LLM there. "
+        "Omit to keep the current slot.",
     ),
     json_out: bool = typer.Option(
         False, "--json", help="Emit the raw JSON response instead of a panel."
     ),
 ) -> None:
-    """Turn graph extraction ON.
-
-    ``--route=upstream`` requires ``--provider`` + ``--model``. The
-    server-side validator ALSO enforces this, so the CLI can be skipped
-    in scripts that hit the API directly.
-    """
-    if route not in {"upstream", "primary", "agent"}:
-        die(f"--route must be one of upstream | primary | agent (got {route!r})")
-        return
-    if route == "upstream" and (not provider or not model):
-        die("--route=upstream requires --provider and --model")
-        return
-
-    payload: dict[str, Any] = {"enabled": True, "route": route}
-    if route == "upstream":
-        payload["upstream"] = {"provider": provider, "model": model}
+    """Turn graph extraction ON (optionally repointing the extraction slot)."""
+    payload: dict[str, Any] = {"enabled": True}
+    if slot is not None:
+        payload["extraction_slot"] = slot
 
     url = _api_base()
     if _api_unreachable(url):
@@ -146,10 +130,17 @@ def graph_enable_cmd(
     if json_out:
         typer.echo(jsonlib.dumps(result, indent=2, sort_keys=True))
         return
+    prop = result.get("propagation") or {}
+    prop_line = ""
+    if prop:
+        if prop.get("error"):
+            prop_line = f"\n[red]hindsight-api restart: {prop['error']}[/red]"
+        elif prop.get("restarted"):
+            prop_line = "\n[dim]hindsight-api restarted on the new slot.[/dim]"
     console.print(
         Panel(
             f"[bold green]Graph extraction enabled[/bold green]\n"
-            f"route = [bold]{result.get('route')}[/bold]",
+            f"extraction slot = [bold]{result.get('extraction_slot')}[/bold]{prop_line}",
             border_style="green",
         )
     )

@@ -84,10 +84,9 @@ def test_registry_declares_three_apply_classes() -> None:
         ("memory.embedding.rerank_max_candidates", "immediate", []),
         ("memory.embedding.rerank_connect_timeout_s", "immediate", []),
         ("memory.embedding.rerank_read_timeout_s", "immediate", []),
-        # [memory.graph]
+        # [memory.graph] — ADR-0023: route/upstream replaced by extraction_slot
         ("memory.graph.enabled", "immediate", []),
-        ("memory.graph.route", "immediate", []),
-        ("memory.graph.upstream", "immediate", []),
+        ("memory.graph.extraction_slot", "immediate", []),
         # [meta]
         ("meta.schema_version", "manual-restart", []),
     ],

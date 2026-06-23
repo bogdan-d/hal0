@@ -97,14 +97,19 @@ deprecated `pull_root` (default `/var/lib/hal0/models`). Point `store` at your
 fast disk / network mount to align pulls and slot bind-mounts on one path.
 </Aside>
 
-### `[memory.graph]` — graph extraction (ADR-0014)
+### `[memory.graph]` — graph extraction (ADR-0023)
 
 | Key | Type | Default | Notes |
 |---|---|---|---|
-| `enabled` | bool | `false` | Off by default. When false, `memory_add` skips graph extraction; vector search still works. |
-| `route` | `"upstream"` \| `"primary"` \| `"agent"` | `"upstream"` | Where the extraction LLM call is dispatched. |
-| `upstream.provider` | str | `"openrouter"` | Provider id; must match a `providers.toml` entry for key resolution. |
-| `upstream.model` | str | `""` | Model id. Required when `enabled = true` and `route = "upstream"`. |
+| `enabled` | bool | `false` | Off by default. On the Hindsight engine this is a reporting gate — Hindsight builds its graph natively; vector recall works either way. |
+| `extraction_slot` | str | `"utility"` | The local `type=llm` slot Hindsight uses for graph extraction. Propagated to `hindsight-api` as `HINDSIGHT_API_LLM_MODEL=hal0/<slot>` via a systemd drop-in. Validated against the live enabled-llm-slot set at set-time. Slot-name grammar (lowercase alnum/`-`/`_`, ≤32, leading alphanumeric). |
+
+<Aside type="note">
+ADR-0023 replaced the legacy `route` / `upstream` keys (the Cognee-era extraction
+enum) with the single `extraction_slot` knob. A lingering `route` / `upstream`
+key in an old `hal0.toml` is silently dropped on load (it does not fail
+validation), so upgrades don't hard-break.
+</Aside>
 
 ## Per-slot TOML (`slots/<name>.toml`)
 

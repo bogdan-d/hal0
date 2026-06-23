@@ -248,16 +248,38 @@ def test_missing_backend_field_400(
     assert r.json()["error"]["code"] == "backend.missing"
 
 
-# ── back-compat: old slot name "primary" resolves to chat (#654) ─────────────
+# ── back-compat: surviving alias "agent-hermes" resolves to agent (ADR-0023) ─
 
 
-def test_legacy_primary_name_resolves_to_chat_slot(
-    slot_toml: Path,
+def test_agent_hermes_name_resolves_to_agent_slot(
+    tmp_hal0_home: str,
     client: TestClient,
 ) -> None:
-    """POST /api/slots/primary/backend resolves via the hidden alias to the
-    chat slot's chat.toml — proves old names still work post-rename."""
-    r = client.post("/api/slots/primary/backend", json={"backend": "rocm"})
+    """POST /api/slots/agent-hermes/backend resolves via the surviving hidden
+    alias to the ``agent`` slot's agent.toml.
+
+    ADR-0023 retired the ``primary`` and ``chat`` aliases; ``agent-hermes`` →
+    ``agent`` is the only back-compat redirect that remains."""
+    root = Path(tmp_hal0_home) / "etc" / "hal0" / "slots"
+    root.mkdir(parents=True, exist_ok=True)
+    agent_toml = root / "agent.toml"
+    agent_toml.write_text(
+        "\n".join(
+            [
+                'name = "agent"',
+                'type = "llm"',
+                'device = "gpu-vulkan"',
+                'runtime = "container"',
+                "enabled = true",
+                "port = 8081",
+                "[model]",
+                'default = "qwen3-4b"',
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    r = client.post("/api/slots/agent-hermes/backend", json={"backend": "rocm"})
     assert r.status_code == 200, r.text
-    # The alias wrote to the canonical chat.toml fixture.
-    assert _read_device(slot_toml) == "gpu-rocm"
+    # The alias wrote to the canonical agent.toml.
+    assert _read_device(agent_toml) == "gpu-rocm"

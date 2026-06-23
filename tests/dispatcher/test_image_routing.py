@@ -84,14 +84,17 @@ def test_flux_model_prefix_routes_to_img() -> None:
 
 
 def test_chat_model_id_still_routes_to_primary() -> None:
-    """The image rules must not regress chat routing."""
-    reg = _registry_with_slots("chat", "img")
+    """The image rules must not regress chat routing.
+
+    ADR-0023: the fallback anchor is the `agent` slot (was `chat`).
+    """
+    reg = _registry_with_slots("agent", "img")
     upstream = resolve_by_capability(
         "/v1/chat/completions",
         {"model": "qwen3-4b", "messages": []},
         reg,
     )
-    assert upstream.name == "chat"
+    assert upstream.name == "agent"
 
 
 def test_image_path_without_img_slot_raises_typed_error() -> None:

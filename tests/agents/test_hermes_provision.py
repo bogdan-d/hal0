@@ -628,7 +628,8 @@ def test_overlay_no_primary_under_live_resolve_uses_virtual() -> None:
             "context_length": 32768,
         },
     )
-    assert keys["model.default"] == "hal0/chat"
+    # ADR-0023: the canonical default virtual is hal0/agent (was hal0/chat).
+    assert keys["model.default"] == "hal0/agent"
     assert "127.0.0.1:8080/v1" in keys["model.base_url"]
 
 

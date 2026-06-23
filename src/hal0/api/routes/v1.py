@@ -188,10 +188,11 @@ async def _read_json_body(request: Request) -> dict[str, Any]:
 async def _rewrite_chat_slot_alias(request: Request, body: dict[str, Any]) -> dict[str, Any]:
     """Translate a chat-slot ALIAS in ``body["model"]`` to its model id.
 
-    hermes-role-slots: a request may address a co-resident chat slot by
-    its **alias** (slot name: ``chat`` / ``agent`` / ``utility``; legacy
-    ``primary`` / ``agent-hermes`` also accepted via back-compat aliases)
-    instead of the underlying model id. We rewrite the alias to the
+    hermes-role-slots: a request may address a co-resident llm slot by
+    its **alias** (the slot name — ADR-0023 canonical: ``agent`` / ``utility``,
+    plus any other enabled llm slot by name; legacy ``agent-hermes`` accepted
+    via back-compat alias) instead of the underlying model id. We rewrite the
+    alias to the
     slot's configured model id HERE, at the route layer, before the
     dispatcher routes it. After the rewrite, both ``model==alias`` and
     ``model==model_id`` carry the correct distinct model name down the
@@ -441,7 +442,7 @@ async def _dispatch_and_forward(
 ) -> Response:
     if body is None:
         body = await _read_json_body(request)
-    # Translate a chat-slot alias (chat/agent/utility; also primary/agent-hermes) → model id
+    # Translate an llm-slot alias (agent/utility/any enabled llm slot; also agent-hermes) → model id
     # before routing so the dispatcher sees the real model name.
     body = await _rewrite_chat_slot_alias(request, body)
     # #430: backend-aware load BEFORE dispatch, so a slot-backed model is
@@ -581,9 +582,10 @@ async def list_models(
         slot_views_provider=lambda: views,
         loaded_models_provider=lambda: _normalize_loaded_models(request),
     )
-    # All 3 canonical names are advertised whenever they resolve. hal0/npu and
-    # hal0/utility fall back to the primary when no npu/utility slot is loaded —
-    # intentional: the name always routes (see resolve_chain's fallback contract).
+    # The canonical names (hal0/agent, hal0/utility, hal0/npu) are advertised
+    # whenever they resolve. hal0/npu and hal0/utility fall back to the agent
+    # anchor when no npu/utility slot is loaded (ADR-0023) — intentional: the
+    # name always routes (see resolve_chain's fallback contract).
     for vname in DEFAULT_CHAINS:  # canonical names only (aliases excluded from the picker)
         if vname in seen:
             continue

@@ -325,12 +325,12 @@ def test_image_defaults_do_not_override_explicit_values(
 
 def test_llm_request_in_img_mode_503_retry_after(client: TestClient, tmp_hal0_home: str) -> None:
     """Chat request while mode==img → 503 gpu.image_mode + Retry-After ≥ 15."""
-    # Legacy fallback resolves model "primary" via the back-compat alias to
-    # the "chat" slot (resolve_by_capability rule 8), so seed "chat".
-    _seed_chat_upstream(client, "chat")
+    # ADR-0023: model "primary" has no slot and is no longer an alias, so it
+    # falls through to the rule-9 `agent` anchor — seed the `agent` slot.
+    _seed_chat_upstream(client, "agent")
     _write_img_mode_state(
         Path(tmp_hal0_home) / "var-lib" / "hal0" / "gpu_arbiter.json",
-        saved=["chat"],
+        saved=["agent"],
     )
 
     r = client.post(
@@ -454,7 +454,8 @@ def test_force_killed_inflight_gets_clean_5xx(
     as a clean gpu.image_mode 503 envelope (dead-port guard path), not a
     hung socket or an exception leak.
     """
-    _seed_chat_upstream(client, "chat")
+    # ADR-0023: model "primary" falls through to the rule-9 `agent` anchor.
+    _seed_chat_upstream(client, "agent")
     manager = client.app.state.slot_manager
     monkeypatch.setattr(manager, "is_ready_for_dispatch", lambda _n: True)
     arbiter = manager.arbiter  # construct in LLM mode
@@ -465,7 +466,7 @@ def test_force_killed_inflight_gets_clean_5xx(
         # Mid-flight force-kill: arbiter persisted img mode, container gone.
         st = arbiter._load_state()
         st["mode"] = "img"
-        st["saved_llm_slots"] = ["chat"]
+        st["saved_llm_slots"] = ["agent"]
         raise httpx.ConnectError("container force-killed", request=req)
 
     client.app.state.dispatcher._http_client = httpx.AsyncClient(

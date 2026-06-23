@@ -208,7 +208,9 @@ export const ENDPOINTS = {
   // lifecycle mutations) was removed, so only the server list remains.
   mcpServers: '/api/mcp/servers',
 
-  // ── Memory (ADR-0014 graph-extraction gate) ──────────────────────
+  // ── Memory (ADR-0023 graph-extraction gate) ──────────────────────
+  // status → { enabled, extraction_slot, slot_resolves, available_slots, ... }
+  // PUT body → { enabled?, extraction_slot? }
   memoryGraphStatus: '/api/memory/graph/status',
   memoryGraph: '/api/memory/graph',
 

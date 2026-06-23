@@ -245,25 +245,28 @@ def test_proxy_audio_transcriptions_not_routed_to_tts() -> None:
     """/audio/transcriptions is STT — must NOT be pinned to the tts slot.
 
     The _TTS_PATHS check is '/audio/speech' only. Transcription requests
-    fall through to the chat fallback (or caller-specified slot).
+    fall through to the default anchor (or caller-specified slot).
+
+    ADR-0023: the fallback anchor is the `agent` slot (was `chat`).
     """
-    chat = make_slot("chat", "http://127.0.0.1:8081/v1")
-    upstreams = FakeUpstreamRegistry([chat])
+    agent = make_slot("agent", "http://127.0.0.1:8081/v1")
+    upstreams = FakeUpstreamRegistry([agent])
 
     upstream = resolve_by_capability(
         path="/v1/audio/transcriptions",
         body={"model": "moonshine-small", "language": "en"},
         upstreams=upstreams,
     )
-    # Falls to chat (Rule 8), NOT tts.
-    assert upstream.name == "chat"
+    # Falls to the `agent` anchor (Rule 9), NOT tts.
+    assert upstream.name == "agent"
 
 
 @pytest.mark.asyncio
 async def test_router_audio_transcriptions_not_default_to_tts() -> None:
     """_default_for_path('/v1/audio/transcriptions') must not return 'tts'."""
-    chat = make_slot("chat", "http://127.0.0.1:8081/v1")
-    upstreams = FakeUpstreamRegistry([chat])
+    # ADR-0023: the default anchor is the `agent` slot (was `chat`).
+    agent = make_slot("agent", "http://127.0.0.1:8081/v1")
+    upstreams = FakeUpstreamRegistry([agent])
     models = FakeModelRegistry(routes={})
 
     dispatcher = Dispatcher(upstream_registry=upstreams, model_registry=models)
@@ -271,7 +274,7 @@ async def test_router_audio_transcriptions_not_default_to_tts() -> None:
     # dispatcher._default_for_path is accessible for a direct unit check.
     result = dispatcher._default_for_path("/v1/audio/transcriptions")
     assert result != "tts"
-    assert result == "chat"
+    assert result == "agent"
 
 
 # ── C1: path-pin must resolve container-backed remote upstreams ───────────────
@@ -383,15 +386,17 @@ def test_proxy_model_name_rule_does_not_resolve_container_remote() -> None:
 
     Rule 7 (explicit slot-name addressing via model id) on a non-pinned
     path must NOT resolve a kind=remote upstream — model='tts' on
-    /chat/completions falls through to the chat fallback as before.
+    /chat/completions falls through to the default anchor as before.
+
+    ADR-0023: the fallback anchor is the `agent` slot (was `chat`).
     """
     container_tts = make_remote_tts(port=8084)
-    chat = make_slot("chat", "http://127.0.0.1:8081/v1")
-    upstreams = FakeUpstreamRegistry([container_tts, chat])
+    agent = make_slot("agent", "http://127.0.0.1:8081/v1")
+    upstreams = FakeUpstreamRegistry([container_tts, agent])
 
     upstream = resolve_by_capability(
         path="/v1/chat/completions",
         body={"model": "tts", "messages": []},
         upstreams=upstreams,
     )
-    assert upstream.name == "chat"
+    assert upstream.name == "agent"

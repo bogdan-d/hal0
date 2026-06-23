@@ -146,7 +146,8 @@ _DEAD_PORT_TRANSPORT_ERRORS = (
 
 # Path defaults used only for routing — never written back into the body.
 # Mirrors haloai lib/dispatcher.py:_DEFAULT_MODEL etc.
-_DEFAULT_MODEL = "chat"
+# ADR-0023: the default/fallback LLM anchor is the `agent` slot (was `chat`).
+_DEFAULT_MODEL = "agent"
 _EMBED_DEFAULT = "embed"
 # Phase C: /rerank paths now route to a dedicated rerank slot (vulkan llama-
 # server with --reranking, port 8083). Previously this pointed at "embed".
@@ -1381,9 +1382,9 @@ def resolve_by_capability(  # TIER1
       6. Model id starts with ``sdxl``/``sd-1.5``/``sd15``/``flux`` → ``img`` slot.
       7. Model id contains ``embed`` or ``rerank`` substring → ``embed`` slot.
       8. Model id exactly matches a registered slot upstream name (other
-         than ``chat``) → that slot.  Back-compat aliases (``primary``
-         → ``chat``, ``agent-hermes`` → ``agent``) are resolved first.
-      9. Fallback → ``chat`` slot.
+         than the default ``agent`` anchor) → that slot.  Back-compat alias
+         (``agent-hermes`` → ``agent``) is resolved first.
+      9. Fallback → ``agent`` slot (ADR-0023 default anchor).
 
     Args:
         path:       The original request path (e.g. "/v1/chat/completions").
@@ -1451,16 +1452,18 @@ def resolve_by_capability(  # TIER1
                 candidate = "embed"
             else:
                 # Rule 8 — explicit slot-name addressing.
-                # Resolve back-compat aliases (primary→chat, agent-hermes→agent)
-                # before the upstream lookup so old callers still land correctly.
+                # Resolve back-compat aliases (agent-hermes→agent) before the
+                # upstream lookup so old callers still land correctly.
                 m_resolved = SLOT_ALIASES.get(m, m)
                 slot_match = upstreams.get(m_resolved)
-                if slot_match is not None and slot_match.kind == "slot" and m_resolved != "chat":
+                # ADR-0023: the anchor (`agent`) is reached via the rule-9 default,
+                # not explicit name matching here — guard against double-routing.
+                if slot_match is not None and slot_match.kind == "slot" and m_resolved != _DEFAULT_MODEL:
                     candidate = m_resolved
 
-    # Rule 9 — fallback default slot.
+    # Rule 9 — fallback default slot (ADR-0023: the `agent` anchor).
     if candidate is None:
-        candidate = "chat"
+        candidate = _DEFAULT_MODEL
 
     upstream = upstreams.get(candidate)
     # Acceptance: a local slot upstream always qualifies.  For PATH-pinned

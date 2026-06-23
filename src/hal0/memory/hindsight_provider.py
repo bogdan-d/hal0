@@ -107,16 +107,17 @@ class HindsightProvider(MemoryProvider):
         client_id: str = "anonymous",
         reranker: Any = None,
         graph_enabled: bool = False,
-        graph_route: str = "upstream",
+        extraction_slot: str = "utility",
     ) -> None:
         self._client = client
         self._client_id = client_id
         self._reranker = reranker
-        # ADR-0014 gate — reporting-only on this engine (Hindsight builds its
-        # graph natively); seeded from [memory.graph] so graph_status() agrees
-        # with hal0.toml instead of always reading disabled.
+        # ADR-0023: reporting-only on this engine (Hindsight builds its graph
+        # natively via its own extraction LLM, which hal0 points at the
+        # `extraction_slot` via the hindsight-api systemd drop-in). Seeded from
+        # [memory.graph] so graph_status() agrees with hal0.toml.
         self._graph_enabled = bool(graph_enabled)
-        self._graph_route = graph_route
+        self._extraction_slot = extraction_slot
         self._rerank_enabled = reranker is not None
 
     @property
@@ -355,7 +356,8 @@ class HindsightProvider(MemoryProvider):
     def graph_status(self) -> dict[str, Any]:
         return {
             "enabled": self._graph_enabled,
-            "route": self._graph_route,
+            "extraction_slot": self._extraction_slot,
+            "route": self._extraction_slot,  # deprecated mirror (ADR-0023)
             "in_flight": 0,
             "builds_ok": 0,
             "errors": 0,
@@ -363,10 +365,10 @@ class HindsightProvider(MemoryProvider):
             "last_error": None,
         }
 
-    def set_graph_enabled(self, enabled: bool, route: str | None = None) -> None:
+    def set_graph_enabled(self, enabled: bool, extraction_slot: str | None = None) -> None:
         self._graph_enabled = bool(enabled)
-        if route is not None:
-            self._graph_route = route
+        if extraction_slot is not None:
+            self._extraction_slot = extraction_slot
 
     def set_rerank_enabled(self, enabled: bool) -> None:
         self._rerank_enabled = bool(enabled)

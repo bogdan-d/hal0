@@ -10,15 +10,41 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 
+# ADR-0023: `agent` is the canonical default/anchor role (replaces `chat`); every
+# fallback chain ends in `agent`. `utility` is the explicitly-targeted cheap helper
+# and is NEVER the fallback for general chat.
+_ANCHOR_ROLE = "agent"
+_VIRTUAL_PREFIX = "hal0/"
+
 # Canonical virtual names -> ordered chain of roles to try against loaded slots.
+# These three are the *advertised* names (the Hermes / OpenWebUI picker). ANY other
+# enabled llm slot `X` is still addressable as `hal0/X` via the generalized chain
+# built in `_chain_for` — the mapping is read from the live slot set, not frozen here.
 DEFAULT_CHAINS: dict[str, tuple[str, ...]] = {
-    "hal0/chat": ("chat",),
-    # hal0/agent → the slot named/tagged "agent" (a first-class chat role,
-    # e.g. the GPU MoE agent slot). Falls back to chat when agent is unloaded.
-    "hal0/agent": ("agent", "chat"),
-    "hal0/npu": ("npu", "utility", "chat"),
-    "hal0/utility": ("utility", "npu", "chat"),
+    "hal0/agent": (_ANCHOR_ROLE,),
+    # hal0/utility → the cheap helper slot; falls back to the anchor when unloaded.
+    "hal0/utility": ("utility", _ANCHOR_ROLE),
+    "hal0/npu": ("npu", "utility", _ANCHOR_ROLE),
 }
+
+
+def _chain_for(virtual_name: str, slots: list[SlotView]) -> tuple[str, ...] | None:
+    """Resolve a virtual name to an ordered role chain.
+
+    Canonical names (DEFAULT_CHAINS) win. Otherwise ADR-0023 §2 generalization:
+    ``hal0/<slot>`` for ANY enabled llm slot resolves to ``(<slot>, agent)`` so an
+    operator-chosen slot (e.g. the memory extraction slot) is addressable without a
+    hardcoded entry. Unknown / non-prefixed names return None (caller leaves the body
+    model untouched).
+    """
+    canonical = DEFAULT_CHAINS.get(virtual_name)
+    if canonical is not None:
+        return canonical
+    if virtual_name.startswith(_VIRTUAL_PREFIX):
+        slot = virtual_name[len(_VIRTUAL_PREFIX) :]
+        if slot and any(_slot_matches_role(s, slot) for s in slots):
+            return (slot, _ANCHOR_ROLE)
+    return None
 
 
 @dataclass(frozen=True)
@@ -49,13 +75,14 @@ def _slot_matches_role(slot: SlotView, role: str) -> bool:
 
 
 def _configured_primary(slots: list[SlotView]) -> SlotView | None:
-    # Prefer canonical "chat" role; also accept legacy "primary" name/role
-    # from slots that haven't been migrated yet.
-    for role in ("chat", "primary"):
+    # ADR-0023: the anchor is the `agent` role. (`chat`/`primary` are retired;
+    # kept here only as a transition courtesy for a box mid-migration whose
+    # canonical slot hasn't been reseeded yet.)
+    for role in (_ANCHOR_ROLE, "chat", "primary"):
         for s in slots:
             if _slot_matches_role(s, role):
                 return s
-    # last-resort: first enabled llm slot if none is tagged/named chat/primary
+    # last-resort: first enabled llm slot if none is tagged/named agent.
     return slots[0] if slots else None
 
 
@@ -70,7 +97,7 @@ def resolve_chain(
     always returns a ``Resolution`` (falling back to the configured primary,
     ``fallback=True``, when no chain role is currently loaded).
     """
-    chain = DEFAULT_CHAINS.get(virtual_name)
+    chain = _chain_for(virtual_name, slots)
     if chain is None:
         return None
 
@@ -106,7 +133,10 @@ class LiveSlotResolver:
         self._loaded = loaded_models_provider
 
     async def resolve(self, model_name: str) -> Resolution | None:
-        if model_name not in DEFAULT_CHAINS:
+        # ADR-0023 §2: any `hal0/<slot>` may resolve (canonical or generalized), so
+        # we can't pre-filter on DEFAULT_CHAINS membership — defer to resolve_chain,
+        # which returns None for a non-virtual name or an unknown slot.
+        if not model_name.startswith(_VIRTUAL_PREFIX):
             return None
         try:
             views = list(self._views() or [])

@@ -395,14 +395,15 @@ async def hal0_slot_alias_models(
 
 
 async def hal0_chat_slot_alias_map(slot_manager: SlotManager) -> dict[str, str]:
-    """Return ``{slot_alias: model_id}`` for enabled chat slots.
+    """Return ``{slot_alias: model_id}`` for enabled llm slots.
 
-    The slot **alias** is the slot name (``chat`` / ``agent`` /
-    ``utility``; back-compat: ``primary`` / ``agent-hermes``). Used by
-    the ``/v1`` route layer to translate an
-    alias-addressed request into the slot's configured model id before
-    routing, so dispatch resolves the correct distinct model. This is a
-    thin translation map, not a routing target.
+    The slot **alias** is the slot name. ADR-0023: the canonical llm roles
+    are ``agent`` (default anchor) + ``utility`` (helper); any other enabled
+    llm slot is included by its own name (back-compat alias: ``agent-hermes``).
+    Used by the ``/v1`` route layer to translate an alias-addressed request
+    into the slot's configured model id before routing, so dispatch resolves
+    the correct distinct model. This is a thin translation map, not a routing
+    target.
 
     Best-effort: returns ``{}`` on any failure so the route layer forwards
     the request untranslated rather than 500ing. Disabled slots and slots
@@ -425,10 +426,10 @@ async def hal0_chat_slot_alias_map(slot_manager: SlotManager) -> dict[str, str]:
         model_id = _slot_model_id(cfg)
         if model_id:
             out.setdefault(slot_name, model_id)
-    # Inject back-compat aliases (primary → chat's model_id, agent-hermes →
-    # agent's model_id) so requests using old slot names still reach the right
-    # model after the rename. Use setdefault so a literal slot still named
-    # "primary" on-disk (pre-migration) takes precedence.
+    # Inject back-compat aliases (ADR-0023: only agent-hermes → agent's model_id
+    # remains) so requests using old slot names still reach the right model.
+    # A literal slot still named like an alias on-disk takes precedence (it was
+    # added above via setdefault, so the alias injection below is skipped).
     from hal0.slots.manager import SLOT_ALIASES
 
     for old_name, new_name in SLOT_ALIASES.items():
@@ -1368,7 +1369,7 @@ def create_app() -> FastAPI:
 
     # ── MCP servers (ADR-0004 §4 + ADR-0005 §2) ─────────────────────
     # Mounted BEFORE _mount_dashboard so the dashboard's SPA fallback
-    # doesn't shadow /mcp/* paths. ApprovalQueue + CogneeWrapper are
+    # doesn't shadow /mcp/* paths. ApprovalQueue + the memory provider are
     # constructed eagerly here (no async setup needed for either) so
     # the mount can wire them in immediately.
     from hal0.mcp import ApprovalQueue
