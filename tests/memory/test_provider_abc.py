@@ -9,7 +9,7 @@ from hal0.memory.provider import (
     DeleteResult,  # noqa: F401
     GraphStatus,  # noqa: F401
     ListPage,  # noqa: F401
-    MemoryItem,  # noqa: F401
+    MemoryItem,  # used in test_memory_record_is_alias_of_memory_item
     MemoryProvider,
     Mode,  # noqa: F401
 )
@@ -59,7 +59,7 @@ def test_memory_record_is_alias_of_memory_item():
     # ADR-0023: the cognee-era ``MemoryRecord`` name survives as an alias of
     # ``MemoryItem`` so existing importers keep working after the wrapper removal.
     from hal0.memory import MemoryRecord as MemoryRecordFromPkg
-    from hal0.memory.provider import MemoryItem, MemoryRecord
+    from hal0.memory.provider import MemoryRecord
 
     assert MemoryRecord is MemoryItem
     assert MemoryRecordFromPkg is MemoryItem
