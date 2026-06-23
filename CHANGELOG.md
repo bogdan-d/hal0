@@ -10,6 +10,41 @@ Tags older than v0.2.0 ship release notes inside the GitHub release
 page; this CHANGELOG starts at v0.2.0 (the Lemonade migration cut).
 For ADR-level architecture context see `docs/internal/adr/`.
 
+## [v0.8.1-beta.1] — 2026-06-23
+
+Installer/privilege simplification + Hermes durable memory on by default. The
+hal0-api privilege seams (hardened unprivileged mode, the slot privilege seam)
+are gone, and a fresh `hal0 agent bootstrap hermes` now provisions a working
+durable-memory provider out of the box.
+
+### Added
+- **Hermes durable memory enabled by default.** Provisioning now ships a working
+  `hal0-memory` provider and sets `memory.provider=hal0-memory`, so Hermes gets
+  cross-session recall with no manual config. Two banks — `private:hermes`
+  (default) and `shared` (cross-agent) — backed by hal0's Hindsight engine via
+  the hal0-api REST front door; reads union both banks. The provider exposes
+  `hal0_memory_{search,recall,add}` (with `shared=true` to write the shared
+  bank) and auto-injects recalled context each turn. (#955)
+
+### Changed
+- **Hermes agent identity is `hermes`** (was `hermes-agent`), matching the
+  `hal0 agent` registry. The agent-id is the single source for the
+  `X-hal0-Agent` MCP headers, the persona memory namespace, and the prelude. (#955)
+- **Memory plugin install path fixed.** The plugin is copied to
+  `$HERMES_HOME/plugins/hal0-memory/` (a direct child of `plugins/`, which the
+  Hermes loader actually scans) instead of the nested `plugins/memory/…` that
+  never loaded. (#955)
+
+### Removed
+- **Hardened (unprivileged hal0-api) mode removed**; hal0-api runs as root.
+  Dropped live-hello; fixed ready-summary IPs. (#953)
+- **Dormant slot privilege seam removed** (`hal0-slotctl` + euid routing). (#954)
+
+### Breaking
+- **Hermes memory namespace renamed `private:hermes-agent` → `private:hermes`.**
+  Existing `private:hermes-agent` data is not auto-migrated; reprovisioned agents
+  start recalling from `private:hermes` + `shared`. (#955)
+
 ## [v0.8.0-beta.3] — 2026-06-23
 
 Canonical LLM roles + Hindsight-native memory extraction
