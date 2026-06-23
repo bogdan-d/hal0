@@ -58,20 +58,21 @@ def _seed_stt_upstream(client: TestClient, port: int = 8089) -> None:
 
     The legacy heuristics in ``hal0.dispatcher.router`` don't have a rule for
     ``/v1/audio/transcriptions`` model ids that aren't FLM tag-style, so an
-    arbitrary STT model name falls through to the ``chat`` slot (renamed from
-    ``primary`` in #654). We register under that name so the dispatch resolves
-    cleanly in tests without having to install a registry binding.
+    arbitrary STT model name falls through to the ``agent`` anchor slot
+    (ADR-0023 — the rule-9 fallback anchor, formerly ``chat``/``primary``). We
+    register under that name so the dispatch resolves cleanly in tests without
+    having to install a registry binding.
     """
     client.app.state.upstreams.upsert(
         Upstream(
-            name="chat",
+            name="agent",
             kind="slot",
             url=f"http://127.0.0.1:{port}/v1",
-            slot_name="chat",
+            slot_name="agent",
             auth_style="none",
         )
     )
-    _pin_slot_ready(client)
+    _pin_slot_ready(client, slot_name="agent")
 
 
 def _seed_tts_upstream(client: TestClient, port: int = 8084) -> None:

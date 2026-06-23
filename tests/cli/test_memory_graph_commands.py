@@ -1,11 +1,11 @@
-"""Tests for ``hal0 memory graph {status,enable,disable}`` (ADR-0014 / #258).
+"""Tests for ``hal0 memory graph {status,enable,disable}`` (ADR-0023 / #258).
 
 Mocks the API layer so the CLI runs offline. Pins:
 
-  - ``status`` projects ``enabled / route / counters / upstream`` into
-    the panel + JSON view.
-  - ``enable --route=upstream`` requires --provider + --model client-side.
-  - ``enable --route=primary`` sends the right payload (no upstream block).
+  - ``status`` projects ``enabled / extraction_slot / available_slots /
+    counters`` into the panel + JSON view.
+  - ``enable --slot <name>`` sends ``{enabled: true, extraction_slot: <name>}``.
+  - ``enable`` with no ``--slot`` sends ``{enabled: true}`` (keep current slot).
   - ``disable`` sends ``{enabled: false}``.
 """
 
@@ -38,8 +38,10 @@ def stub_api(monkeypatch: pytest.MonkeyPatch):
         # Default status response — tests can override via monkeypatch.
         return {
             "enabled": False,
-            "route": "upstream",
-            "upstream": None,
+            "extraction_slot": "utility",
+            "route": "utility",  # deprecated mirror
+            "slot_resolves": True,
+            "available_slots": ["agent", "utility"],
             "in_flight": 0,
             "builds_ok": 0,
             "errors": 0,
@@ -51,7 +53,11 @@ def stub_api(monkeypatch: pytest.MonkeyPatch):
         calls["put"].append((path, kw.get("json")))
         # Echo back the payload as if the server accepted.
         body = kw.get("json", {})
-        return {**body, "status": {"enabled": body.get("enabled", False)}}
+        return {
+            "enabled": body.get("enabled", False),
+            "extraction_slot": body.get("extraction_slot", "utility"),
+            "status": {"enabled": body.get("enabled", False)},
+        }
 
     monkeypatch.setattr(memory_commands, "api_get", fake_get)
     monkeypatch.setattr(memory_commands, "api_put", fake_put)
@@ -64,7 +70,9 @@ def test_status_default_panel(stub_api) -> None:
     # Off-by-default → "OFF" appears (rich may insert ANSI; just match
     # the substring).
     assert "OFF" in result.output
-    assert "upstream" in result.output
+    # The extraction slot + the available-slot list are surfaced.
+    assert "Extraction slot" in result.output
+    assert "utility" in result.output
 
 
 def test_status_json(stub_api) -> None:
@@ -72,59 +80,35 @@ def test_status_json(stub_api) -> None:
     assert result.exit_code == 0
     payload = json.loads(result.output)
     assert payload["enabled"] is False
-    assert payload["route"] == "upstream"
+    assert payload["extraction_slot"] == "utility"
 
 
-def test_enable_upstream_requires_provider_and_model(stub_api) -> None:
+def test_enable_without_slot_keeps_current(stub_api) -> None:
+    result = runner.invoke(memory_commands.app, ["graph", "enable"])
+    assert result.exit_code == 0, result.output
+    assert stub_api["put"], "PUT should have been sent"
+    _, payload = stub_api["put"][-1]
+    assert payload == {"enabled": True}
+
+
+def test_enable_with_slot_sends_extraction_slot(stub_api) -> None:
+    result = runner.invoke(
+        memory_commands.app,
+        ["graph", "enable", "--slot", "agent"],
+    )
+    assert result.exit_code == 0, result.output
+    _, payload = stub_api["put"][-1]
+    assert payload == {"enabled": True, "extraction_slot": "agent"}
+
+
+def test_route_option_no_longer_exists(stub_api) -> None:
+    """ADR-0023: --route/--provider/--model were removed in favour of --slot."""
     result = runner.invoke(
         memory_commands.app,
         ["graph", "enable", "--route", "upstream"],
     )
     assert result.exit_code != 0
-    assert "--provider" in result.output
-
-
-def test_enable_primary_sends_no_upstream(stub_api) -> None:
-    result = runner.invoke(
-        memory_commands.app,
-        ["graph", "enable", "--route", "primary"],
-    )
-    assert result.exit_code == 0, result.output
-    assert stub_api["put"], "PUT should have been sent"
-    _, payload = stub_api["put"][-1]
-    assert payload == {"enabled": True, "route": "primary"}
-
-
-def test_enable_upstream_with_provider_and_model(stub_api) -> None:
-    result = runner.invoke(
-        memory_commands.app,
-        [
-            "graph",
-            "enable",
-            "--route",
-            "upstream",
-            "--provider",
-            "openrouter",
-            "--model",
-            "anthropic/claude-3.5-sonnet",
-        ],
-    )
-    assert result.exit_code == 0, result.output
-    _, payload = stub_api["put"][-1]
-    assert payload["enabled"] is True
-    assert payload["upstream"] == {
-        "provider": "openrouter",
-        "model": "anthropic/claude-3.5-sonnet",
-    }
-
-
-def test_enable_invalid_route_rejected_client_side(stub_api) -> None:
-    result = runner.invoke(
-        memory_commands.app,
-        ["graph", "enable", "--route", "bogus"],
-    )
-    assert result.exit_code != 0
-    # The CLI rejects before sending — no PUT should land.
+    # Typer surfaces the unknown option; no PUT should land.
     assert stub_api["put"] == []
 
 

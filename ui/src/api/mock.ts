@@ -819,14 +819,15 @@ function buildBankReflect() {
   }
 }
 
-// ADR-0014 graph-extraction gate status (served by routes/memory.py, not the
+// ADR-0023 graph-extraction gate status (served by routes/memory.py, not the
 // admin proxy). Mocked so the Agent pointer's "Graph extraction" panel renders
 // a clean OFF state in forced-mock mode instead of a 500.
 function buildMemoryGraphStatus() {
   return {
     enabled: false,
-    route: 'upstream',
-    upstream: null,
+    extraction_slot: 'utility',
+    slot_resolves: true,
+    available_slots: ['agent', 'utility'],
     in_flight: 0,
     builds_ok: 0,
     errors: 0,

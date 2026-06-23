@@ -34,8 +34,7 @@ class MemoryItem:
     """One stored memory. ``id`` is the engine's join key.
 
     For Hindsight this is the ``document_id`` (idempotent, recall-visible,
-    delete-addressable) — NOT a per-fact id. For Cognee it is the sidecar
-    uuid. The wire shape matches ``CogneeWrapper.MemoryRecord``.
+    delete-addressable) — NOT a per-fact id.
     """
 
     id: str
@@ -58,6 +57,12 @@ class MemoryItem:
             "metadata": dict(self.metadata),
             "score": self.score,
         }
+
+
+# Back-compat alias: ``MemoryRecord`` was the original (cognee-era) name for this
+# wire shape. Kept as an alias so existing importers keep working after the cognee
+# wrapper was removed (ADR-0023).
+MemoryRecord = MemoryItem
 
 
 @dataclass
@@ -94,10 +99,15 @@ class DeleteResult:
 
 @dataclass
 class GraphStatus:
-    """Return shape of ``graph_status`` — matches the CogneeWrapper payload."""
+    """Return shape of ``graph_status``.
+
+    ADR-0023: ``extraction_slot`` is the local llm slot the engine uses for graph
+    extraction. ``to_dict`` also emits a deprecated ``route`` mirror so the existing
+    dashboard (separate repo) keeps rendering during the cutover.
+    """
 
     enabled: bool
-    route: str
+    extraction_slot: str
     in_flight: int = 0
     builds_ok: int = 0
     errors: int = 0
@@ -107,7 +117,8 @@ class GraphStatus:
     def to_dict(self) -> dict[str, Any]:
         return {
             "enabled": self.enabled,
-            "route": self.route,
+            "extraction_slot": self.extraction_slot,
+            "route": self.extraction_slot,  # deprecated mirror (ADR-0023)
             "in_flight": self.in_flight,
             "builds_ok": self.builds_ok,
             "errors": self.errors,
@@ -184,8 +195,11 @@ class MemoryProvider(ABC):
         """Return the graph-extraction status payload (GraphStatus shape)."""
 
     @abstractmethod
-    def set_graph_enabled(self, enabled: bool, route: str | None = None) -> None:
-        """Flip the graph-extraction gate at runtime."""
+    def set_graph_enabled(self, enabled: bool, extraction_slot: str | None = None) -> None:
+        """Flip the graph-extraction gate at runtime (ADR-0023).
+
+        ``extraction_slot`` updates the reported slot; ``None`` leaves it unchanged.
+        """
 
     @abstractmethod
     def set_rerank_enabled(self, enabled: bool) -> None:

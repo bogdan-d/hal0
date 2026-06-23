@@ -67,7 +67,20 @@ log = logging.getLogger(__name__)
 #: picker (Phase 5) populates their ``model.default`` fields. ``agent``
 #: is the GPU MoE chat-role sibling of ``chat`` (moved here from the NPU
 #: set in #679 — it is a GPU slot, not the NPU FLM anchor).
-SEEDED_SLOTS: tuple[str, ...] = ("chat", "embed", "rerank", "stt", "tts", "img", "vision", "agent")
+# ADR-0023: `utility` (cheap helper) + `agent` (capable/default anchor) are the two
+# canonical llm seeds. `chat` is retired as a slot/role name (the `chat` *capability*
+# is unaffected; any llm slot serves it). `utility` is seeded so the memory
+# extraction target is always present on a fresh box.
+SEEDED_SLOTS: tuple[str, ...] = (
+    "utility",
+    "embed",
+    "rerank",
+    "stt",
+    "tts",
+    "img",
+    "vision",
+    "agent",
+)
 
 #: NPU FLM shadow slots seeded only when the FastFlowLM ``.deb`` is
 #: installed (``shutil.which('flm')`` truthy): the ASR + embed tags that
@@ -82,8 +95,11 @@ NPU_SEEDED_SLOTS: tuple[str, ...] = ("stt-npu", "embed-npu")
 #: NEVER stored on disk and NEVER appear in list() / iter_configs() /
 #: /api/slots. ``agent-hermes`` maps to ``agent`` (a GPU seed slot, #679)
 #: so no new TOML is created — the alias just redirects old references.
+#: ADR-0023 retired the `primary` and `chat` aliases. The canonical roles are
+#: `agent` (default anchor) + `utility` (helper); a lingering operator-custom `chat`
+#: slot is reachable by its own name via generalized `hal0/<slot>` resolution, not an
+#: alias. Only the Hermes-era `agent-hermes` → `agent` redirect remains.
 SLOT_ALIASES: dict[str, str] = {
-    "primary": "chat",
     "agent-hermes": "agent",
 }
 
@@ -132,7 +148,7 @@ _EVICT_AFTER_S: float = 300.0
 # defeat always-warm chat, the agent loop, and the NPU trio anchor. An
 # explicit per-slot idle_timeout_s in TOML still wins (lets an operator
 # opt a named anchor back into eviction); explicit 0 keeps it pinned.
-_PINNED_BY_DEFAULT: frozenset[str] = frozenset({"chat", "agent", "npu"})
+_PINNED_BY_DEFAULT: frozenset[str] = frozenset({"agent", "utility", "npu"})
 
 
 # ── Hook protocols ───────────────────────────────────────────────────────────

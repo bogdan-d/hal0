@@ -873,8 +873,9 @@ def _resolve_primary_slot(
         return kind in {"llm", "chat"}
 
     candidates = [s for s in slots if isinstance(s, dict) and _chat(s)]
-    # Accept both canonical "chat" and legacy "primary" slot names.
-    primary = next((s for s in candidates if s.get("name") in ("chat", "primary")), None)
+    # ADR-0023: the canonical primary is the `agent` slot; accept legacy
+    # `chat`/`primary` names for boxes not yet reseeded.
+    primary = next((s for s in candidates if s.get("name") in ("agent", "chat", "primary")), None)
     if primary is None:
         primary = next((s for s in candidates if _is_ready(s)), None)
     if primary is None:
@@ -1029,7 +1030,8 @@ def _build_config_overlay(
     # model.* — the OpenAI-compatible-LAN wiring. ``provider: custom`` is
     # hermes's built-in bucket for Ollama/vLLM/llama.cpp endpoints; hal0 is
     # that endpoint. max_tokens guards the thinking-model silent-TUI (#635).
-    pairs.append(("model.default", "hal0/chat" if live_resolve_enabled else primary["model_id"]))
+    # ADR-0023: the canonical default virtual is hal0/agent (was hal0/chat).
+    pairs.append(("model.default", "hal0/agent" if live_resolve_enabled else primary["model_id"]))
     pairs += [
         ("model.provider", "custom"),
         ("model.base_url", base_url),
@@ -1068,8 +1070,8 @@ def _build_config_overlay(
         ("memory.memory_enabled", True),
         ("memory.user_profile_enabled", True),
         ("memory.nudge_interval", 10),
-        ("memory.graph.enabled", False),  # ADR-0014: graph extraction defaults OFF
-        ("memory.graph.route", "upstream"),
+        ("memory.graph.enabled", False),  # ADR-0023: graph extraction defaults OFF
+        ("memory.graph.extraction_slot", "utility"),
     ]
 
     # mcp_servers via config set (NOT `hermes mcp add` — interactive/hangs).
@@ -1831,9 +1833,13 @@ def _phase_context_link(ctx: PhaseContext) -> PhaseResult:
     chat_slots = _collect_chat_slots(slots_all, contexts=ctx.io.fetch_model_contexts())
     primary_raw = _resolve_primary_slot(slots_fetcher=lambda: slots_all)
     primary_for_template: dict[str, Any] | None = None
-    primary_alias = "chat"
+    primary_alias = "agent"  # ADR-0023 canonical default anchor
     primary_slot = next(
-        (s for s in slots_all if isinstance(s, dict) and s.get("name") in ("chat", "primary")),
+        (
+            s
+            for s in slots_all
+            if isinstance(s, dict) and s.get("name") in ("agent", "chat", "primary")
+        ),
         None,
     )
     if primary_slot:
@@ -1841,7 +1847,7 @@ def _phase_context_link(ctx: PhaseContext) -> PhaseResult:
     # primary_raw["model"] is a real model_id when a slot is live, or
     # the placeholder string (slot name) when nothing is loaded — treat
     # the placeholder as "no primary" for template purposes.
-    if primary_raw["model"] and primary_raw["model"] not in ("chat", "primary"):
+    if primary_raw["model"] and primary_raw["model"] not in ("agent", "utility", "chat", "primary"):
         primary_for_template = {
             "alias": primary_alias,
             "model_id": primary_raw["model"],
@@ -2357,7 +2363,7 @@ def _slot_alias(slot: dict[str, Any]) -> str:
         v = slot.get(key)
         if isinstance(v, str) and v:
             return v
-    return "chat"
+    return "agent"  # ADR-0023 canonical default anchor
 
 
 def _slot_model_id(slot: dict[str, Any]) -> str | None:
@@ -2513,13 +2519,17 @@ def render_live_context(
     primary_raw = _resolve_primary_slot(slots_fetcher=lambda: slots_all)
 
     primary_slot = next(
-        (s for s in slots_all if isinstance(s, dict) and s.get("name") in ("chat", "primary")),
+        (
+            s
+            for s in slots_all
+            if isinstance(s, dict) and s.get("name") in ("agent", "chat", "primary")
+        ),
         None,
     )
     primary_for_template: dict[str, Any] | None = None
-    if primary_raw["model"] and primary_raw["model"] not in ("chat", "primary"):
+    if primary_raw["model"] and primary_raw["model"] not in ("agent", "utility", "chat", "primary"):
         primary_for_template = {
-            "alias": _slot_alias(primary_slot) if primary_slot else "chat",
+            "alias": _slot_alias(primary_slot) if primary_slot else "agent",
             "model_id": primary_raw["model"],
             "backend_url": primary_raw["base_url"],
             "context_length": primary_raw["context_length"],
@@ -2905,7 +2915,8 @@ def _phase_model_automap(ctx: PhaseContext) -> PhaseResult:
     base_url = "http://127.0.0.1:8080/v1" if live_resolve_enabled else primary_raw["base_url"]
 
     pairs: list[tuple[str, Any]] = [
-        ("model.default", "hal0/chat" if live_resolve_enabled else primary_raw["model"]),
+        # ADR-0023: canonical default virtual is hal0/agent (was hal0/chat).
+        ("model.default", "hal0/agent" if live_resolve_enabled else primary_raw["model"]),
         ("model.provider", "custom"),
         ("model.base_url", base_url),
     ]

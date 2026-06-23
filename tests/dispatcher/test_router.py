@@ -274,8 +274,9 @@ async def test_prefetch_respects_configurable_timeout() -> None:
 
 @pytest.mark.asyncio
 async def test_legacy_fallback_routes_to_primary_when_nothing_else_matches() -> None:
-    primary = make_slot("chat")
-    upstreams = FakeUpstreamRegistry([primary])
+    # ADR-0023: the fallback anchor is the `agent` slot (was `chat`).
+    anchor = make_slot("agent")
+    upstreams = FakeUpstreamRegistry([anchor])
     models = FakeModelRegistry(routes={})  # no binding
 
     dispatcher = Dispatcher(upstream_registry=upstreams, model_registry=models)
@@ -283,8 +284,8 @@ async def test_legacy_fallback_routes_to_primary_when_nothing_else_matches() -> 
         make_request(),
         body={"model": "some-unknown-model"},
     )
-    assert call.resolution_path == "legacy_slot:chat"
-    assert call.upstream_name == "chat"
+    assert call.resolution_path == "legacy_slot:agent"
+    assert call.upstream_name == "agent"
 
 
 @pytest.mark.asyncio
@@ -446,8 +447,8 @@ async def test_decision_logging_runs_on_every_resolution() -> None:
     # BoundLogger that picks up our ``_capture`` processor.
     cached_bind = router_module.log.__dict__.pop("bind", None)
     try:
-        primary = make_slot("chat")
-        upstreams = FakeUpstreamRegistry([primary])
+        anchor = make_slot("agent")
+        upstreams = FakeUpstreamRegistry([anchor])
         models = FakeModelRegistry(routes={})
         dispatcher = Dispatcher(upstream_registry=upstreams, model_registry=models)
         await dispatcher.dispatch(make_request(), body={"model": "anything"})

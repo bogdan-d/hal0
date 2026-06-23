@@ -117,19 +117,24 @@ and per-slot TOMLs are **not** migrated (v0.1.x → v0.2 is a clean break).
 
 | Command | Purpose | Key options |
 |---|---|---|
-| `memory graph status` | Show graph-extraction state (enabled, route, counters). | `--json` |
-| `memory graph enable` | Turn graph extraction on. | `--route {upstream\|primary\|agent}`, `--provider`, `--model`, `--json` |
+| `memory graph status` | Show graph-extraction state (enabled, extraction slot, available slots, counters). | `--json` |
+| `memory graph enable` | Turn graph extraction on (optionally repoint the extraction slot). | `--slot <name>`, `--json` |
 | `memory graph disable` | Turn graph extraction off (cancels any in-flight build). | `--json` |
 | `memory migrate` | Migrate a legacy Cognee store to Hindsight banks (dry-run only). | `--dry-run` (default on), `--cognee-dir`, `--json` |
 
-`memory graph enable --route upstream` requires `--provider` and `--model`.
+`memory graph enable --slot <name>` repoints the Hindsight engine's native
+extraction LLM at the named slot (ADR-0023). `<name>` must be an enabled
+`type=llm` slot — the server validates it against the live slot set and restarts
+`hindsight-api` to apply. Omit `--slot` to keep the current slot. The legacy
+`--route`/`--provider`/`--model` options were removed in ADR-0023.
 `memory migrate` reports the plan without writing; apply/write mode is not yet
 implemented.
 
 <Aside type="caution">
-The memory subsystem is opt-in. Graph extraction defaults **off** (ADR-0014):
-small local models flake on structured-output prompts, which would leave the
-graph view empty. See [Enable memory](/docs/guides/enable-memory).
+The memory subsystem is opt-in. Graph extraction defaults **off** (ADR-0023):
+on the Hindsight engine the gate is informational (Hindsight builds its graph
+natively via the `extraction_slot`'s model), and vector recall is unaffected
+either way. See [Enable memory](/docs/guides/enable-memory).
 </Aside>
 
 ## `hal0 config` — configuration

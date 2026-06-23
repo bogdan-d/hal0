@@ -527,7 +527,8 @@ HAL0_UI_DIST=${HAL0_UI_DIST_VAL}
 # Memory subsystem (Hindsight engine + /mcp/memory + the Agent → Memory tab)
 # is ENABLED by default as of v0.5 (brain re-enablement). Comment out to ship
 # with memory dark. Needs the shared hindsight-api daemon (installer/systemd/
-# hindsight-api.service); set [memory] engine = "cognee" to fall back.
+# hindsight-api.service). If the daemon is unreachable, hal0 degrades to the
+# in-memory pgvector provider (ADR-0023; the cognee engine was removed).
 HAL0_MEMORY_ENABLED=1
 # HF_TOKEN — HuggingFace token for gated / large model pulls. Easiest path:
 # set it in the dashboard (Settings -> Secrets -> HuggingFace token) for a live,

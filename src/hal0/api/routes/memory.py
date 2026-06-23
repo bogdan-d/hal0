@@ -26,8 +26,7 @@ from pydantic import ValidationError
 
 from hal0.api.middleware.error_codes import BadRequest, Hal0Error
 from hal0.config.loader import load_hal0_config, save_hal0_config
-from hal0.config.schema import GraphUpstreamConfig, MemoryGraphConfig
-from hal0.memory.cognee_wrapper import GraphRouteUnsupportedError
+from hal0.config.schema import MemoryGraphConfig
 from hal0.memory.namespace import (
     DEFAULT_DATASET,
     MemoryNamespaceError,
@@ -140,26 +139,24 @@ class MemoryGraphConfigInvalid(Hal0Error):
     status = 400
 
 
-class MemoryGraphRouteUnsupported(Hal0Error):
-    """Enable rejected: the requested graph route has no usable LLM target.
+class MemoryGraphSlotInvalid(Hal0Error):
+    """Enable rejected: ``extraction_slot`` is not an enabled llm slot.
 
-    Issue #451 — v0.3 has no resolver for ``route=primary`` / ``agent``
-    (lands v0.4 per ADR-0014 §4) and ``route=upstream`` needs a real
-    ``LLM_API_KEY``. Surfaced as 422 (semantically valid request the
-    server can't fulfil yet) so the dashboard + CLI can fail fast without
-    flipping the gate on.
+    ADR-0023 — graph extraction is dispatched to a local llm slot. A slot that
+    doesn't exist (or isn't type=llm/enabled) is rejected with the list of valid
+    slots so the dashboard + CLI can fail fast without flipping the gate on.
     """
 
-    code = "config.memory_graph_route_unsupported"
+    code = "config.memory_graph_slot_invalid"
     status = 422
 
 
 class MemoryUnavailable(Hal0Error):
-    """The Cognee wrapper failed to initialise at boot.
+    """The memory engine failed to initialise at boot.
 
     Returned when the API got far enough to mount the router but the
-    underlying memory engine isn't usable — e.g. a cognee import
-    failure on a stripped-down install. Letting this surface as a 503
+    underlying memory engine isn't usable — e.g. the Hindsight daemon is
+    unreachable on a stripped-down install. Letting this surface as a 503
     instead of a generic 500 means the dashboard can paint a clear
     "Memory engine unavailable" state rather than a red toast.
     """
@@ -168,8 +165,22 @@ class MemoryUnavailable(Hal0Error):
     status = 503
 
 
+async def _enabled_llm_slots(request: Request) -> list[str]:
+    """Return the names of enabled ``type=llm`` slots (valid extraction targets)."""
+    slot_manager = getattr(request.app.state, "slot_manager", None)
+    if slot_manager is None:
+        return []
+    from hal0.api import hal0_chat_slot_alias_map
+
+    try:
+        alias_map = await hal0_chat_slot_alias_map(slot_manager)
+    except Exception:
+        return []
+    return sorted(alias_map.keys())
+
+
 def _wrapper(request: Request) -> Any:
-    """Return the live :class:`CogneeWrapper` or raise 503."""
+    """Return the live memory provider or raise 503."""
     wrapper = getattr(request.app.state, "memory_provider", None)
     if wrapper is None:
         raise MemoryUnavailable("memory engine is not available on this hal0 instance")
@@ -189,37 +200,29 @@ def _validation_error_details(exc: ValidationError) -> dict[str, str]:
 
 @router.get("/graph/status")
 async def graph_status(request: Request) -> dict[str, Any]:
-    """Return live + configured graph-extraction state.
+    """Return live graph-extraction state (ADR-0023).
 
     Response shape (stable contract — the dashboard depends on every
     key being present)::
 
         {
-          "enabled":        bool,
-          "route":          "upstream" | "primary" | "agent",
-          "upstream":       {"provider": str, "model": str} | None,
-          "in_flight":      int,
-          "builds_ok":      int,
-          "errors":         int,
-          "last_built_at":  iso8601 | None,
-          "last_error":     str | None,
+          "enabled":         bool,
+          "extraction_slot": str,            # the local llm slot used for extraction
+          "route":           str,            # deprecated mirror of extraction_slot
+          "slot_resolves":   bool,           # does extraction_slot match an enabled llm slot?
+          "available_slots": [str, ...],     # enabled llm slots the operator can pick
+          "in_flight":       int,
+          "builds_ok":       int,
+          "errors":          int,
+          "last_built_at":   iso8601 | None,
+          "last_error":      str | None,
         }
-
-    ``upstream`` is the configured upstream block (NOT the live
-    wrapper's — wrappers don't hold it). Returned alongside the
-    wrapper's runtime counters so the dashboard can render one panel
-    from one fetch.
     """
     wrapper = _wrapper(request)
-    cfg = load_hal0_config()
-    upstream_payload: dict[str, str] | None = None
-    if cfg.memory.graph.upstream is not None:
-        upstream_payload = {
-            "provider": cfg.memory.graph.upstream.provider,
-            "model": cfg.memory.graph.upstream.model,
-        }
     status = wrapper.graph_status()
-    status["upstream"] = upstream_payload
+    available = await _enabled_llm_slots(request)
+    status["available_slots"] = available
+    status["slot_resolves"] = status.get("extraction_slot") in available
     return status
 
 
@@ -228,16 +231,18 @@ async def graph_status(request: Request) -> dict[str, Any]:
 
 @router.put("/graph")
 async def update_graph_config(request: Request) -> dict[str, Any]:
-    """Replace the ``[memory.graph]`` section.
+    """Replace the ``[memory.graph]`` section (ADR-0023).
 
-    Body shape: any subset of :class:`MemoryGraphConfig` fields. The
-    merge preserves un-set fields (e.g. PATCH-style "flip enabled but
-    keep route") because dashboards typically send the delta, not the
-    whole block.
+    Body shape: any subset of :class:`MemoryGraphConfig` fields
+    (``enabled``, ``extraction_slot``). The merge preserves un-set fields
+    (PATCH-style "flip enabled but keep the slot") because dashboards
+    typically send the delta, not the whole block.
 
-    On success persists ``hal0.toml`` atomically AND flips the live
-    wrapper so subsequent ``memory_add`` calls observe the new gate
-    without a restart.
+    When ``extraction_slot`` changes, it is validated against the live
+    enabled-llm-slot set and propagated to the hindsight-api service (via a
+    systemd drop-in + restart) so the engine's native extraction LLM follows
+    the operator's choice. On success persists ``hal0.toml`` atomically and
+    flips the live wrapper's reported state.
     """
     try:
         body = await request.json()
@@ -249,12 +254,6 @@ async def update_graph_config(request: Request) -> dict[str, Any]:
     wrapper = _wrapper(request)
     cfg = load_hal0_config()
     current_raw = cfg.memory.graph.model_dump(mode="python")
-    # Merge upstream block one level deep — a top-level dict merge
-    # would let a caller's partial upstream payload (e.g. only model)
-    # blow away the configured provider.
-    if "upstream" in body and isinstance(body["upstream"], dict):
-        current_upstream = current_raw.get("upstream") or {}
-        body["upstream"] = {**current_upstream, **body["upstream"]}
     merged_raw = {**current_raw, **body}
 
     try:
@@ -265,16 +264,32 @@ async def update_graph_config(request: Request) -> dict[str, Any]:
             details=_validation_error_details(exc),
         ) from exc
 
-    # Flip the live wrapper BEFORE persisting so a rejected enable
-    # (issue #451 — unwired route / placeholder key) never leaves
-    # ``enabled = true`` on disk. ADR-0014 §6: disable cancels in-flight
-    # builds — handled inside set_graph_enabled.
+    # Validate extraction_slot against the live slot set when it is being
+    # changed — reject an unknown / non-llm slot with the valid options so the
+    # gate never flips onto a target that can't serve extraction.
+    slot_changed = new_cfg.extraction_slot != cfg.memory.graph.extraction_slot
+    if slot_changed:
+        available = await _enabled_llm_slots(request)
+        if available and new_cfg.extraction_slot not in available:
+            raise MemoryGraphSlotInvalid(
+                f"extraction_slot {new_cfg.extraction_slot!r} is not an enabled llm slot",
+                details={"available_slots": ", ".join(available)},
+            )
+
+    # Flip the live wrapper's reported state BEFORE persisting.
     try:
-        wrapper.set_graph_enabled(new_cfg.enabled, route=new_cfg.route)
-    except GraphRouteUnsupportedError as exc:
-        raise MemoryGraphRouteUnsupported(str(exc)) from exc
+        wrapper.set_graph_enabled(new_cfg.enabled, extraction_slot=new_cfg.extraction_slot)
     except ValueError as exc:
         raise MemoryGraphConfigInvalid(str(exc)) from exc
+
+    # Propagate the extraction slot to hindsight-api (drop-in + restart) so the
+    # engine's native extraction LLM follows the choice. Best-effort: a restart
+    # failure is surfaced in the response but does not roll back the config.
+    propagation: dict[str, Any] | None = None
+    if slot_changed:
+        from hal0.memory.extraction_env import apply_extraction_slot
+
+        propagation = apply_extraction_slot(new_cfg.extraction_slot)
 
     cfg.memory.graph = new_cfg
     try:
@@ -289,6 +304,8 @@ async def update_graph_config(request: Request) -> dict[str, Any]:
     # Echo the live status so the dashboard's optimistic-update path
     # gets the counters in the same round trip without a second fetch.
     out["status"] = wrapper.graph_status()
+    if propagation is not None:
+        out["propagation"] = propagation
     return out
 
 
@@ -560,11 +577,10 @@ async def _read_json_body(request: Request) -> dict[str, Any]:
 
 __all__ = [
     "DEFAULT_DATASET",
-    "GraphUpstreamConfig",
     "MemoryAgentIdInvalid",
     "MemoryGraphConfig",
     "MemoryGraphConfigInvalid",
-    "MemoryGraphRouteUnsupported",
+    "MemoryGraphSlotInvalid",
     "MemoryNamespaceInvalid",
     "MemoryUnavailable",
     "router",

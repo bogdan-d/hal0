@@ -218,18 +218,22 @@ async def test_idle_monitor_demotes_ready_to_idle(
     container_stub: FakeContainerProvider,
 ) -> None:
     """READY slots past the idle window flip to IDLE on the next sweep."""
+    # ADR-0023: use the default-pinned `agent` anchor so stage-1 IDLE
+    # demotion is observable without stage-2 hard eviction racing it to
+    # OFFLINE (`chat` is no longer pinned and would be TTL-evicted here).
+    _write_min_slot(slot_root, "agent", port=8095)
     sm = SlotManager(idle_after_s=0.05, idle_monitor_interval_s=0.02)
-    await sm.load("chat")
+    await sm.load("agent")
     # Make sure last_used is older than idle_after_s.
-    sm._last_used["chat"] = 0.0  # epoch — definitely > 0.05s ago
+    sm._last_used["agent"] = 0.0  # epoch — definitely > 0.05s ago
     await sm.start_idle_monitor()
     try:
         # Poll for the transition.
         for _ in range(50):
-            if (await sm.status("chat")).state == SlotState.IDLE:
+            if (await sm.status("agent")).state == SlotState.IDLE:
                 break
             await asyncio.sleep(0.02)
-        assert (await sm.status("chat")).state == SlotState.IDLE
+        assert (await sm.status("agent")).state == SlotState.IDLE
     finally:
         await sm.stop_idle_monitor()
 
@@ -329,15 +333,16 @@ async def test_idle_sweep_does_not_evict_default_anchor(
     slot_root: Path,
     container_stub: FakeContainerProvider,
 ) -> None:
-    """chat (a default-pinned anchor) relabels IDLE but is never evicted under default config."""
-    # slot_root already provides chat.toml with no explicit idle_timeout_s.
+    """agent (the default-pinned anchor) relabels IDLE but is never evicted under default config."""
+    # ADR-0023: `agent` is the default anchor (`chat` is no longer pinned).
+    _write_min_slot(slot_root, "agent", port=8095)
     sm = SlotManager(idle_after_s=0.0, evict_after_s=0.01, idle_monitor_interval_s=10.0)
-    await sm.load("chat")
-    sm._last_used["chat"] = 0.0  # ancient
+    await sm.load("agent")
+    sm._last_used["agent"] = 0.0  # ancient
 
     await sm._sweep_idle_once()
 
-    assert (await sm.status("chat")).state == SlotState.IDLE
+    assert (await sm.status("agent")).state == SlotState.IDLE
     assert not container_stub.unload_calls
 
 

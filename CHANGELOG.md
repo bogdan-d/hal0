@@ -10,6 +10,42 @@ Tags older than v0.2.0 ship release notes inside the GitHub release
 page; this CHANGELOG starts at v0.2.0 (the Lemonade migration cut).
 For ADR-level architecture context see `docs/internal/adr/`.
 
+## [v0.8.0-beta.3] — 2026-06-23
+
+Canonical LLM roles + Hindsight-native memory extraction
+([ADR-0023](docs/internal/adr/0023-canonical-llm-roles-agent-utility.md)). The two
+canonical LLM roles are now **`agent`** (the capable default + fallback anchor,
+replacing `chat`) and **`utility`** (the cheap helper, now seeded on every
+install). `chat` and `primary` are retired as slot/role names.
+
+### Changed
+- **Canonical roles are `agent` + `utility`.** `agent` replaces `chat` as the
+  default/anchor everywhere (seeded slots, dispatch rule-9 fallback, the default
+  pin set, `_configured_primary`). `utility` joins `SEEDED_SLOTS` so a fresh box
+  never silently falls back to a heavy model for cheap extraction.
+- **Generalized virtual addressing.** Any enabled `type=llm` slot `X` is now
+  addressable as `hal0/X` (chain `(X, agent)`); the advertised canonical virtuals
+  are `hal0/agent`, `hal0/utility`, `hal0/npu`.
+- **Memory graph extraction is operator-selectable and actually wired.**
+  `[memory.graph].extraction_slot` names the local llm slot Hindsight uses for
+  graph extraction; hal0 propagates it to `hindsight-api` via a systemd drop-in
+  (`HINDSIGHT_API_LLM_MODEL=hal0/<slot>`) + restart. `hal0 memory graph enable`
+  takes `--slot <name>` (validated against the live enabled-llm-slot set).
+- **Cognee fully removed.** The Cognee engine + wrapper are deleted; Hindsight is
+  the platform engine (with a PgVector boot-degrade fallback). `MemoryRecord`
+  survives as an alias of `MemoryItem`.
+
+### Breaking
+- **`hal0/chat` is no longer advertised.** Clients pinned to `hal0/chat` (Hermes,
+  OpenWebUI, any custom consumer) must repoint to **`hal0/agent`**.
+  Hermes `model.default` is now `hal0/agent`.
+- **`memory.graph.route` / `memory.graph.upstream` removed**, replaced by
+  **`memory.graph.extraction_slot`** (default `"utility"`). Old `route`/`upstream`
+  keys in `hal0.toml` are silently dropped on load (no hard-fail on upgrade). The
+  `hal0 memory graph enable --route/--provider/--model` options are gone — use
+  `--slot`.
+- **`primary` is no longer a slot alias.** `SLOT_ALIASES` is `{"agent-hermes": "agent"}`.
+
 ## [v0.8.0-beta.2] — 2026-06-22
 
 Bugfix release on the 0.8.0 beta line. No behaviour changes beyond the two

@@ -47,6 +47,7 @@ epic (#652); ADR-0006 / ADR-0007 were already superseded. v0.3 adds:
 - [ADR-0012 (remove auth and Caddy entirely)](docs/internal/adr/0012-remove-auth-and-caddy.md) — supersedes ADR-0001; hal0 v0.3 ships with no built-in auth or TLS, recommends upstream reverse proxy (Traefik / nginx / Cloudflare Tunnel) for non-LAN deployments. ~6,000 lines removed across backend, frontend, tests, installer, packaging.
 - [ADR-0013 (MCP-client allow-list for bundled agents)](docs/internal/adr/0013-mcp-client-allow-list.md) — resolves stream #5 ships-when "at least one MCP-client external source connectable from a bundled agent" with default-deny on server + tool axis + ADR-0004 approval-queue integration.
 - [ADR-0014 (Cognee graph extraction model gate)](docs/internal/adr/0014-cognee-graph-extraction-model-gate.md) — supersedes ADR-0005 §6 graph bullet; resolves stream #5 ships-when "configurable model" requirement (default-off + typed route enum: `upstream` / `primary` / `agent`).
+- [ADR-0023 (canonical LLM roles agent+utility)](docs/internal/adr/0023-canonical-llm-roles-agent-utility.md) — supersedes ADR-0014 §2; retires the `chat`/`primary` role names for `agent` (default/anchor) + `utility` (cheap helper, now seeded), generalizes `hal0/<slot>` addressing, removes Cognee, and replaces `[memory.graph].route`/`upstream` with a wired `extraction_slot`.
 
 ADR-0006 / ADR-0007 are superseded.
 

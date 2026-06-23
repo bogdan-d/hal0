@@ -1,9 +1,15 @@
-"""Integration tests for ``/api/memory/graph/*``.
+"""Integration tests for ``/api/memory/graph/*`` (ADR-0023).
 
-Builds a bare FastAPI app + a stub wrapper so we don't have to spin
-up a full hal0 lifespan or a real Cognee install. Pins the contract
-:mod:`hal0.cli.memory_graph_commands` + the dashboard Memory tab
-depend on.
+Builds a bare FastAPI app + a stub wrapper so we don't have to spin up a full
+hal0 lifespan or a real memory engine. Pins the contract the
+``hal0 memory graph`` CLI + the dashboard Memory tab depend on:
+
+  - ``GET /graph/status`` returns ``extraction_slot`` (+ deprecated ``route``
+    mirror), ``slot_resolves``, and ``available_slots``.
+  - ``PUT /graph`` validates ``extraction_slot`` against the live enabled-llm
+    slot set, rejecting an unknown slot with 422 and NOT flipping the gate.
+  - ``PUT /graph`` propagates a slot change to hindsight-api (drop-in + restart)
+    and echoes a ``propagation`` block.
 """
 
 from __future__ import annotations
@@ -11,6 +17,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import tomli_w
@@ -22,17 +29,18 @@ from hal0.api.routes import memory as memory_routes
 
 
 class StubWrapper:
-    """Minimal duck-type matching :class:`CogneeWrapper.graph_*`."""
+    """Minimal duck-type matching the provider ``graph_*`` surface (ADR-0023)."""
 
-    def __init__(self, *, enabled: bool = False, route: str = "upstream") -> None:
+    def __init__(self, *, enabled: bool = False, extraction_slot: str = "utility") -> None:
         self.enabled = enabled
-        self.route = route
+        self.extraction_slot = extraction_slot
         self.set_calls: list[tuple[bool, str | None]] = []
 
     def graph_status(self) -> dict[str, Any]:
         return {
             "enabled": self.enabled,
-            "route": self.route,
+            "extraction_slot": self.extraction_slot,
+            "route": self.extraction_slot,  # deprecated mirror
             "in_flight": 0,
             "builds_ok": 0,
             "errors": 0,
@@ -40,20 +48,22 @@ class StubWrapper:
             "last_error": None,
         }
 
-    def set_graph_enabled(self, enabled: bool, route: str | None = None) -> None:
-        # Mirror the real CogneeWrapper #451 guard: enabling an unwired
-        # route (primary/agent — no v0.3 resolver) is rejected and the
-        # gate stays off.
-        from hal0.memory.cognee_wrapper import GraphRouteUnsupportedError
-
-        if enabled and (route or self.route) in {"primary", "agent"}:
-            raise GraphRouteUnsupportedError(
-                f"graph route {route or self.route!r} is not yet supported (lands v0.4)"
-            )
-        self.set_calls.append((enabled, route))
+    def set_graph_enabled(self, enabled: bool, extraction_slot: str | None = None) -> None:
+        self.set_calls.append((enabled, extraction_slot))
         self.enabled = enabled
-        if route is not None:
-            self.route = route
+        if extraction_slot is not None:
+            self.extraction_slot = extraction_slot
+
+
+def _slot_manager(*names: str) -> MagicMock:
+    """A slot_manager whose iter_configs returns the given enabled llm slots."""
+    mgr = MagicMock()
+    mgr.iter_configs = AsyncMock(
+        return_value=[
+            {"name": n, "type": "llm", "enabled": True, "model_id": f"model-{n}"} for n in names
+        ]
+    )
+    return mgr
 
 
 @pytest.fixture
@@ -79,17 +89,19 @@ def stub_wrapper() -> StubWrapper:
     return StubWrapper()
 
 
-def _build_app(stub: StubWrapper) -> FastAPI:
+def _build_app(stub: StubWrapper, *slot_names: str) -> FastAPI:
     app = FastAPI()
     error_codes.install(app)
     app.include_router(memory_routes.router, prefix="/api/memory", tags=["memory"])
     app.state.memory_provider = stub
+    app.state.slot_manager = _slot_manager(*slot_names) if slot_names else None
     return app
 
 
 @pytest.fixture
 def client(stub_wrapper: StubWrapper, hal0_home: Path) -> Iterator[TestClient]:
-    app = _build_app(stub_wrapper)
+    # Default app advertises agent + utility as enabled llm slots.
+    app = _build_app(stub_wrapper, "agent", "utility")
     with TestClient(app) as c:
         yield c
 
@@ -99,69 +111,70 @@ def test_graph_status_default_returns_off(client: TestClient, stub_wrapper: Stub
     assert r.status_code == 200
     body = r.json()
     assert body["enabled"] is False
-    assert body["route"] == "upstream"
-    assert body["upstream"] is None
+    assert body["extraction_slot"] == "utility"
+    # Deprecated mirror still present for the old dashboard.
+    assert body["route"] == "utility"
     assert body["builds_ok"] == 0
 
 
-def test_put_enable_with_primary_route_rejected(
-    client: TestClient, stub_wrapper: StubWrapper, hal0_home: Path
-) -> None:
-    # Issue #451 — v0.3 has no route resolver for primary/agent (lands
-    # v0.4). Enabling either must fail fast (422) and never flip the gate.
-    r = client.put(
-        "/api/memory/graph",
-        json={"enabled": True, "route": "primary"},
-    )
-    assert r.status_code == 422, r.text
-    assert r.json()["error"]["code"] == "config.memory_graph_route_unsupported"
-    # Wrapper was NOT flipped on.
-    assert stub_wrapper.set_calls == []
-    assert stub_wrapper.enabled is False
-
-
-def test_put_enable_with_agent_route_rejected(
-    client: TestClient, stub_wrapper: StubWrapper, hal0_home: Path
-) -> None:
-    r = client.put(
-        "/api/memory/graph",
-        json={"enabled": True, "route": "agent"},
-    )
-    assert r.status_code == 422, r.text
-    assert r.json()["error"]["code"] == "config.memory_graph_route_unsupported"
-    assert stub_wrapper.set_calls == []
-    assert stub_wrapper.enabled is False
-
-
-def test_put_enable_upstream_without_model_rejected(
+def test_graph_status_reports_available_slots_and_resolution(
     client: TestClient, stub_wrapper: StubWrapper
 ) -> None:
-    r = client.put(
-        "/api/memory/graph",
-        json={"enabled": True, "route": "upstream"},
-    )
-    assert r.status_code == 400
+    r = client.get("/api/memory/graph/status")
     body = r.json()
-    assert body["error"]["code"] == "config.memory_graph_invalid"
+    # available_slots is the live enabled-llm-slot alias set; it includes the
+    # canonical roles plus any injected back-compat alias (agent-hermes→agent).
+    assert {"agent", "utility"} <= set(body["available_slots"])
+    # default extraction_slot=utility is among the enabled llm slots
+    assert body["slot_resolves"] is True
 
 
-def test_put_enable_upstream_with_provider_and_model(
-    client: TestClient, stub_wrapper: StubWrapper
+def test_put_enable_with_valid_slot(
+    client: TestClient, stub_wrapper: StubWrapper, hal0_home: Path
 ) -> None:
-    r = client.put(
-        "/api/memory/graph",
-        json={
-            "enabled": True,
-            "route": "upstream",
-            "upstream": {
-                "provider": "openrouter",
-                "model": "anthropic/claude-3.5-sonnet",
-            },
-        },
-    )
+    with patch("hal0.memory.extraction_env.apply_extraction_slot") as apply_mock:
+        apply_mock.return_value = {"slot": "agent", "written": True, "error": None}
+        r = client.put(
+            "/api/memory/graph",
+            json={"enabled": True, "extraction_slot": "agent"},
+        )
     assert r.status_code == 200, r.text
     body = r.json()
-    assert body["upstream"]["model"] == "anthropic/claude-3.5-sonnet"
+    assert body["enabled"] is True
+    assert body["extraction_slot"] == "agent"
+    # The wrapper was flipped on with the new slot.
+    assert stub_wrapper.set_calls == [(True, "agent")]
+    # Slot changed → propagation echoed.
+    assert body["propagation"]["slot"] == "agent"
+
+
+def test_put_enable_with_unknown_slot_rejected(
+    client: TestClient, stub_wrapper: StubWrapper, hal0_home: Path
+) -> None:
+    # ADR-0023 — extraction_slot must name an enabled llm slot. An unknown slot
+    # is rejected (422) and the gate stays off.
+    r = client.put(
+        "/api/memory/graph",
+        json={"enabled": True, "extraction_slot": "does-not-exist"},
+    )
+    assert r.status_code == 422, r.text
+    assert r.json()["error"]["code"] == "config.memory_graph_slot_invalid"
+    assert stub_wrapper.set_calls == []
+    assert stub_wrapper.enabled is False
+
+
+def test_put_enable_without_slot_change_keeps_default(
+    client: TestClient, stub_wrapper: StubWrapper, hal0_home: Path
+) -> None:
+    # Flipping enabled with no extraction_slot keeps the default (utility) and
+    # does NOT trigger propagation (slot unchanged).
+    r = client.put("/api/memory/graph", json={"enabled": True})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["enabled"] is True
+    assert body["extraction_slot"] == "utility"
+    assert "propagation" not in body
+    assert stub_wrapper.set_calls == [(True, "utility")]
 
 
 def test_put_disable_idempotent(client: TestClient, stub_wrapper: StubWrapper) -> None:
@@ -170,8 +183,10 @@ def test_put_disable_idempotent(client: TestClient, stub_wrapper: StubWrapper) -
     assert r.json()["enabled"] is False
 
 
-def test_put_bad_route_returns_400(client: TestClient, stub_wrapper: StubWrapper) -> None:
-    r = client.put("/api/memory/graph", json={"route": "bogus"})
+def test_put_bad_slot_name_returns_400(client: TestClient, stub_wrapper: StubWrapper) -> None:
+    # Grammar failure (uppercase) is a schema error → 400, distinct from the
+    # 422 "valid name but not a live slot" case above.
+    r = client.put("/api/memory/graph", json={"extraction_slot": "BadName"})
     assert r.status_code == 400
     assert r.json()["error"]["code"] == "config.memory_graph_invalid"
 
@@ -183,6 +198,7 @@ def test_status_unavailable_when_no_wrapper(
     error_codes.install(app)
     app.include_router(memory_routes.router, prefix="/api/memory", tags=["memory"])
     app.state.memory_provider = None
+    app.state.slot_manager = None
     with TestClient(app) as c:
         r = c.get("/api/memory/graph/status")
         assert r.status_code == 503

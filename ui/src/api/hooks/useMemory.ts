@@ -1,4 +1,4 @@
-// hal0 v3 dashboard — memory hooks (ADR-0014).
+// hal0 v3 dashboard — memory hooks (ADR-0023).
 //
 // Wraps /api/memory/graph/{status} + PUT /api/memory/graph so the
 // Memory tab can render the current gate state and flip it without
@@ -75,17 +75,19 @@ export function useAgentMemoryStats(agentId: string | null | undefined) {
   })
 }
 
-export type GraphRoute = 'upstream' | 'primary' | 'agent'
-
-export interface GraphUpstream {
-  provider: string
-  model: string
-}
-
+// ADR-0023: graph extraction is routed to a single local enabled-llm slot
+// (`extraction_slot`), replacing the old `route` enum + `upstream` block.
 export interface MemoryGraphStatus {
   enabled: boolean
-  route: GraphRoute
-  upstream: GraphUpstream | null
+  // The local llm slot used for extraction (e.g. "utility").
+  extraction_slot: string
+  // DEPRECATED mirror of extraction_slot (will be removed). Prefer reading
+  // extraction_slot.
+  route?: string
+  // Does extraction_slot match an enabled llm slot right now?
+  slot_resolves: boolean
+  // Enabled llm slot names the operator may pick.
+  available_slots: string[]
   in_flight: number
   builds_ok: number
   errors: number
@@ -95,8 +97,26 @@ export interface MemoryGraphStatus {
 
 export interface MemoryGraphUpdate {
   enabled?: boolean
-  route?: GraphRoute
-  upstream?: GraphUpstream
+  extraction_slot?: string
+}
+
+// ADR-0023 §3: when the extraction slot changes, the PUT response carries a
+// propagation block describing the hindsight-api drop-in write + restart.
+// `error` is null on success; a non-null value means the gate saved but the
+// hindsight-api restart failed and should be surfaced to the operator.
+export interface MemoryGraphPropagation {
+  slot: string
+  model: string | null
+  drop_in: string
+  written: boolean
+  daemon_reloaded: boolean
+  restarted: boolean
+  error: string | null
+}
+
+export interface MemoryGraphUpdateResponse extends MemoryGraphStatus {
+  status: MemoryGraphStatus
+  propagation?: MemoryGraphPropagation
 }
 
 const POLL_MS = 15_000
@@ -113,7 +133,7 @@ export function useUpdateMemoryGraph() {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: (body: MemoryGraphUpdate) =>
-      apiPut<MemoryGraphStatus & { status: MemoryGraphStatus }>(
+      apiPut<MemoryGraphUpdateResponse>(
         ENDPOINTS.memoryGraph,
         body as unknown as Record<string, unknown>,
       ),
