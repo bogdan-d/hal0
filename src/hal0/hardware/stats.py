@@ -133,6 +133,61 @@ class HardwareStats:
         """Return total GPU VRAM in MiB (or GTT pool on UMA)."""
         return self.gpu_sample().total_mb
 
+    def gpu_clock_mhz(self) -> int | None:
+        """Return the active GPU shader clock in MHz, or None.
+
+        AMD: parses ``pp_dpm_sclk`` and returns the MHz of the active
+        ('*') DPM level (e.g. ``2: 2900Mhz *`` → 2900) — no subprocess.
+        NVIDIA: nvidia-smi ``clocks.sm``. Best-effort; any read/parse
+        failure yields None so the dashboard simply omits the clock.
+        """
+        vendor = self._vendor()
+        if vendor == "amd" and self._amd_drm is not None:
+            txt = self._read_text(self._amd_drm / "pp_dpm_sclk")
+            if txt:
+                for line in txt.splitlines():
+                    if line.rstrip().endswith("*"):
+                        for tok in line.replace("Mhz", " ").replace("MHz", " ").split():
+                            if tok.isdigit():
+                                return int(tok)
+            return None
+        if vendor == "nvidia":
+            rc, out, _ = _run(
+                ["nvidia-smi", "--query-gpu=clocks.sm", "--format=csv,noheader,nounits"]
+            )
+            if rc == 0 and out.strip():
+                with contextlib.suppress(IndexError, ValueError):
+                    return int(float(out.strip().splitlines()[0]))
+        return None
+
+    def gpu_temp_c(self) -> float | None:
+        """Return the GPU temperature in °C, or None.
+
+        AMD: reads the first hwmon ``temp1_input`` (edge sensor, in
+        millidegrees) under the DRM device — no subprocess. NVIDIA:
+        nvidia-smi ``temperature.gpu``. Best-effort; None on any failure.
+        """
+        vendor = self._vendor()
+        if vendor == "amd" and self._amd_drm is not None:
+            try:
+                hwmons = sorted((self._amd_drm / "hwmon").glob("hwmon*"))
+            except OSError:
+                hwmons = []
+            for h in hwmons:
+                raw = self._read_text(h / "temp1_input")
+                if raw:
+                    with contextlib.suppress(ValueError):
+                        return round(int(raw.strip()) / 1000.0, 1)
+            return None
+        if vendor == "nvidia":
+            rc, out, _ = _run(
+                ["nvidia-smi", "--query-gpu=temperature.gpu", "--format=csv,noheader,nounits"]
+            )
+            if rc == 0 and out.strip():
+                with contextlib.suppress(IndexError, ValueError):
+                    return round(float(out.strip().splitlines()[0]), 1)
+        return None
+
     def ram_used_gb(self) -> float:
         """Return current system RAM used in GiB (MemTotal - MemAvailable)."""
         total = 0
@@ -216,6 +271,12 @@ class HardwareStats:
             "gtt_used_mb": smp.gtt_used_mb,
             "vram_used_mb": smp.vram_used_mb,
             "util_is_forced_high": smp.util_is_forced_high,
+            # Live GPU clock + temperature for the dashboard's iGPU gauge.
+            # Read off the same memoised vendor/DRM device the sample used,
+            # so AMD stays subprocess-free. None when the host exposes no
+            # such counter (the UI renders an em-dash).
+            "gpu_clock_mhz": self.gpu_clock_mhz(),
+            "gpu_temp_c": self.gpu_temp_c(),
         }
         if include_slot_ports:
             out["slot_ports_occupied"] = self.occupied_slot_ports()

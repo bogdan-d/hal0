@@ -34,6 +34,9 @@ export interface StatsHardware {
   gpu_util?: number | null
   gpu_vram_used_mb?: number | null
   gpu_vram_total_mb?: number | null
+  // Live iGPU clock + temperature — drive the Inference hero GPU gauge
+  gpu_clock_mhz?: number | null
+  gpu_temp_c?: number | null
   // §2b new fields — backend adds cpu_util; npu_util only if NPU-telemetry spike lands
   cpu_util?: number | null
   npu_util?: number | null

@@ -504,6 +504,10 @@ async def _local_live_stats(request: Request) -> dict[str, Any]:
         "gpu_util": snap.get("gpu_util"),
         "gpu_vram_used_mb": snap.get("gpu_vram_used_mb"),
         "gpu_vram_total_mb": snap.get("gpu_vram_total_mb"),
+        # Live iGPU clock (MHz) + temperature (°C) for the dashboard's
+        # GPU usage gauge; None when the host exposes no such counter.
+        "gpu_clock_mhz": snap.get("gpu_clock_mhz"),
+        "gpu_temp_c": snap.get("gpu_temp_c"),
         # gpu_util stays RAW; this flag tells the dashboard the counter is
         # pinned by a forced performance level (gpu-compute.service) and
         # should be captioned, not trusted as load.
