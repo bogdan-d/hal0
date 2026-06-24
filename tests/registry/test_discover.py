@@ -8,6 +8,7 @@ import pytest
 
 from hal0.config.schema import ModelsConfig
 from hal0.registry.discover import (
+    backfill_coordless,
     find_candidates,
     register_candidate,
     scan_and_register,
@@ -253,3 +254,80 @@ def test_scan_and_register_missing_root_is_silent(tmp_path: Path, registry: Mode
     # The configured (missing) root is scanned silently. scan_roots() also folds
     # in the effective store/pull_root, so this is a membership check, not exact.
     assert str(tmp_path / "does-not-exist") in result["scanned_roots"]
+
+
+def test_backfill_coordless_fills_from_curated(registry: ModelRegistry) -> None:
+    """An existing registry row with empty coords whose on-disk filename matches
+    a curated entry is repaired in place; the id is unchanged."""
+    mid = "qwen3-6-35b-a3b-nsc-ace-saber-mtp-f16-to-rocmfp4-strix-lean"
+    fname = "Qwen3.6-35B-A3B-NSC-ACE-SABER-MTP-F16-to-ROCmFP4-STRIX_LEAN.gguf"
+    registry.add(
+        Model(
+            id=mid,
+            path=f"/models/{fname}",
+            name="",
+            hf_repo="",
+            hf_filename="",
+            capabilities=["chat"],
+        )
+    )
+    repaired = backfill_coordless(registry)
+    assert repaired == [mid]
+    row = registry.get(mid)
+    assert row.id == mid  # id never changes
+    assert row.hf_repo == "jcbtc/chadrock-35b-ace-saber-rocmfp4-mtp"
+    assert row.hf_filename == fname
+    assert row.name  # display name filled
+
+
+def test_backfill_coordless_is_idempotent(registry: ModelRegistry) -> None:
+    """A second backfill pass is a no-op once coords are present."""
+    fname = "Qwopus3.6-27B-Coder-MTP-Q6_K.gguf"
+    mid = "qwopus3-6-27b-coder-mtp-q6-k"
+    registry.add(Model(id=mid, path=f"/models/{fname}", hf_repo="", hf_filename=""))
+    assert backfill_coordless(registry) == [mid]
+    assert backfill_coordless(registry) == []
+
+
+def test_backfill_coordless_skips_rows_with_coords(registry: ModelRegistry) -> None:
+    """A row that already carries coords is never touched, even with a curated
+    match by filename."""
+    fname = "Qwopus3.6-27B-Coder-MTP-Q6_K.gguf"
+    registry.add(
+        Model(
+            id="qwopus3-6-27b-coder-mtp-q6-k",
+            path=f"/models/{fname}",
+            hf_repo="someone/custom-repo",
+            hf_filename=fname,
+        )
+    )
+    assert backfill_coordless(registry) == []
+    assert registry.get("qwopus3-6-27b-coder-mtp-q6-k").hf_repo == "someone/custom-repo"
+
+
+def test_backfill_coordless_no_curated_match_left_alone(registry: ModelRegistry) -> None:
+    """A coord-less row with no curated filename match is left as-is."""
+    registry.add(Model(id="mystery", path="/models/mystery.gguf", hf_repo="", hf_filename=""))
+    assert backfill_coordless(registry) == []
+
+
+def test_scan_and_register_backfills_existing_coordless_row(
+    tmp_path: Path, registry: ModelRegistry
+) -> None:
+    """End-to-end: scan_and_register repairs an existing coord-less row whose
+    file is already registered (so it never re-surfaces as a candidate)."""
+    root = tmp_path / "models"
+    root.mkdir()
+    fname = "Qwopus3.6-27B-Coder-MTP-Q6_K.gguf"
+    fpath = root / fname
+    fpath.write_bytes(b"x" * 64)
+    mid = "qwopus3-6-27b-coder-mtp-q6-k"
+    registry.add(
+        Model(id=mid, path=str(fpath.resolve()), hf_repo="", hf_filename="", capabilities=["chat"])
+    )
+    cfg = ModelsConfig(roots=[str(root)])
+    result = scan_and_register(registry, cfg)
+    assert mid in result["backfilled"]
+    row = registry.get(mid)
+    assert row.hf_repo == "Jackrong/Qwopus3.6-27B-Coder-MTP-GGUF"
+    assert row.hf_filename == fname
