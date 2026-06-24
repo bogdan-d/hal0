@@ -10,6 +10,32 @@ Tags older than v0.2.0 ship release notes inside the GitHub release
 page; this CHANGELOG starts at v0.2.0 (the Lemonade migration cut).
 For ADR-level architecture context see `docs/internal/adr/`.
 
+## [v0.8.2b2] — 2026-06-24
+
+Two fixes on the 0.8.2 beta line — profile MTP tuning now actually takes
+effect, and stacks can pull their referenced models. Safe upgrade from
+v0.8.2b1.
+
+### Fixed
+- **Explicit profile spec flags win over the MTP bundle.** `resolve_profile_flags`
+  appended `MTP_FLAG_BUNDLE` after a profile's own flags, so the bundle's
+  spec-draft defaults (`--spec-draft-type-k q8_0`, `--spec-draft-p-min 0.0`)
+  silently clobbered any `--spec-draft-*` a profile pinned — there was no way to
+  tune the MTP draft through a profile. The bundle is now merged as defaults that
+  the profile's explicit flags override (gap-filled only). (#963)
+- **Absent stack models can be pulled.** Custom GGUF builds referenced by the
+  seed stacks (saber, pi-agent, qwopus coders, halostrix, gemma, …) were
+  auto-scanned with empty `hf_repo`/`hf_filename`, so on stack import/apply they
+  classified "unresolvable" with no download URL. Registered their public HF
+  coordinates (jcbtc/ + Jackrong/ + unsloth/ repos) in the curated catalogue;
+  `embed_references` falls back to curated on export; and a new
+  `backfill_coordless()` repairs existing coord-less registry rows on rescan. (#964)
+
+### Changed
+- **CI**: cancel superseded PR runs (never `main`); PRs test Python 3.12 only while
+  `main` runs 3.12/3.13/3.14 (3.14 non-blocking); least-privilege workflow
+  permissions; Node 20 → 22. (#898)
+
 ## [v0.8.2b1] — 2026-06-23
 
 Profiles gain the same portable export/import/sharing model stacks already have.
