@@ -246,10 +246,11 @@ class ServerConfig(BaseModel):
     extra_args: str | None = Field(
         default=None,
         description=(
-            "Freeform llama-server CLI passthrough.  Tokenised via shlex; "
-            "merged with the model's defaults.extra_args by "
-            "hal0.slots.flag_merge.merge_flags so slot flags win on collisions "
-            "(except for append-list flags like --lora / --draft-model / --override-kv)."
+            "Freeform llama-server CLI passthrough.  Tokenised via shlex and "
+            "appended last in the launch argv; hal0.slots.argv.normalize_argv "
+            "then collapses cross-source duplicates last-wins, so a flag set here "
+            "overrides the same flag from the profile / model defaults "
+            "(append-list flags like --lora / --draft-model / --override-kv are kept)."
         ),
     )
 
@@ -352,6 +353,17 @@ class SlotConfig(BaseModel):
             "Per-slot chat-template override (id from /api/chat-templates, or "
             "'auto'/None for the GGUF-embedded template). Wins over the model's "
             "default. See resolve_chat_template."
+        ),
+    )
+    vision: bool = Field(
+        default=True,
+        description=(
+            "Per-slot vision toggle (#901). When the bound model carries an "
+            "mmproj sidecar, the container provider loads it (--mmproj) so the "
+            "slot accepts images — default-on. Set false to boot the slot "
+            "text-only (no --mmproj, modalities.vision:false) on memory-tight "
+            "hosts; the projector is ~0.9 GB resident. No effect when the model "
+            "has no sidecar."
         ),
     )
 
@@ -700,8 +712,12 @@ MTP_FLAG_BUNDLE = (
     " --spec-draft-n-min 0"
     " --spec-draft-p-min 0.0"
     " --spec-draft-p-split 0.10"
-    " --spec-draft-type-k q4_0"
-    " --spec-draft-type-v q4_0"
+    " --spec-draft-type-k q8_0"
+    " --spec-draft-type-v q8_0"
+    " --spec-draft-threads 16"
+    " --spec-draft-threads-batch 32"
+    " --spec-draft-poll 1"
+    " --spec-draft-poll-batch 1"
 )
 
 #: Seed profiles shipped with hal0.  Returned by ``load_profiles_config()``
@@ -724,20 +740,20 @@ SEED_PROFILES: dict[str, dict[str, object]] = {
     },
     "rocm-dnse": {
         "image": "ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server",
-        "flags": "-fa on -ctk q4_0 -ctv q4_0 -b 512 -ub 512 --parallel 1 --threads 8 --no-mmap",
+        "flags": "-fa on -ctk q8_0 -ctv q8_0 -b 8192 -ub 2048 --parallel 1 --threads 16 --threads-batch 32 --no-mmap --poll 100 --poll-batch 1",
         "mtp": True,
         "device_class": "gpu",
         "backend": "rocm",
-        "intent": "Dense + MTP · q4 KV",
+        "intent": "Dense + MTP · q8 KV",
         "quant": "FP4",
     },
     "rocm-moe": {
         "image": "ghcr.io/hal0ai/amd-strix-halo-toolboxes:rocm-7.2.4-rocmfp4-server",
-        "flags": "-fa on -ctk q4_0 -ctv q4_0 -b 512 -ub 512 --parallel 1 --threads 16 --no-mmap --jinja",
+        "flags": "-fa on -ctk q8_0 -ctv q8_0 -b 8192 -ub 2048 --parallel 1 --threads 16 --threads-batch 32 --no-mmap --poll 100 --poll-batch 1 --jinja",
         "mtp": True,
         "device_class": "gpu",
         "backend": "rocm",
-        "intent": "MoE + MTP · q4 KV",
+        "intent": "MoE + MTP · q8 KV",
         "quant": "FP4",
     },
     "vulkan": {
@@ -895,6 +911,302 @@ class ProfilesConfig(BaseModel):
     profile: dict[str, ProfileConfig] = Field(default_factory=dict)
 
 
+# ── Stacks ────────────────────────────────────────────────────────────────────
+# A Stack is a named, portable bundle of slots + their profiles + model
+# assignments + capability selections. Stored single-file in stacks.toml keyed
+# by slug, mirroring profiles.toml. See docs/superpowers/specs/2026-06-19-stacks-design.md.
+
+# Stacks carry their own schema version (independent of hal0.toml meta.schema_version),
+# stamped on every StackConfig and on the export envelope (PR-3).
+STACK_SCHEMA_VERSION_CURRENT = 1
+
+#: Profile export envelopes carry their own schema version (independent of
+#: hal0.toml meta.schema_version), stamped on every ``.hal0profile.json`` export.
+PROFILE_SCHEMA_VERSION_CURRENT = 1
+
+_STACK_NAME_RE = r"^[a-z0-9][a-z0-9_-]{0,31}$"
+
+
+class StackModelMeta(BaseModel):
+    """Transport-safe metadata subset of a registry ``Model``.
+
+    Embedded in a stack so an importer on another machine can resolve or
+    pull a referenced model by id. Deliberately excludes the machine-specific
+    ``path`` and any host-local fields — see spec §3/§6.
+    """
+
+    model_config = {"populate_by_name": True, "extra": "forbid"}
+
+    id: str = Field(..., description="Registry model id this entry describes.")
+    name: str = Field(default="", description="Human-readable display name.")
+    hf_repo: str = Field(
+        default="", description="HuggingFace repo id, for resolve-and-pull on import."
+    )
+    hf_filename: str = Field(default="", description="Filename within the HF repo.")
+    size_bytes: int = Field(default=0, description="Total model size in bytes; 0 = unknown.")
+    quant: str = Field(
+        default="", description="Quantization label shown on cards (e.g. 'FP4', 'Q4_K_M')."
+    )
+    capabilities: list[str] = Field(
+        default_factory=list, description="Capability strings, e.g. ['chat','vision']."
+    )
+    backends: list[str] = Field(
+        default_factory=list, description="Runnable backends, e.g. ['rocm','vulkan']."
+    )
+    mmproj: str | None = Field(
+        default=None,
+        description="mmproj sidecar marker (presence flag); never a host path on import.",
+    )
+
+    @field_validator("id")
+    @classmethod
+    def id_nonempty(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("stack model meta id must not be empty")
+        return v.strip()
+
+
+class StackCapabilityRow(BaseModel):
+    """One (slot, child) capability selection carried by a stack slot entry.
+
+    Mirrors the fields of ``hal0.capabilities.config.CapabilitySelection`` that
+    are portable; the apply engine (PR-2) translates these into real
+    CapabilitySelection rows at apply time.
+    """
+
+    model_config = {"populate_by_name": True, "extra": "forbid"}
+
+    child: str = Field(
+        ..., description="Capability child key, e.g. 'embed', 'rerank', 'stt', 'tts', 'vision'."
+    )
+    device: str = Field(..., description="Device target for this child.")
+    provider: str = Field(..., description="Provider name for this child.")
+    model: str = Field(..., description="Model id bound to this child.")
+    enabled: bool = Field(default=True, description="Whether this child is active in the stack.")
+
+    @field_validator("device")
+    @classmethod
+    def device_valid(cls, v: str) -> str:
+        if v not in _VALID_DEVICES:
+            raise ValueError(f"device {v!r}: must be one of {sorted(_VALID_DEVICES)}")
+        return v
+
+
+class StackSlotEntry(BaseModel):
+    """One slot's contribution to a stack: which model/profile/caps it carries.
+
+    References models and profiles by name/id; the embedded ``profiles`` and
+    ``models`` maps on the parent ``StackConfig`` carry the metadata needed to
+    resolve those references on another machine.
+    """
+
+    model_config = {"populate_by_name": True, "extra": "forbid"}
+
+    slot: str = Field(..., description="Slot name this entry configures (kebab-case).")
+    profile: str | None = Field(
+        default=None, description="Profile name reference (resolved against StackConfig.profiles)."
+    )
+    model: str | None = Field(
+        default=None, description="Model id reference (resolved against StackConfig.models)."
+    )
+    device: str | None = Field(default=None, description="Device override for the slot.")
+    provider: str | None = Field(default=None, description="Provider override for the slot.")
+    role: str | None = Field(default=None, description="Normalization role hint, e.g. 'primary'.")
+    vision: bool = Field(
+        default=False, description="Enable the mmproj vision sidecar for this slot."
+    )
+    mtp: bool | None = Field(
+        default=None, description="Per-slot MTP override (inherits profile default when None)."
+    )
+    enable_thinking: bool | None = Field(default=None, description="Per-slot reasoning override.")
+    server_extra_args: str | None = Field(
+        default=None, description="Freeform llama-server CLI flags for this slot."
+    )
+    capabilities: list[StackCapabilityRow] = Field(
+        default_factory=list, description="Capability child selections."
+    )
+
+    @field_validator("slot")
+    @classmethod
+    def slot_valid(cls, v: str) -> str:
+        import re
+
+        if not v or not v.strip():
+            raise ValueError("slot name must not be empty")
+        if not re.match(_STACK_NAME_RE, v):
+            raise ValueError(
+                f"slot name {v!r}: use lowercase alphanumeric, hyphens, underscores; "
+                f"start with alphanumeric; max 32 chars"
+            )
+        return v
+
+    @field_validator("device")
+    @classmethod
+    def device_valid(cls, v: str | None) -> str | None:
+        if v is not None and v not in _VALID_DEVICES:
+            raise ValueError(f"device {v!r}: must be one of {sorted(_VALID_DEVICES)}")
+        return v
+
+
+class StackConfig(BaseModel):
+    """One ``[stack.<slug>]`` entry in stacks.toml.
+
+    A curated bundle of slots + embedded profiles + embedded model metadata.
+    The slug is the dict key (validated by StacksCatalog on create), not a
+    field here — mirroring ProfileConfig. ``name`` is the human display label.
+    """
+
+    model_config = {"populate_by_name": True, "extra": "forbid"}
+
+    name: str = Field(default="", description="Human display label (falls back to slug in the UI).")
+    description: str = Field(default="", description="What this stack is for.")
+    author: str = Field(default="", description="Author/provenance, for the future directory.")
+    icon: str = Field(default="", description="Accent token or emoji shown on the card.")
+    tags: list[str] = Field(
+        default_factory=list, description="Freeform tags for listing/filtering."
+    )
+    schema_version: int = Field(
+        default=STACK_SCHEMA_VERSION_CURRENT,
+        description="Stack schema version, stamped for forward-compat / envelope migration.",
+    )
+    hal0_version: str = Field(
+        default="", description="hal0 version that produced this stack (provenance)."
+    )
+    slots: list[StackSlotEntry] = Field(
+        default_factory=list, description="Slots this stack configures."
+    )
+    profiles: dict[str, ProfileConfig] = Field(
+        default_factory=dict,
+        description="Embedded profiles referenced by slots, so the stack is self-contained.",
+    )
+    models: dict[str, StackModelMeta] = Field(
+        default_factory=dict,
+        description="Embedded model metadata (no weights) for referenced model ids.",
+    )
+
+
+class StacksConfig(BaseModel):
+    """Parsed stacks.toml — top-level ``[stack]`` table, keyed by slug."""
+
+    model_config = {"populate_by_name": True, "extra": "forbid"}
+
+    stack: dict[str, StackConfig] = Field(default_factory=dict)
+
+
+# Built-in seed stacks (immutable, clone-only) — the day-one catalog the
+# Stacks page ships with (spec §10). Returned by ``load_stacks_config`` when no
+# stacks.toml exists yet, and consulted by ``StacksCatalog`` for the
+# seed-immutability guard. Grounded in the live Strix-Halo model roster and the
+# canonical ``agent``/``utility`` slots (ADR-0023; the spec's pre-ADR ``chat``/
+# ``primary``/``util`` slot names are mapped onto these). Each carries embed +
+# rerank capability rows so memory recall works out of the box. Model metadata
+# (``models{}``) is intentionally left empty — ``export_envelope`` fills it from
+# the live registry at export time, keeping the in-code seed lean.
+#
+# These reference this host's real registry ids; cloned-and-edited is the
+# intended path, and apply's dry-run surfaces any model that isn't local.
+
+
+def _embed_rerank_rows(device: str = "gpu-rocm") -> list[StackCapabilityRow]:
+    """The shared embed + rerank capability pair every seed ships with."""
+    return [
+        StackCapabilityRow(
+            child="embed",
+            device=device,
+            provider="llama-server",
+            model="qwen3-embedding-0-6b-q8-0",
+            enabled=True,
+        ),
+        StackCapabilityRow(
+            child="rerank",
+            device=device,
+            provider="llama-server",
+            model="bge-reranker-v2-m3-q4_k_m",
+            enabled=True,
+        ),
+    ]
+
+
+SEED_STACKS: dict[str, StackConfig] = {
+    # saber — max-throughput agentic MoE. Decode-per-GB leader on the board.
+    "saber": StackConfig(
+        name="Saber",
+        description="High-speed agentic MoE: a 35B-A3B agent on ROCm with a fast "
+        "Vulkan utility helper, plus memory recall.",
+        author="hal0",
+        icon="⚡",
+        tags=["agentic", "moe", "fast"],
+        slots=[
+            StackSlotEntry(
+                slot="agent",
+                model="qwen3-6-35b-a3b-nsc-ace-saber-mtp-f16-to-rocmfp4-strix-lean",
+                device="gpu-rocm",
+                profile="rocm-moe",
+                mtp=True,
+                capabilities=_embed_rerank_rows(),
+            ),
+            StackSlotEntry(
+                slot="utility",
+                model="gemma-4-12b-it-ud-q4-k-xl",
+                device="gpu-vulkan",
+                profile="vulkan",
+            ),
+        ],
+    ),
+    # forge — coding-first developer loadout: a coder agent + a fast draft coder.
+    "forge": StackConfig(
+        name="Forge",
+        description="Coding-first: a 27B coder agent on ROCm with a small fast "
+        "draft coder as the utility, plus codebase retrieval.",
+        author="hal0",
+        icon="🛠️",
+        tags=["coding", "developer"],
+        slots=[
+            StackSlotEntry(
+                slot="agent",
+                model="qwopus3-6-27b-coder-mtp-q6-k",
+                device="gpu-rocm",
+                profile="rocm",
+                mtp=True,
+                capabilities=_embed_rerank_rows(),
+            ),
+            StackSlotEntry(
+                slot="utility",
+                model="qwopus3-5-4b-coder-mtp-q6-k",
+                device="gpu-vulkan",
+                profile="vulkan",
+                mtp=True,
+            ),
+        ],
+    ),
+    # pi — always-on support: faithful compaction, memory recall (quality > speed).
+    "pi": StackConfig(
+        name="Pi",
+        description="Always-on support: a q-rich 27B utility for faithful "
+        "compaction and recall, with a light Vulkan agent.",
+        author="hal0",
+        icon="🥧",
+        tags=["support", "memory", "compaction"],
+        slots=[
+            StackSlotEntry(
+                slot="utility",
+                model="chadrock3-6-27b-pi-agent-mtp-rocmfp4-strix-lean",
+                device="gpu-rocm",
+                profile="rocm",
+                mtp=True,
+                capabilities=_embed_rerank_rows(),
+            ),
+            StackSlotEntry(
+                slot="agent",
+                model="gemma-4-12b-it-ud-q4-k-xl",
+                device="gpu-vulkan",
+                profile="vulkan",
+            ),
+        ],
+    ),
+}
+
+
 def resolve_profile_flags(profile: ProfileConfig, mtp_override: bool | None = None) -> str:
     """Return the full flag string for *profile*, expanding MTP when set.
 
@@ -919,7 +1231,20 @@ def resolve_profile_flags(profile: ProfileConfig, mtp_override: bool | None = No
     base = profile.flags.strip()
     effective_mtp = mtp_override if mtp_override is not None else profile.mtp
     if effective_mtp:
-        return f"{base} {MTP_FLAG_BUNDLE}".strip()
+        # MTP_FLAG_BUNDLE is a set of DEFAULTS. A profile may pin its own
+        # ``--spec-draft-*`` values (a hand-tuned draft KV type, p-min, …); those
+        # must WIN, with the bundle only supplying the flags the profile left
+        # unset. ``merge_flags(defaults, override)`` gives exactly that
+        # precedence — the override (here ``base``) strips any matching flag from
+        # the defaults. Appending the bundle verbatim (the old behaviour) let it
+        # silently clobber a profile's explicit spec flags, e.g. a profile
+        # asking for ``--spec-draft-type-k f16`` still launched with q8_0.
+        #
+        # Local import: ``hal0.config`` is imported before ``hal0.slots``, so a
+        # module-level import would create a cycle.
+        from hal0.slots.flag_merge import merge_flags
+
+        return merge_flags(MTP_FLAG_BUNDLE, base)
     return base
 
 
@@ -1255,123 +1580,57 @@ class TelemetryConfig(BaseModel):
         return v
 
 
-# ── MemoryGraphConfig (ADR-0014) ──────────────────────────────────────────────
-
-# ADR-0014 §2: typed enum for the graph-extraction route.
-# - "upstream": resolve via providers.toml + upstreams.toml
-# - "primary":  uses the live `primary` slot (user owns quality)
-# - "agent":    uses the dedicated agent slot if installed
-GraphRouteLiteral = Literal["upstream", "primary", "agent"]
-_VALID_GRAPH_ROUTES = frozenset({"upstream", "primary", "agent"})
-
-
-class GraphUpstreamConfig(BaseModel):
-    """[memory.graph.upstream] section — provider + model for route=upstream.
-
-    Required when ``MemoryGraphConfig.route == "upstream"`` AND the
-    graph-extraction feature is enabled. ``api_key`` is NEVER held here
-    — credentials resolve from ``providers.toml`` via the existing
-    ``ProviderEntry.auth_value_env`` indirection so secrets never land
-    in a config file the dashboard reads.
-    """
-
-    model_config = {"populate_by_name": True, "extra": "allow"}
-
-    provider: str = Field(
-        default="openrouter",
-        description=(
-            "Upstream provider id, e.g. 'openrouter' | 'anthropic' | "
-            "'openai' | 'custom'. Must match a configured provider in "
-            "providers.toml so api_key resolution works."
-        ),
-    )
-    model: str = Field(
-        default="",
-        description=(
-            "Model id the provider understands, e.g. "
-            "'anthropic/claude-3.5-sonnet'. Empty is rejected when the "
-            "parent route == 'upstream' and enabled = true."
-        ),
-    )
-
-    @field_validator("provider")
-    @classmethod
-    def provider_nonempty(cls, v: str) -> str:
-        if not v or not v.strip():
-            raise ValueError("memory.graph.upstream.provider must not be empty")
-        return v
+# ── MemoryGraphConfig (ADR-0023) ──────────────────────────────────────────────
 
 
 class MemoryGraphConfig(BaseModel):
-    """[memory.graph] section of hal0.toml (ADR-0014).
+    """[memory.graph] section of hal0.toml (ADR-0023).
 
-    Controls whether Cognee's graph-extraction pipeline runs after
-    ``memory_add`` (the cognify step that pulls entities + relations
-    via an LLM with structured output).
+    Controls graph extraction on the Hindsight engine. Hindsight builds its graph
+    natively via its own extraction LLM; hal0 points that LLM at the
+    ``extraction_slot`` (propagated to hindsight-api as
+    ``HINDSIGHT_API_LLM_MODEL=hal0/<slot>`` through a systemd drop-in).
 
-    ADR-0014 §1: defaults OFF in v0.3. Small local models flake on
-    structured-output prompts; enabling silently would leave the graph
-    view empty and confuse users. ADR-0014 §5: ``route = "upstream"`` is
-    the default *suggestion* when the user toggles on but is NEVER the
-    default behavior.
+    ADR-0023 replaced the inert, cognee-era ``route``/``upstream`` enum with a
+    single ``extraction_slot`` knob. ``model_config.extra = "ignore"`` means a
+    lingering ``route``/``upstream`` key in an old hal0.toml is silently dropped on
+    load (and gone on the next save) rather than failing validation.
     """
 
-    model_config = {"populate_by_name": True, "extra": "allow"}
+    model_config = {"populate_by_name": True, "extra": "ignore"}
 
     enabled: bool = Field(
         default=False,
         description=(
-            "When False (the v0.3 default per ADR-0014 §1), memory_add "
-            "skips the graph-extraction cognify pass. memory_search's "
-            "vector mode keeps working — the gate only affects graph "
-            "builds + graph/hybrid search modes."
+            "Reporting gate for the graph-extraction status surface. Hindsight "
+            "builds its graph natively, so this flag is informational on that "
+            "engine; vector recall is unaffected either way."
         ),
     )
-    route: GraphRouteLiteral = Field(
-        default="upstream",
+    extraction_slot: str = Field(
+        default="utility",
         description=(
-            "Where to dispatch the graph-extraction LLM call when "
-            "enabled. ADR-0014 §2: 'upstream' resolves via "
-            "providers.toml, 'primary' uses the live primary slot, "
-            "'agent' uses the dedicated agent slot."
-        ),
-    )
-    upstream: GraphUpstreamConfig | None = Field(
-        default=None,
-        description=(
-            "Provider + model for route='upstream'. None when route is "
-            "'primary' or 'agent'. Required when enabled = true AND "
-            "route == 'upstream'."
+            "The local llm slot Hindsight uses for graph extraction / "
+            "consolidation / reflect. Propagated to hindsight-api as "
+            "HINDSIGHT_API_LLM_MODEL=hal0/<slot> via a systemd drop-in. Validated "
+            "against the live enabled-llm-slot set by the API at set-time. This is "
+            "the sole memory-graph knob."
         ),
     )
 
-    @field_validator("route")
+    @field_validator("extraction_slot")
     @classmethod
-    def route_valid(cls, v: str) -> str:
-        if v not in _VALID_GRAPH_ROUTES:
+    def extraction_slot_grammar(cls, v: str) -> str:
+        # Shape-only here (alnum/-/_, ≤32, leading alnum — the slot-name grammar);
+        # existence + type=llm is enforced by the API against the live slot set.
+        import re as _re
+
+        if not v or not _re.match(r"^[a-z0-9][a-z0-9_-]{0,31}$", v):
             raise ValueError(
-                f"memory.graph.route {v!r} is not valid; choose from {sorted(_VALID_GRAPH_ROUTES)}"
+                "memory.graph.extraction_slot must be a valid slot name "
+                "(lowercase alnum/-/_, ≤32 chars, leading alphanumeric)"
             )
         return v
-
-    @model_validator(mode="after")
-    def route_upstream_requires_model(self) -> MemoryGraphConfig:
-        """When enabled + route=upstream, demand provider + model.
-
-        Only enforced when ``enabled = true`` so the install-time
-        default (enabled=false, no upstream block) round-trips cleanly.
-        A user toggling on through the dashboard hits this validator
-        and gets a field-path error if they didn't supply the upstream
-        block.
-        """
-        if not self.enabled:
-            return self
-        if self.route == "upstream" and (self.upstream is None or not self.upstream.model.strip()):
-            raise ValueError(
-                "memory.graph.upstream.{provider,model} required when "
-                "enabled = true and route = 'upstream'"
-            )
-        return self
 
 
 # ── AgentConfig (ADR-0013) ─────────────────────────────────────────────────────
@@ -1840,6 +2099,24 @@ class ModelsConfig(BaseModel):
         ),
     )
 
+    def scan_roots(self) -> list[str]:
+        """Roots the discovery scan actually walks: declared ``roots`` plus the
+        effective store (``store`` when set, else the legacy ``pull_root``).
+
+        The installer writes ``pull_root`` from ``--models-dir`` but historically
+        never added it to ``roots`` (despite the pull_root doc claiming it's
+        "auto-included"), so a headless install whose models live under a custom
+        store/pull_root scanned only the default ``models_dir`` and found nothing
+        — slots then failed to load (no path resolved for the model name). Folding
+        the effective store in here makes discovery robust regardless of how the
+        TOML was written. Order-preserving, deduped.
+        """
+        out: list[str] = list(self.roots)
+        effective_store = (self.store or self.pull_root or "").strip()
+        if effective_store and effective_store not in out:
+            out.append(effective_store)
+        return out
+
     @field_validator("roots")
     @classmethod
     def roots_are_absolute(cls, v: list[str]) -> list[str]:
@@ -1937,6 +2214,7 @@ __all__ = [
     "DEVICE_DEFAULT_PROFILES",
     "MTP_FLAG_BUNDLE",
     "PROFILE_BENCH",
+    "PROFILE_SCHEMA_VERSION_CURRENT",
     "SEED_PROFILES",
     "ActivityConfig",
     "AgentAuthConfig",
@@ -1947,8 +2225,6 @@ __all__ = [
     "DeviceLiteral",
     "DispatcherConfig",
     "GPUInfo",
-    "GraphRouteLiteral",
-    "GraphUpstreamConfig",
     "Hal0Config",
     "HardwareInfo",
     "ImageGenConfig",

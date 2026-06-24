@@ -11,7 +11,6 @@ from typing import Any
 
 import structlog
 
-from hal0.memory.cognee_wrapper import CogneeWrapper, MemoryRecord
 from hal0.memory.hindsight_provider import HindsightProvider
 from hal0.memory.pgvector_provider import PgVectorProvider
 from hal0.memory.provider import (
@@ -21,6 +20,7 @@ from hal0.memory.provider import (
     ListPage,
     MemoryItem,
     MemoryProvider,
+    MemoryRecord,
     Mode,
 )
 
@@ -28,7 +28,6 @@ log = structlog.get_logger(__name__)
 
 __all__ = [
     "AddResult",
-    "CogneeWrapper",
     "DeleteResult",
     "GraphStatus",
     "HindsightProvider",
@@ -61,54 +60,39 @@ def _build_hindsight_client(cfg: Any) -> Any:
 def provider_from_config(cfg: Any) -> MemoryProvider:
     """Construct the active MemoryProvider from the loaded hal0 config.
 
-    P0: only the ``cognee`` branch is wired (default). P1 adds ``hindsight``
-    + the degrade ladder; P2 flips the default. ``cfg`` is the object returned
-    by ``hal0.config.loader.load_hal0_config``.
+    ADR-0023: Hindsight is the platform engine and the default. The cognee
+    wrapper was removed; any non-pgvector engine (including unknown/mem0) resolves
+    to Hindsight, with a boot-time degrade to the in-memory PgVectorProvider when
+    the Hindsight daemon is unreachable. ``cfg`` is the object returned by
+    ``hal0.config.loader.load_hal0_config``.
     """
     engine = str(getattr(cfg.memory, "engine", "hindsight") or "hindsight").lower()
     embed = cfg.memory.embedding
     graph = cfg.memory.graph
 
-    if engine == "cognee":
-        return CogneeWrapper(
-            embedding_model=str(embed.model),
-            graph_enabled=bool(graph.enabled),
-            graph_route=str(graph.route),
-            rerank_enabled=bool(embed.rerank_enabled),
-            rerank_url=str(embed.rerank_url),
-            rerank_over_fetch_factor=int(embed.rerank_over_fetch_factor),
-            rerank_max_candidates=int(embed.rerank_max_candidates),
-            rerank_connect_timeout_s=float(embed.rerank_connect_timeout_s),
-            rerank_read_timeout_s=float(embed.rerank_read_timeout_s),
-        )
-
-    if engine == "hindsight":
-        try:
-            client = _build_hindsight_client(cfg)
-        except Exception as exc:  # daemon down at boot → degrade ladder
-            log.warning("hal0.memory.hindsight_unavailable", error=str(exc), fallback="pgvector")
-            return PgVectorProvider()
-        from hal0.memory.hindsight_provider import Hal0Reranker
-
-        reranker = Hal0Reranker(
-            base_url=str(getattr(embed, "rerank_gateway_url", None) or "http://127.0.0.1:8080"),
-            connect_timeout_s=float(embed.rerank_connect_timeout_s),
-            read_timeout_s=float(embed.rerank_read_timeout_s),
-        )
-        return HindsightProvider(
-            client=client,
-            reranker=reranker,
-            graph_enabled=bool(graph.enabled),
-            graph_route=str(graph.route),
-        )
-
     if engine == "pgvector":
         return PgVectorProvider()
 
     if engine == "mem0":  # documented fallback (spec §2) — not yet implemented
-        log.warning("hal0.memory.mem0_not_implemented", fallback="cognee")
-        return CogneeWrapper(embedding_model=str(embed.model))
+        log.warning("hal0.memory.mem0_not_implemented", fallback="hindsight")
+    elif engine not in ("hindsight", ""):
+        log.warning("hal0.memory.unknown_engine", engine=engine, fallback="hindsight")
 
-    # cognee branch above is the default; unknown engines log + fall back.
-    log.warning("hal0.memory.unknown_engine", engine=engine, fallback="cognee")
-    return CogneeWrapper(embedding_model=str(embed.model))
+    try:
+        client = _build_hindsight_client(cfg)
+    except Exception as exc:  # daemon down at boot → degrade ladder
+        log.warning("hal0.memory.hindsight_unavailable", error=str(exc), fallback="pgvector")
+        return PgVectorProvider()
+    from hal0.memory.hindsight_provider import Hal0Reranker
+
+    reranker = Hal0Reranker(
+        base_url=str(getattr(embed, "rerank_gateway_url", None) or "http://127.0.0.1:8080"),
+        connect_timeout_s=float(embed.rerank_connect_timeout_s),
+        read_timeout_s=float(embed.rerank_read_timeout_s),
+    )
+    return HindsightProvider(
+        client=client,
+        reranker=reranker,
+        graph_enabled=bool(graph.enabled),
+        extraction_slot=str(getattr(graph, "extraction_slot", "utility")),
+    )

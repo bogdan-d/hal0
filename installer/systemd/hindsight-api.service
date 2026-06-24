@@ -42,8 +42,12 @@ Environment=HINDSIGHT_API_LLM_BASE_URL=http://127.0.0.1:8080/v1
 #    eviction risk vs the 35B primary (obsolete under container runtime).
 #  - gemma4-it:e2b/e4b (NPU): BLOCKED — amdxdna HWCTX alloc fails (err=-22).
 #  - gemma3 4B NPU (FLM): worked but ~160s/extract + reflect timeouts.
-# `hal0/utility` is hal0-api's virtual model name for the utility slot
-# (falls back chat if unavailable).
+# `hal0/utility` is hal0-api's virtual model name for the utility slot (a seeded
+# slot per ADR-0023, so always present; falls back to the agent anchor if unloaded).
+# This is the DEFAULT only — `hal0 memory graph enable --slot <name>` (or the Memory
+# dashboard) writes a drop-in at hindsight-api.service.d/extraction-model.conf that
+# overrides this value, so the operator can repoint extraction without editing this
+# installer-owned unit.
 Environment=HINDSIGHT_API_LLM_MODEL=hal0/utility
 Environment=HINDSIGHT_API_LLM_API_KEY=hal0-local-noauth
 # Generous timeout retained: covers utility-slot cold starts + long reflects.

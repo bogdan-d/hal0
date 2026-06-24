@@ -8,10 +8,9 @@ captured **after** the operation runs — so the record confirms the change
 actually took effect (or truthfully says it failed).
 
 Design: single-file package mirroring ``events/__init__.py``. Uses the stdlib
-``sqlite3`` (the house pattern, see ``memory/cognee_wrapper.py``) with a
-per-call connection, WAL journaling, and an idempotent ``CREATE TABLE IF NOT
-EXISTS`` schema. Writes are wrapped in ``asyncio.to_thread`` so the event loop
-never blocks on disk.
+``sqlite3`` (the house pattern) with a per-call connection, WAL journaling, and
+an idempotent ``CREATE TABLE IF NOT EXISTS`` schema. Writes are wrapped in
+``asyncio.to_thread`` so the event loop never blocks on disk.
 
 Two write paths feed one table:
   * :func:`audit_action` — context manager around a mutation handler. Captures

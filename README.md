@@ -28,15 +28,19 @@ shared inference daemon; no extra process to babysit.
 curl -fsSL https://hal0.dev/install.sh | bash
 ```
 
-> **Status:** **v0.5.0-alpha.1** — container-runtime era. Each slot
-> (`chat`, `embed`, `rerank`, `stt`, `tts`, `img`, NPU trio) runs as
-> a dedicated podman container (`hal0-slot@<name>.service`). Slot
-> definitions live in `/etc/hal0/slots/<name>.toml`; backend profiles
-> in `/etc/hal0/profiles.toml`; the model catalog is
-> `registry.toml` — the single source of truth for every HuggingFace
-> coordinate and SHA-256 digest. The one-liner seeds the recommended
-> Main slot non-interactively; run `hal0 setup` anytime to configure
-> models, extensions, and NPU interactively. See
+> **Status:** **v0.8.0-beta.2** — container-runtime era, declarative
+> config. Each slot (`chat`, `embed`, `rerank`, `stt`, `tts`, `img`, NPU
+> trio) runs as a dedicated podman container (`hal0-slot@<name>.service`).
+> Slot definitions live in `/etc/hal0/slots/<name>.toml`; backend profiles
+> in `/etc/hal0/profiles.toml`; the model catalog is `registry.toml` — the
+> single source of truth for every HuggingFace coordinate and SHA-256
+> digest. The launch command for every slot is now resolved from a single
+> source (deduped, with per-flag provenance), and **Stacks** apply
+> declarative model/slot layouts atomically. `hal0-api` can run
+> unprivileged — install with `HAL0_USER=hal0` to drop it off root (slot
+> containers stay rootful; default `root` is unchanged). The one-liner
+> seeds the recommended Main slot non-interactively; run `hal0 setup`
+> anytime to configure models, extensions, and NPU interactively. See
 > [`PLAN.md`](./PLAN.md) §1 for what ships now and the path to v1.0.
 
 ## Why hal0
@@ -133,9 +137,13 @@ be evicted out from under a streaming request.
   depth, model inventory) with a gated inference ⇄ generation iGPU
   switchover behind a blast-radius confirm.
 - **Extensions** — selectable Apps (Open WebUI) and Agents (Hermes,
-  Pi) that `hal0 setup` auto-wires into the platform. A future
-  **Stacks** feature will add runtime-switchable model/slot layouts as
-  a replacement for install-time bundle tiers.
+  Pi) that `hal0 setup` auto-wires into the platform.
+- **Stacks** — declarative, runtime-switchable model/slot layouts as a
+  replacement for install-time bundle tiers. A `StackConfig` is planned
+  into a change set, applied atomically (with rollback) and converged
+  against the live slot set; drift is detected by content hash. Stacks
+  export/import via a checksummed `.hal0stack.json` envelope, and a live
+  config can be snapshotted back into a Stack.
 - **OpenWebUI prewired** — chat at `:3001`, zero config. The installer
   writes `openwebui.env` pointing at the local hal0 API.
 - **OmniRouter (8 tools)** — `generate_image`, `edit_image`,

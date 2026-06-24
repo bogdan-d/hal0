@@ -428,10 +428,9 @@ _SYSTEMCTL = "/usr/bin/systemctl"
 
 
 def _privileged_systemctl_argv(*args: str) -> list[str]:
-    argv = [_SYSTEMCTL, *args]
-    if os.geteuid() == 0:
-        return argv
-    return ["sudo", "-n", *argv]
+    # hal0-api runs as root, so systemctl is invoked directly. The former
+    # euid != 0 `sudo -n` fallback was part of the removed hardened-perms seam.
+    return [_SYSTEMCTL, *args]
 
 
 def _unit_active(unit: str) -> bool:

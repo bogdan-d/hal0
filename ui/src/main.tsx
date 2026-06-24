@@ -69,6 +69,10 @@ import './dash/connections.css'
 import './dash/connections.jsx'
 // issue #658 — Profiles: container-slot template catalog + iGPU intent labels.
 import './dash/profiles.jsx'
+// Stacks: named, portable slot+profile+model bundles (Focus layout) — registers
+// window.StacksView, rendered as the third Slots tab.
+import './dash/stacks.css'
+import './dash/stacks.jsx'
 import './dash/settings.jsx'
 
 import './dash/extras.jsx'
@@ -118,8 +122,8 @@ import './dash/board/lane.jsx'
 import './dash/board/task-drawer.jsx'
 import './dash/board/agent-chat.jsx'
 import './dash/board/orchestration-popover.jsx'
-import './dash/board/tweaks-panel.jsx'
 import './dash/board/new-board-modal.jsx'
+import './dash/board/new-task-modal.jsx'
 import './dash/board/board-view.jsx'
 
 // 3) main.jsx mounts <App /> into #root.

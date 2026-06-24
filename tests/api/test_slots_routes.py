@@ -328,18 +328,37 @@ def test_load_success_path_dispatches_via_container(
     assert load_calls[0]["model_info"]["_model_key"] == "qwen3-4b-q4_k_m"
 
 
-def test_legacy_primary_slot_name_resolves_to_chat(
-    slot_root: Path,
+def test_agent_hermes_slot_name_resolves_to_agent(
+    tmp_hal0_home: str,
     container_stub: dict[str, Any],
     isolated_client: TestClient,
 ) -> None:
-    """#654: POST /api/slots/primary/load resolves via the hidden alias to the
-    chat slot (chat.toml) and loads its model — old name still works."""
-    r = isolated_client.post("/api/slots/primary/load")
+    """ADR-0023: POST /api/slots/agent-hermes/load resolves via the surviving
+    hidden alias to the ``agent`` slot (agent.toml) and loads its model.
+
+    Under ADR-0023 ``primary`` is no longer an alias (it passes through and
+    404s when no ``primary`` slot exists). The one remaining back-compat alias
+    is ``agent-hermes`` → ``agent``."""
+    _seed_slot_toml(
+        tmp_hal0_home,
+        "agent",
+        [
+            'name = "agent"',
+            "port = 8081",
+            'device = "gpu-vulkan"',
+            'provider = "llama-server"',
+            'runtime = "container"',
+            'profile = "vulkan-radv"',
+            "enabled = true",
+            "[model]",
+            'default = "qwen3-4b-q4_k_m"',
+        ],
+    )
+    r = isolated_client.post("/api/slots/agent-hermes/load")
     assert r.status_code == 200, r.text
     body = r.json()
-    # The alias resolved to the canonical chat slot.
-    assert body["name"] == "chat"
+    # The alias resolved to the canonical agent slot.
+    assert body["name"] == "agent"
     assert body["state"] == "ready"
     load_calls = container_stub["load_calls"]
     assert load_calls and load_calls[0]["model_info"]["_model_key"] == "qwen3-4b-q4_k_m"

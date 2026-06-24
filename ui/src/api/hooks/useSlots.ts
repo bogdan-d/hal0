@@ -514,6 +514,51 @@ export function useSlotConfig(name: string | null | undefined) {
   })
 }
 
+// ─── useSlotResolved ──────────────────────────────────────────────────────────
+
+/** Source segment that supplied the surviving value for a flag. */
+export type ProvenanceSource = 'base' | 'profile' | 'extra_args'
+
+/** Per-flag provenance entry returned by GET /api/slots/{name}/resolved. */
+export interface FlagProvenance {
+  /** The flag token, e.g. "--model", "-b". */
+  flag: string
+  /** The value following the flag, or null for bare flags. */
+  value: string | null
+  /** Which config segment set the final (surviving) value. */
+  source: ProvenanceSource
+}
+
+/** Full resolved-command payload from GET /api/slots/{name}/resolved. */
+export interface SlotResolved {
+  name: string
+  /** Deduped llama-server argv (image first), or null for non-llama slots. */
+  argv: string[] | null
+  /** One entry per surviving flag: which segment owns the final value. */
+  provenance: FlagProvenance[]
+  /** Number of duplicate flags that were collapsed. */
+  removed: number
+}
+
+/**
+ * GET /api/slots/{name}/resolved — resolved command provenance for a slot.
+ *
+ * Only fetched when the Edit drawer is open (`enabled`). Uses a moderate
+ * staleTime so repeat opens don't hammer the backend, but the data stays
+ * fresh enough to reflect a recent Regenerate click.
+ */
+export function useSlotResolved(
+  name: string | null | undefined,
+  options: { enabled?: boolean } = {},
+) {
+  return useQuery<SlotResolved>({
+    queryKey: ['slot-resolved', name],
+    queryFn: () => apiGet<SlotResolved>(ENDPOINTS.slotResolved(name as string)),
+    enabled: !!name && (options.enabled !== false),
+    staleTime: 8_000,
+  })
+}
+
 // ─── useSlotImagePull ─────────────────────────────────────────────────────────
 
 export type ImagePullState = 'idle' | 'pulling' | 'completed' | 'failed' | 'present' | 'missing'

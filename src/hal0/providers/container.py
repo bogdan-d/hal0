@@ -39,6 +39,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import os
 import shlex
 import shutil
 import subprocess
@@ -52,6 +53,7 @@ from hal0.config.schema import resolve_chat_template, resolve_profile_flags
 from hal0.profiles import ProfileCatalog
 from hal0.providers._gpu import resolve_gpu_device_paths, resolve_gpu_group_ids
 from hal0.providers.base import HealthCheck, Mount, Provider, RuntimeLaunchPlan
+from hal0.slots.argv import ResolvedArgv, normalize_argv, resolve_argv
 
 # ``ContainerSpec`` is the back-compat alias for ``RuntimeLaunchPlan``; some
 # callers/tests still import the old name from this module.
@@ -122,9 +124,6 @@ def _container_runtime() -> str:
     Priority: $HAL0_CONTAINER_RUNTIME > /usr/bin/podman > /usr/bin/docker.
     Raises RuntimeError if neither is found.
     """
-    import os
-    import shutil
-
     override = os.environ.get("HAL0_CONTAINER_RUNTIME")
     if override:
         return override
@@ -348,6 +347,7 @@ def _llama_launch_plan(
     extra_args: str | None = None,
     model_alias: str | None = None,
     chat_template_path: str | None = None,
+    mmproj: str | None = None,
 ) -> RuntimeLaunchPlan:
     """Build the GPU/llama-server :class:`RuntimeLaunchPlan`.
 
@@ -373,7 +373,18 @@ def _llama_launch_plan(
     command += flag_tokens
     if chat_template_path:
         command += ["--chat-template-file", chat_template_path]
+    # Vision projector: --mmproj loads the multimodal projector so the model
+    # can accept images. Mirrors the native llama_server.py provider. Placed
+    # before extra_tokens so a manual --mmproj in [server].extra_args can win.
+    if mmproj:
+        command += ["--mmproj", mmproj]
     command += extra_tokens
+
+    # Collapse cross-segment duplicates (profile flags vs [server].extra_args vs
+    # toggle-derived flags) to one source of truth: last-wins dedup, which is
+    # effective-value-preserving because llama-server already used the last
+    # occurrence. See hal0.slots.argv.normalize_argv.
+    command = normalize_argv(command).argv
 
     # Effective model-store root (honours [models].store / HAL0_MODEL_STORE,
     # default /mnt/ai-models). Mounted identical-path, read-only, with an
@@ -569,6 +580,15 @@ class ContainerProvider(Provider):
             else None
         )
 
+        # Vision projector sidecar associated with the model in the registry
+        # (#899). Bind-mounted at its identical host path, so the container sees
+        # the same path. None for text-only models — no flag emitted. Gated by
+        # the per-slot ``vision`` toggle (#901, default-on): vision=false boots
+        # the slot text-only even when a sidecar exists.
+        mmproj = model_info.get("mmproj")
+        if not slot_cfg.get("vision", True):
+            mmproj = None
+
         return _llama_launch_plan(
             image=image,
             port=port,
@@ -580,6 +600,7 @@ class ContainerProvider(Provider):
             extra_args=extra_args,
             model_alias=model_alias,
             chat_template_path=chat_template_path,
+            mmproj=str(mmproj) if mmproj else None,
         )
 
     # ── ContainerProvider-specific control plane ──────────────────────────────
@@ -969,6 +990,25 @@ def resolved_command_for_slot(
     Returns ``None`` when the slot has no profile (not a container slot)
     or the profile lookup fails.
     """
+    resolved = _resolve_slot_argv(slot_cfg, model_path)
+    if resolved is None:
+        return None
+    image, result = resolved
+    return [image, *result.argv]
+
+
+def _resolve_slot_argv(
+    slot_cfg: dict[str, Any],
+    model_path: str | None = None,
+) -> tuple[str, ResolvedArgv] | None:
+    """Build the labelled argv segments for a slot and resolve them.
+
+    Returns ``(image, ResolvedArgv)`` — the deduped flag portion (image
+    excluded) plus per-flag provenance — or ``None`` when the slot has no
+    profile / the profile lookup fails. Segments are ordered lowest-precedence
+    first (base < profile < extra_args) so ``resolve_argv``'s last-wins matches
+    the launch path: a flag in ``[server].extra_args`` overrides the profile.
+    """
     profile_name = str(slot_cfg.get("profile") or "")
     if not profile_name:
         return None
@@ -992,22 +1032,47 @@ def resolved_command_for_slot(
     extra_args = server_table.get("extra_args") if isinstance(server_table, dict) else None
     extra_tokens = shlex.split(extra_args) if extra_args and extra_args.strip() else []
 
-    argv: list[str] = [
-        image,
-        "--host",
-        "0.0.0.0",
-        "--port",
-        str(port),
-    ]
+    base: list[str] = ["--host", "0.0.0.0", "--port", str(port)]
     if effective_model:
-        argv += ["--model", effective_model]
+        base += ["--model", effective_model]
     if default_model:
-        argv += ["--alias", str(default_model)]
+        base += ["--alias", str(default_model)]
     if context_size is not None:
-        argv += ["--ctx-size", str(context_size)]
-    argv.extend(flag_tokens)
-    argv.extend(extra_tokens)
-    return argv
+        base += ["--ctx-size", str(context_size)]
+
+    result = resolve_argv(
+        [
+            ("base", base),
+            ("profile", flag_tokens),
+            ("extra_args", extra_tokens),
+        ]
+    )
+    return image, result
+
+
+def resolved_argv_detail_for_slot(
+    slot_cfg: dict[str, Any],
+    model_path: str | None = None,
+) -> dict[str, Any] | None:
+    """Structured resolution for the dashboard's "resolved command" drawer.
+
+    Returns ``{"argv", "provenance", "removed"}`` where ``provenance`` lists each
+    surviving flag with the segment that set its final value (``base`` /
+    ``profile`` / ``extra_args``) — so an operator can see exactly which source
+    won each flag and how many duplicates were collapsed. ``None`` for a slot
+    with no profile.
+    """
+    resolved = _resolve_slot_argv(slot_cfg, model_path)
+    if resolved is None:
+        return None
+    image, result = resolved
+    return {
+        "argv": [image, *result.argv],
+        "provenance": [
+            {"flag": p.flag, "value": p.value, "source": p.source} for p in result.provenance
+        ],
+        "removed": result.removed,
+    }
 
 
 __all__ = [
@@ -1016,6 +1081,7 @@ __all__ = [
     "_render_unit_from_spec",
     "_spec_provider_for",
     "container_provider",
+    "resolved_argv_detail_for_slot",
     "resolved_command_for_slot",
 ]
 

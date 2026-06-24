@@ -1,10 +1,9 @@
-# hal0-memory MCP-backed Hermes memory provider plugin manifest.
+# hal0-memory memory-provider plugin manifest.
 #
-# Real wiring (memory_provider class registration + Cognee graph-gate
-# config read) lands in #242. v0.3 scaffold (#240) just ships the
-# directory + this manifest so Hermes's plugin loader has a valid
-# target to resolve.
+# Wires Hermes's durable memory to hal0's shared brain (Hindsight) via the
+# hal0-api REST front door (/api/memory/*). Two banks: private:<agent-id>
+# (private) and shared. Activated by `memory.provider: hal0-memory`.
 name: hal0-memory
-kind: memory-provider
-version: 0.1.0
-description: hal0-memory MCP-backed memory provider — talks to hal0's Cognee store.
+kind: exclusive
+version: 1.0.0
+description: hal0-memory provider — durable Hindsight memory via hal0-api REST (private + shared banks).

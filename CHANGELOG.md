@@ -10,6 +10,237 @@ Tags older than v0.2.0 ship release notes inside the GitHub release
 page; this CHANGELOG starts at v0.2.0 (the Lemonade migration cut).
 For ADR-level architecture context see `docs/internal/adr/`.
 
+## [v0.8.2b1] — 2026-06-23
+
+Profiles gain the same portable export/import/sharing model stacks already have.
+Safe upgrade from v0.8.1-beta.2.
+
+### Added
+- **Portable profile export/import.** A profile can now be exported to a
+  self-contained, checksummed `.hal0profile.json` envelope and imported on another
+  host — the same file-based sharing model stacks use. The envelope carries the
+  profile template plus a sha256 content checksum and an independent
+  `schema_version`; no secrets or host paths are serialized. New routes
+  `GET /api/profiles/{name}`, `POST /api/profiles/{name}/export`, and
+  `POST /api/profiles/import` (dry-run reports checksum validity + name collision;
+  commit creates under a chosen name, `409 profiles.exists` on a duplicate). New
+  MCP tools mirror the `stack_*` set: `profile_list` / `profile_status` /
+  `profile_export` (autonomous read) and `profile_import` / `profile_delete`
+  (gated). The dashboard adds an Export button to every profile card and an Import
+  dialog (file → dry-run preview → commit). (#962)
+
+## [v0.8.1-beta.2] — 2026-06-23
+
+Bugfix on the 0.8.1 beta line — restores fleet auto-update. Safe upgrade from
+v0.8.1-beta.1.
+
+### Fixed
+- **Updater version comparison uses PEP 440.** `hal0 update` compared versions with
+  a digit-tuple parser that split on `.` and stripped non-digits per segment, so the
+  pip-normalised installed beta `0.8.0b3` parsed to `(0, 8, 3)` and the tag-form
+  manifest `0.8.1-beta.1` to `(0, 8, 1, 1)` — `(0,8,1,1) > (0,8,3)` is false, so
+  every box on a `0.8.0bN` beta saw the new release as "not newer" and `hal0 update`
+  reported nothing to apply (the installed beta number was misread as the patch
+  component). The comparator now uses `packaging.version.Version` in both the updater
+  and the API route, falling back to the digit-tuple only for non-PEP-440 nightly
+  tags (whose timestamp ordering still relies on it). (#957)
+
+## [v0.8.1-beta.1] — 2026-06-23
+
+Installer/privilege simplification + Hermes durable memory on by default. The
+hal0-api privilege seams (hardened unprivileged mode, the slot privilege seam)
+are gone, and a fresh `hal0 agent bootstrap hermes` now provisions a working
+durable-memory provider out of the box.
+
+### Added
+- **Hermes durable memory enabled by default.** Provisioning now ships a working
+  `hal0-memory` provider and sets `memory.provider=hal0-memory`, so Hermes gets
+  cross-session recall with no manual config. Two banks — `private:hermes`
+  (default) and `shared` (cross-agent) — backed by hal0's Hindsight engine via
+  the hal0-api REST front door; reads union both banks. The provider exposes
+  `hal0_memory_{search,recall,add}` (with `shared=true` to write the shared
+  bank) and auto-injects recalled context each turn. (#955)
+
+### Changed
+- **Hermes agent identity is `hermes`** (was `hermes-agent`), matching the
+  `hal0 agent` registry. The agent-id is the single source for the
+  `X-hal0-Agent` MCP headers, the persona memory namespace, and the prelude. (#955)
+- **Memory plugin install path fixed.** The plugin is copied to
+  `$HERMES_HOME/plugins/hal0-memory/` (a direct child of `plugins/`, which the
+  Hermes loader actually scans) instead of the nested `plugins/memory/…` that
+  never loaded. (#955)
+
+### Removed
+- **Hardened (unprivileged hal0-api) mode removed**; hal0-api runs as root.
+  Dropped live-hello; fixed ready-summary IPs. (#953)
+- **Dormant slot privilege seam removed** (`hal0-slotctl` + euid routing). (#954)
+
+### Breaking
+- **Hermes memory namespace renamed `private:hermes-agent` → `private:hermes`.**
+  Existing `private:hermes-agent` data is not auto-migrated; reprovisioned agents
+  start recalling from `private:hermes` + `shared`. (#955)
+
+## [v0.8.0-beta.3] — 2026-06-23
+
+Canonical LLM roles + Hindsight-native memory extraction
+([ADR-0023](docs/internal/adr/0023-canonical-llm-roles-agent-utility.md)). The two
+canonical LLM roles are now **`agent`** (the capable default + fallback anchor,
+replacing `chat`) and **`utility`** (the cheap helper, now seeded on every
+install). `chat` and `primary` are retired as slot/role names.
+
+### Changed
+- **Canonical roles are `agent` + `utility`.** `agent` replaces `chat` as the
+  default/anchor everywhere (seeded slots, dispatch rule-9 fallback, the default
+  pin set, `_configured_primary`). `utility` joins `SEEDED_SLOTS` so a fresh box
+  never silently falls back to a heavy model for cheap extraction.
+- **Generalized virtual addressing.** Any enabled `type=llm` slot `X` is now
+  addressable as `hal0/X` (chain `(X, agent)`); the advertised canonical virtuals
+  are `hal0/agent`, `hal0/utility`, `hal0/npu`.
+- **Memory graph extraction is operator-selectable and actually wired.**
+  `[memory.graph].extraction_slot` names the local llm slot Hindsight uses for
+  graph extraction; hal0 propagates it to `hindsight-api` via a systemd drop-in
+  (`HINDSIGHT_API_LLM_MODEL=hal0/<slot>`) + restart. `hal0 memory graph enable`
+  takes `--slot <name>` (validated against the live enabled-llm-slot set).
+- **Cognee fully removed.** The Cognee engine + wrapper are deleted; Hindsight is
+  the platform engine (with a PgVector boot-degrade fallback). `MemoryRecord`
+  survives as an alias of `MemoryItem`.
+
+### Breaking
+- **`hal0/chat` is no longer advertised.** Clients pinned to `hal0/chat` (Hermes,
+  OpenWebUI, any custom consumer) must repoint to **`hal0/agent`**.
+  Hermes `model.default` is now `hal0/agent`.
+- **`memory.graph.route` / `memory.graph.upstream` removed**, replaced by
+  **`memory.graph.extraction_slot`** (default `"utility"`). Old `route`/`upstream`
+  keys in `hal0.toml` are silently dropped on load (no hard-fail on upgrade). The
+  `hal0 memory graph enable --route/--provider/--model` options are gone — use
+  `--slot`.
+- **`primary` is no longer a slot alias.** `SLOT_ALIASES` is `{"agent-hermes": "agent"}`.
+
+## [v0.8.0-beta.2] — 2026-06-22
+
+Bugfix release on the 0.8.0 beta line. No behaviour changes beyond the two
+fixes below — a safe upgrade from v0.8.0-beta.1. First release to carry #948.
+
+### Fixed
+- **Operator Board live updates restored.** The board's events-WS proxy
+  (`/api/board/events`) resolved its upstream Hermes session token from the
+  `HERMES_SESSION_TOKEN` env var only, while the REST path harvests the
+  rotating per-process token from the dashboard HTML. With no env pin (the
+  default), the WS connected upstream with no token, Hermes rejected the
+  upgrade (403), and the browser socket died with 1011 — so tasks created in
+  Hermes loaded on refresh but never pushed live to the board. The WS bridge
+  now shares the REST client's token resolution (env-pin → HTML-harvest →
+  rotation cache) and re-harvests + retries once on connect failure. (#949)
+- **Hermes privileged env seam.** A privileged env-write seam lets the
+  unprivileged provisioner write `root:root` `.env` files, so Hermes agent
+  config provisioning works under the dropped-root `hal0-api`. (#948)
+
+## [v0.8.0-beta.1] — 2026-06-21
+
+First beta of the 0.8.0 line — the model-config, Hermes, and permissions
+overhaul. Configuration becomes a declarative single source of truth
+(**Stacks** + single-source launch argv), Hermes consolidates onto its own
+config ownership, and `hal0-api` can finally drop root. Voice (TTS + STT)
+lands end-to-end. One behaviour change to be aware of: the `hal0/primary`
+and `hal0/flm` virtual aliases are gone — see **Changed**.
+
+### Added
+- **Stacks — declarative config SSOT.** A `StackConfig` schema plus a
+  `StackApplyEngine` that `plan()`s a Stack into a ChangeSet, `apply_config()`s
+  it as an atomic commit with rollback, and `converge()`s the live slot set
+  (primary-slot load/swap/skip + capability-child routing through the
+  orchestrator). Content-hash drift detection and an active-stack pointer,
+  export/import via a checksummed `.hal0stack.json` envelope, snapshot of live
+  config into a Stack, and a `StacksCatalog` CRUD with seed guards. Seed stacks
+  (saber / forge / pi) derived from the roster bench.
+  (#921, #923, #925, #926)
+- **Voice stack — TTS + STT.** Brought up and verified end-to-end: `voice_wire`
+  fixed, Open WebUI Call mode wired, and the NPU-trio facade auto-provisions
+  STT. (#924, #928)
+- **Single-source slot argv (overhaul stream A).** A resolver dedups the launch
+  flag soup down to a last-wins canonical command; per-flag provenance is
+  exposed at `GET /api/slots/{name}/resolved`, and the slot Edit drawer renders
+  the resolved command with per-flag source badges (base / profile /
+  extra_args). (#929, #930, #931, #932)
+- **Capability-based slot fallback.** When a slot's `model.default` isn't
+  locally servable (registered-but-no-file, or pulled-away), `load()` falls back
+  to the best locally-registered model matching the slot's capability —
+  excluding diffusion / image / video models and preferring name-similarity to
+  the configured id. (#940, #942)
+- **Hardened permissions — run `hal0-api` unprivileged (opt-in).** Set
+  `HAL0_USER=hal0` and the installer drops the API off root: a declarative
+  ownership table (audited read-only by `hal0 doctor perms`), a narrow
+  privileged seam (`hal0-slotctl` + a no-wildcard sudoers grant) so the
+  unprivileged API can still write per-slot units and drive `hal0-slot@*`, and
+  a codified flip (run-as drop-in + recursive chown of config + state, pruning
+  `agents/` + `secrets/` + the models dir). Slot containers stay rootful — the
+  container remains the sandbox boundary. Default `HAL0_USER=root` is
+  byte-for-byte unchanged. (#929, #943, #944, #945)
+- **Hermes owns its own config.** The runtime is unpinned with a real upgrade
+  path, and a config-set overlay replaces the whole-file `config.yaml` render —
+  Hermes owns and self-migrates its config while hal0 layers only its keys.
+  (#934, #938)
+- **Chat-template render-validation.** The template catalog is render-validated
+  so a broken template can no longer ship silently. (#917)
+
+### Changed
+- **Breaking — `hal0/primary` and `hal0/flm` virtual aliases removed.** Virtual
+  model names now map 1:1 to their resolution chains; `hal0/primary` no longer
+  resolves (use `hal0/chat`) and `hal0/flm` is gone (use `hal0/npu`). Slot-name
+  back-compat is intentionally kept, and the Hermes overlay now emits
+  `model.default: hal0/chat`. (#939)
+- **q8_0 KV cache, universally.** Main and MTP-draft KV caches are now `q8_0`
+  across slots — near-lossless and keeps fused FlashAttention on AMD HIP. (#933)
+- **Profiles** lift bench-tuned MTP config into `rocm-moe` / `rocm-dnse`. (#922)
+- **Open WebUI** disables PersistentConfig so the env prewire wins the chat
+  connection. (#927)
+- Docs mirrored from hal0-web.
+
+### Fixed
+- **Installer** — `setup --storage-dir` is passed as a separate argv token so
+  fresh `--models-dir` installs seed slots correctly (#946); the hardened-perms
+  flip chowns config + state recursively so a root→hal0 upgrade doesn't strand
+  root-owned state subdirs (#945); `hermes gateway install` runs
+  non-interactively and skips `enable` when the unit is absent (#941); a
+  lemonade-team PPA is added so the FLM/NPU `.deb` resolves on a fresh Ubuntu
+  box (#937); the registry scans the effective store / pull_root rather than
+  only declared roots (#935).
+- **Hermes gateway** marks its `EnvironmentFile` optional (`-`) so fresh
+  installs don't crash-loop on a missing secrets vault. (#936)
+- **Dependencies** — bump vulnerable deps flagged by Dependabot. (#919)
+
+## [v0.7.3-beta.2] — 2026-06-19
+
+Second beta in the 0.7.3 line. Vision lands on the chat slot, idle slots
+finally give their RAM back, and the Operator Board stops crashing on
+task creation.
+
+### Added
+- **Chat-slot vision** — mmproj sidecars are now associated with their parent
+  model in the registry, the container provider emits `--mmproj` from that
+  sidecar, and vision auto-surfaces as a capability with a per-slot toggle.
+  (#899, #900, #901)
+- **TTL-driven hard eviction** — idle slots are now unloaded after their timeout,
+  freeing resident RAM instead of merely relabelling READY→IDLE. (#902)
+- **Hermes memory authorship** — writes from Hermes are stamped with an
+  `agent:hermes` author tag. (#912)
+
+### Fixed
+- **Operator Board** no longer black-screens (React #31) when adding a task;
+  modal styling, drag-to-delete, and the agent-chat drawer are reworked, and
+  board chat now runs on the agent slot instead of the (wedged) chat slot.
+  (#905, #914, #916)
+- **Slot MTP gate** hardened on the backend and NUL bytes stripped from
+  model-modal inputs. (#918)
+- **Memory** rejects anonymous private writes (stops `private__anonymous`
+  misrouting). (#915)
+- **Memory banks grid** fills its width again, unnested from the section
+  title row. (#911)
+- **ComfyUI** reads slot logs from journald and reworks its card layout. (#909)
+
+### Changed
+- Docs mirrored from hal0-web.
+
 ## [v0.7.3-beta.1] — 2026-06-19
 
 First Beta. The dashboard becomes a full operations console — ComfyUI image

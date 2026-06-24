@@ -28,6 +28,7 @@ from hal0.config import paths
 from hal0.config.schema import (
     CURRENT_SCHEMA_VERSION,
     SEED_PROFILES,
+    SEED_STACKS,
     AgentConfig,
     Hal0Config,
     HardwareInfo,
@@ -35,6 +36,7 @@ from hal0.config.schema import (
     ProfilesConfig,
     ProvidersConfig,
     SlotConfig,
+    StacksConfig,
     UpstreamsConfig,
 )
 from hal0.errors import Hal0Error
@@ -176,9 +178,7 @@ def save_hal0_config(cfg: Hal0Config, path: Path | None = None) -> None:
     # ``exclude_none=True`` keeps tomli_w happy — None has no TOML
     # representation and tomli_w raises TypeError on it. Pydantic
     # re-supplies the default on load, so dropping None on write is
-    # safe for any field whose default is None (e.g. the ADR-0014
-    # ``memory.graph.upstream`` block when the user picks a local
-    # route).
+    # safe for any field whose default is None.
     data = cfg.model_dump(mode="python", exclude_none=True)
     write_toml_atomic(target, data)
 
@@ -445,6 +445,46 @@ def save_profiles_config(cfg: ProfilesConfig, path: Path | None = None) -> None:
               :func:`hal0.config.paths.profiles_toml`.
     """
     target = Path(path) if path is not None else paths.profiles_toml()
+    write_toml_atomic(target, cfg.model_dump(mode="python", exclude_none=True))
+
+
+# ── stacks.toml ───────────────────────────────────────────────────────────────
+
+
+def load_stacks_config(path: Path | None = None) -> StacksConfig:
+    """Load and validate /etc/hal0/stacks.toml.
+
+    Returns the built-in seed stacks (``SEED_STACKS``, empty until they ship)
+    when the file is absent, so the catalog is always well-formed on a fresh
+    install. When the file is present, only its contents are returned — seeds
+    are NOT merged in (load REPLACES, mirroring ``load_profiles_config``).
+
+    Raises:
+        ConfigParseError: If the TOML is malformed or fails validation.
+    """
+    target = path if path is not None else paths.stacks_toml()
+    if not Path(target).exists():
+        return StacksConfig.model_validate({"stack": SEED_STACKS})
+    raw = _read_toml(Path(target))
+    try:
+        return StacksConfig.model_validate(raw)
+    except Exception as exc:
+        raise ConfigParseError(
+            f"failed to validate stacks.toml at {target}: {exc}",
+            details={"path": str(target), "reason": str(exc)},
+        ) from exc
+
+
+def save_stacks_config(cfg: StacksConfig, path: Path | None = None) -> None:
+    """Atomically write the full stack catalog to stacks.toml.
+
+    The written file is the single source of truth; callers must pass the
+    COMPLETE catalog (start from ``load_stacks_config()``, then add/modify)
+    so existing stacks survive the round trip. ``exclude_none=True`` keeps
+    tomli_w from raising on optional None fields, mirroring
+    :func:`save_profiles_config`.
+    """
+    target = Path(path) if path is not None else paths.stacks_toml()
     write_toml_atomic(target, cfg.model_dump(mode="python", exclude_none=True))
 
 

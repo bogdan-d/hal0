@@ -17,6 +17,7 @@ is hermetic.
 from __future__ import annotations
 
 import asyncio
+import time
 from pathlib import Path
 
 import pytest
@@ -217,18 +218,22 @@ async def test_idle_monitor_demotes_ready_to_idle(
     container_stub: FakeContainerProvider,
 ) -> None:
     """READY slots past the idle window flip to IDLE on the next sweep."""
+    # ADR-0023: use the default-pinned `agent` anchor so stage-1 IDLE
+    # demotion is observable without stage-2 hard eviction racing it to
+    # OFFLINE (`chat` is no longer pinned and would be TTL-evicted here).
+    _write_min_slot(slot_root, "agent", port=8095)
     sm = SlotManager(idle_after_s=0.05, idle_monitor_interval_s=0.02)
-    await sm.load("chat")
+    await sm.load("agent")
     # Make sure last_used is older than idle_after_s.
-    sm._last_used["chat"] = 0.0  # epoch — definitely > 0.05s ago
+    sm._last_used["agent"] = 0.0  # epoch — definitely > 0.05s ago
     await sm.start_idle_monitor()
     try:
         # Poll for the transition.
         for _ in range(50):
-            if (await sm.status("chat")).state == SlotState.IDLE:
+            if (await sm.status("agent")).state == SlotState.IDLE:
                 break
             await asyncio.sleep(0.02)
-        assert (await sm.status("chat")).state == SlotState.IDLE
+        assert (await sm.status("agent")).state == SlotState.IDLE
     finally:
         await sm.stop_idle_monitor()
 
@@ -264,3 +269,135 @@ async def test_serving_resets_idle_clock(
         pass
     ts = sm.last_used("chat")
     assert ts is not None and ts > 0.1, "serving() must bump last_used on exit"
+
+
+# ── IDLE eviction (#902) ─────────────────────────────────────────────────────
+
+
+def _write_min_slot(
+    root: Path,
+    name: str,
+    *,
+    port: int,
+    idle_timeout_s: int | None = None,
+) -> None:
+    """Write a minimal llama-server slot TOML, optionally pinning idle_timeout_s."""
+    lines = [
+        f'name = "{name}"',
+        f"port = {port}",
+        'backend = "vulkan"',
+        'provider = "llama-server"',
+        "enabled = true",
+    ]
+    if idle_timeout_s is not None:
+        lines.append(f"idle_timeout_s = {idle_timeout_s}")
+    lines += ["[model]", 'default = "qwen3-4b-q4_k_m"', ""]
+    (root / f"{name}.toml").write_text("\n".join(lines), encoding="utf-8")
+
+
+async def test_idle_sweep_unloads_slot_past_ttl(
+    slot_root: Path,
+    container_stub: FakeContainerProvider,
+) -> None:
+    """A non-pinned slot idle past its TTL is unloaded (RAM freed), not just relabeled."""
+    _write_min_slot(slot_root, "rerank", port=8090)
+    sm = SlotManager(idle_after_s=0.0, evict_after_s=0.01, idle_monitor_interval_s=10.0)
+    await sm.load("rerank")
+    assert (await sm.status("rerank")).state == SlotState.READY
+    sm._last_used["rerank"] = 0.0  # ancient — well past the 0.01s TTL
+
+    await sm._sweep_idle_once()
+
+    assert (await sm.status("rerank")).state == SlotState.OFFLINE
+    assert any(c.get("name") == "rerank" for c in container_stub.unload_calls)
+
+
+async def test_idle_sweep_pins_slot_with_zero_timeout(
+    slot_root: Path,
+    container_stub: FakeContainerProvider,
+) -> None:
+    """idle_timeout_s = 0 pins a slot — never TTL-evicted even when long idle."""
+    _write_min_slot(slot_root, "rerank", port=8090, idle_timeout_s=0)
+    sm = SlotManager(idle_after_s=0.0, evict_after_s=0.01, idle_monitor_interval_s=10.0)
+    await sm.load("rerank")
+    sm._last_used["rerank"] = 0.0  # ancient
+
+    await sm._sweep_idle_once()
+
+    # Demoted to IDLE (stage 1) but NOT unloaded (stage 2 skipped).
+    assert (await sm.status("rerank")).state == SlotState.IDLE
+    assert not container_stub.unload_calls
+
+
+async def test_idle_sweep_does_not_evict_default_anchor(
+    slot_root: Path,
+    container_stub: FakeContainerProvider,
+) -> None:
+    """agent (the default-pinned anchor) relabels IDLE but is never evicted under default config."""
+    # ADR-0023: `agent` is the default anchor (`chat` is no longer pinned).
+    _write_min_slot(slot_root, "agent", port=8095)
+    sm = SlotManager(idle_after_s=0.0, evict_after_s=0.01, idle_monitor_interval_s=10.0)
+    await sm.load("agent")
+    sm._last_used["agent"] = 0.0  # ancient
+
+    await sm._sweep_idle_once()
+
+    assert (await sm.status("agent")).state == SlotState.IDLE
+    assert not container_stub.unload_calls
+
+
+async def test_idle_sweep_never_evicts_serving_slot(
+    slot_root: Path,
+    container_stub: FakeContainerProvider,
+) -> None:
+    """A slot with an in-flight request is never evicted mid-request."""
+    _write_min_slot(slot_root, "rerank", port=8090)
+    sm = SlotManager(idle_after_s=0.0, evict_after_s=0.01, idle_monitor_interval_s=10.0)
+    await sm.load("rerank")
+    async with sm.serving("rerank"):
+        sm._last_used["rerank"] = 0.0  # ancient, but serving_count > 0
+        await sm._sweep_idle_once()
+        assert (await sm.status("rerank")).state == SlotState.SERVING
+    assert not container_stub.unload_calls
+
+
+async def test_explicit_positive_ttl_is_honored(
+    slot_root: Path,
+    container_stub: FakeContainerProvider,
+) -> None:
+    """A per-slot idle_timeout_s overrides the global default in both directions."""
+    _write_min_slot(slot_root, "rerank", port=8090, idle_timeout_s=2)
+    # Global default is tiny, but the per-slot 2s override must win.
+    sm = SlotManager(idle_after_s=0.0, evict_after_s=0.01, idle_monitor_interval_s=10.0)
+    await sm.load("rerank")
+
+    # Idle for ~1s: under the 2s TTL → still loaded.
+    sm._last_used["rerank"] = time.time() - 1.0
+    await sm._sweep_idle_once()
+    assert (await sm.status("rerank")).state in (SlotState.READY, SlotState.IDLE)
+    assert not container_stub.unload_calls
+
+    # Idle for ~3s: past the 2s TTL → evicted.
+    sm._last_used["rerank"] = time.time() - 3.0
+    await sm._sweep_idle_once()
+    assert (await sm.status("rerank")).state == SlotState.OFFLINE
+    assert any(c.get("name") == "rerank" for c in container_stub.unload_calls)
+
+
+async def test_evicted_slot_wakes_on_next_request(
+    slot_root: Path,
+    container_stub: FakeContainerProvider,
+) -> None:
+    """An evicted slot reloads transparently when used again (wake-on-request)."""
+    _write_min_slot(slot_root, "rerank", port=8090)
+    sm = SlotManager(idle_after_s=0.0, evict_after_s=0.01, idle_monitor_interval_s=10.0)
+    await sm.load("rerank")
+    sm._last_used["rerank"] = 0.0
+    await sm._sweep_idle_once()
+    assert (await sm.status("rerank")).state == SlotState.OFFLINE
+
+    # Next request path (dispatcher wake-on-request uses start()/load()).
+    woke = await sm.start("rerank")
+    assert woke.state == SlotState.READY
+    # A fresh container load happened after the eviction unload.
+    assert sum(1 for c in container_stub.load_calls if c[0].get("name") == "rerank") == 2

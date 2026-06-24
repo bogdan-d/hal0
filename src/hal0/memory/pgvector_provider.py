@@ -28,7 +28,7 @@ class PgVectorProvider(MemoryProvider):
         self._client_id = client_id
         self._rows: list[dict[str, Any]] = []
         self._graph_enabled = False
-        self._graph_route = "upstream"
+        self._extraction_slot = "utility"
         self._rerank_enabled = False
 
     def _allowed(self, requested: str | list[str], client_id: str | None) -> list[str]:
@@ -120,7 +120,8 @@ class PgVectorProvider(MemoryProvider):
     def graph_status(self):
         return {
             "enabled": self._graph_enabled,
-            "route": self._graph_route,
+            "extraction_slot": self._extraction_slot,
+            "route": self._extraction_slot,  # deprecated mirror (ADR-0023)
             "in_flight": 0,
             "builds_ok": 0,
             "errors": 0,
@@ -128,10 +129,10 @@ class PgVectorProvider(MemoryProvider):
             "last_error": None,
         }
 
-    def set_graph_enabled(self, enabled, route=None):
+    def set_graph_enabled(self, enabled, extraction_slot=None):
         self._graph_enabled = bool(enabled)
-        if route is not None:
-            self._graph_route = route
+        if extraction_slot is not None:
+            self._extraction_slot = extraction_slot
 
     def set_rerank_enabled(self, enabled):
         self._rerank_enabled = bool(enabled)

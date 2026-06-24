@@ -45,13 +45,13 @@ clients opting into private mode at the transport layer promote to
 ``private:<client_id>``. We resolve the effective dataset in
 :func:`_resolve_dataset` so callers don't have to know the rule.
 
-Fail-fast import
-----------------
+Lazy engine import
+------------------
 
-When the ``cognee`` package is not installed (Memory-engine wave does
-that), importing :mod:`hal0.memory.cognee_wrapper` raises ImportError.
-We do the import lazily inside the dispatch helper so the module
-itself stays importable for unit tests that mock the wrapper.
+The active memory engine (Hindsight, with a PgVector boot-degrade fallback —
+ADR-0023) is resolved through :class:`hal0.memory.MemoryProvider`. We import /
+construct it lazily inside the dispatch helper so this module stays importable
+for unit tests that mock the provider.
 
 Transport
 ---------

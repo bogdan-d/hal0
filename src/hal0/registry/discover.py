@@ -95,6 +95,9 @@ class CandidateModel:
     suggested_id: str
     curated_match: CuratedModel | None
     capability_guess: str
+    # Resolved path to a multimodal projector (mmproj) GGUF sidecar that sits
+    # in the same directory, or None. Associated post-walk by find_candidates.
+    mmproj: Path | None = None
 
 
 # ── helpers ───────────────────────────────────────────────────────────────
@@ -108,6 +111,18 @@ def _normalise_id(stem: str) -> str:
     return collapsed or "model"
 
 
+# Filename tokens that mark an image/video diffusion artifact. Classifying
+# these as ``image``/``video`` (instead of defaulting to ``chat``) keeps them
+# out of the chat candidate pool that ``SlotManager._fallback_local_model``
+# draws from — the live ltx-2 incident, where a 25GB video diffusion gguf was
+# default-guessed ``chat`` and selected as the chat slot's fallback. The
+# fallback's own diffusion guard is the must-have backstop; this is defence in
+# depth at the source. Conservative: only well-known families, matched as
+# substrings of the lower-cased filename.
+_VIDEO_NAME_TOKENS = ("ltx", "wan", "hunyuan-video", "hunyuanvideo", "cogvideo", "svd")
+_IMAGE_NAME_TOKENS = ("sdxl", "flux", "stable-diffusion", "stable_diffusion")
+
+
 def _guess_capability(filename: str) -> str:
     """Best-effort capability inference from the filename."""
     lower = filename.lower()
@@ -119,6 +134,12 @@ def _guess_capability(filename: str) -> str:
         return "tts"
     if any(tok in lower for tok in ("whisper", "moonshine", "asr", "stt")):
         return "asr"
+    # Clearly-diffusion media: classify as image/video rather than the chat
+    # default so they never pollute the chat fallback pool (#940 hardening).
+    if any(tok in lower for tok in _VIDEO_NAME_TOKENS):
+        return "video"
+    if any(tok in lower for tok in _IMAGE_NAME_TOKENS):
+        return "image"
     return "chat"
 
 
@@ -129,6 +150,16 @@ def _match_curated(filename: str) -> CuratedModel | None:
         if entry.hf_file == base:
             return entry
     return None
+
+
+def _is_mmproj_sidecar(p: Path) -> bool:
+    """True for a multimodal-projector (mmproj) sidecar file.
+
+    Matched by filename rather than suffix: the real artifact is named
+    ``mmproj-F32.mmproj`` and ``.mmproj`` is not one of the configured model
+    ``file_extensions``, so an extension check would miss it.
+    """
+    return "mmproj" in p.name.lower()
 
 
 def _is_skippable(p: Path) -> bool:
@@ -164,6 +195,10 @@ def find_candidates(
     exts = {e.lower() for e in extensions}
     seen: set[Path] = set()
     out: list[CandidateModel] = []
+    # Resolved directory → resolved mmproj sidecar path. Collected during the
+    # walk and associated with sibling candidates once the walk completes, so
+    # ordering (sidecar before or after its model) doesn't matter.
+    mmproj_by_dir: dict[Path, Path] = {}
     started = time.monotonic()
     for root in roots:
         root_path = Path(root).expanduser()
@@ -186,6 +221,17 @@ def find_candidates(
                 if not candidate.is_file():
                     continue
             except OSError:
+                continue
+            # Record mmproj sidecars for association, then skip them so they
+            # never become standalone routable candidates. Done before the
+            # generic skip rule (which also drops mmproj) and before the
+            # extension check (the real sidecar's .mmproj suffix isn't listed).
+            if _is_mmproj_sidecar(candidate):
+                try:
+                    mmproj_abs = candidate.resolve()
+                except OSError:
+                    mmproj_abs = candidate
+                mmproj_by_dir.setdefault(mmproj_abs.parent, mmproj_abs)
                 continue
             if _is_skippable(candidate):
                 continue
@@ -220,6 +266,11 @@ def find_candidates(
                     capability_guess=_guess_capability(naming_source.name),
                 )
             )
+    # Associate each sidecar with sibling main models in the same directory.
+    for cand in out:
+        sidecar = mmproj_by_dir.get(cand.path.parent)
+        if sidecar is not None:
+            cand.mmproj = sidecar
     return out
 
 
@@ -248,6 +299,10 @@ def register_candidate(registry: ModelRegistry, candidate: CandidateModel) -> Mo
             capabilities=[candidate.capability_guess],
             metadata={"discovered": True, "source": "auto-scan"},
         )
+    # Carry a discovered mmproj sidecar onto the model so the llama-server
+    # provider can surface it as --mmproj. None when no sidecar was found.
+    if candidate.mmproj is not None:
+        model.mmproj = str(candidate.mmproj)
     try:
         registry.add(model)
     except ModelAlreadyExists:
@@ -256,6 +311,40 @@ def register_candidate(registry: ModelRegistry, candidate: CandidateModel) -> Mo
         # stays meaningful.
         return registry.get(model.id)
     return model
+
+
+def backfill_coordless(registry: ModelRegistry) -> list[str]:
+    """Repair existing registry rows that have empty HF coordinates.
+
+    A row auto-registered before its curated coords landed carries empty
+    ``hf_repo``/``hf_filename`` (so it classifies "unresolvable" on stack
+    import and can't be pulled by id). For each such row, match it against the
+    curated catalogue by the on-disk filename and fill in
+    ``hf_repo``/``hf_filename`` — plus ``name``/``tags`` when those are empty —
+    from the curated entry. The model id is never changed.
+
+    Returns the list of ids that were backfilled. Idempotent: a row that
+    already carries both coordinates is left untouched, so a second call is a
+    no-op.
+    """
+    repaired: list[str] = []
+    for row in registry.list():
+        if row.hf_repo and row.hf_filename:
+            continue
+        curated = _match_curated(Path(row.path).name)
+        if curated is None:
+            continue
+        registry.update(
+            row.id,
+            {
+                "hf_repo": row.hf_repo or curated.hf_repo,
+                "hf_filename": row.hf_filename or curated.hf_file,
+                "name": row.name or curated.display_name,
+                "tags": row.tags or list(curated.tags),
+            },
+        )
+        repaired.append(row.id)
+    return repaired
 
 
 def scan_and_register(registry: ModelRegistry, cfg: ModelsConfig) -> dict:
@@ -272,14 +361,28 @@ def scan_and_register(registry: ModelRegistry, cfg: ModelsConfig) -> dict:
             known_paths.add(existing.path)
         known_paths.add(existing.path)
 
+    # scan_roots() folds the effective store/pull_root into the declared roots
+    # so a headless install (where --models-dir wrote pull_root but not roots)
+    # still scans where the models actually are.
+    roots = cfg.scan_roots()
     candidates = find_candidates(
-        roots=list(cfg.roots),
+        roots=list(roots),
         extensions=list(cfg.file_extensions),
         known_paths=known_paths,
     )
 
     added: list[str] = []
     skipped: list[dict] = []
+    backfilled: list[str] = []
+
+    # Backfill pass — repair EXISTING coord-less registry rows from the curated
+    # catalogue. find_candidates() skips files already registered by path (they
+    # are in known_paths), so a row auto-registered before the curated coords
+    # landed never re-surfaces as a candidate. Match each coord-less row against
+    # curated by its on-disk filename and fill hf_repo/hf_filename/name/tags.
+    # Idempotent (a row with coords is left alone) and never changes the id.
+    backfilled.extend(backfill_coordless(registry))
+
     for cand in candidates:
         existing_id = cand.curated_match.id if cand.curated_match else cand.suggested_id
         if registry.has(existing_id):
@@ -300,8 +403,9 @@ def scan_and_register(registry: ModelRegistry, cfg: ModelsConfig) -> dict:
 
     return {
         "added": added,
+        "backfilled": backfilled,
         "skipped": skipped,
-        "scanned_roots": [str(r) for r in cfg.roots],
+        "scanned_roots": [str(r) for r in roots],
     }
 
 
@@ -314,6 +418,7 @@ def is_skippable(p: Path) -> bool:
 
 __all__ = [
     "CandidateModel",
+    "backfill_coordless",
     "find_candidates",
     "is_skippable",
     "register_candidate",

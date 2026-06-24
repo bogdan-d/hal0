@@ -809,15 +809,31 @@ def agent_upgrade(
         None, "--to", help="Pin to a specific version (power-user / compat-testing flag)."
     ),
 ) -> None:
-    """Bump the agent's version pin and re-run bootstrap with --repair."""
+    """Upgrade Hermes to the latest matching release, then reprovision.
+
+    Pulls the newest ``hermes-agent`` within the requirements floor/cap (or the
+    exact ``--to=<version>``), runs ``hermes config migrate`` so the config
+    schema matches the new build, then re-runs bootstrap to re-render hal0's
+    config keys and reconcile ownership. No hard pin blocks the update — hermes
+    owns + migrates its own config; hal0 layers its keys on top.
+    """
     if name != "hermes":
         die(f"upgrade currently only supports `hermes`; got {name!r}.")
         return
-    import os as _os
     import subprocess as _subprocess  # nosec B404 — known argv
 
-    if to:
-        _os.environ["HAL0_HERMES_VERSION_PIN"] = to
+    from hal0.agents.hermes_provision import upgrade_hermes_runtime
+
+    ok, msg = upgrade_hermes_runtime(version=to)
+    if not ok:
+        console.print(f"[red]✗[/red]  {msg}")
+        raise typer.Exit(1)
+    console.print(f"[green]✓[/green]  {msg}")
+
+    # Reprovision: re-render hal0's config keys against the new build and
+    # re-chown the venv + HERMES_HOME back to the hal0 service user (pip ran as
+    # the invoking user). bootstrap --repair is idempotent.
+    console.print("[dim]reprovisioning (config render + ownership reconcile)…[/dim]")
     rc = _subprocess.run(  # nosec B603 — known argv
         ["hal0", "agent", "bootstrap", "hermes", "--repair"],
         check=False,

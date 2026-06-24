@@ -30,6 +30,8 @@ import pytest
 
 from hal0.agents import hermes_provision as hp
 
+from ._hermes_fakes import fake_hermes_run
+
 
 @pytest.fixture
 def state_with_tmp_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> hp.BootstrapState:
@@ -496,7 +498,7 @@ def test_install_phase_skips_venv_when_binary_exists(
     # copied — it hardcoded an :8000 base_url that has no listener and
     # the composite ``hal0`` upstream in hal0.api supersedes it.
     assert not (hermes_home / "plugins" / "model-providers" / "hal0").exists()
-    assert (hermes_home / "plugins" / "memory" / "hal0-memory" / "__init__.py").is_file()
+    assert (hermes_home / "plugins" / "hal0-memory" / "__init__.py").is_file()
 
 
 def test_install_phase_runs_venv_install_when_binary_missing(
@@ -581,45 +583,63 @@ def test_resolve_primary_slot_fallback_when_no_slots() -> None:
     assert out["base_url"] == "http://127.0.0.1:8080/v1"
 
 
-def test_render_config_yaml_includes_primary_block() -> None:
-    rendered = hp._render_config_yaml(
+def _build_overlay_keys(**over):
+    """Helper: run _build_config_overlay with sane defaults → ``{key: value}``."""
+    base = dict(
         primary={
             "model_id": "qwen3:8b",
-            "backend_url": "http://127.0.0.1:8001/v1",
+            "backend_url": "http://127.0.0.1:8080/v1",
             "context_length": 16384,
         },
+        chat_slots=[],
+        delegation=None,
+        auxiliary_tasks={},
+        mcp_servers=[],
         agent_id="hermes-agent",
+        system_prompt="",
+        personality_name="",
+        live_resolve_enabled=True,
     )
-    assert '"qwen3:8b"' in rendered
-    assert '"http://127.0.0.1:8001/v1"' in rendered
-    assert 'X-hal0-Agent: "hermes-agent"' in rendered
+    base.update(over)
+    return dict(hp._build_config_overlay(**base))
+
+
+def test_overlay_includes_provider_and_identity_keys() -> None:
+    keys = _build_overlay_keys(
+        mcp_servers=[{"name": "hal0-admin", "url": "http://x/mcp", "type": "http"}],
+    )
+    assert keys["model.provider"] == "custom"
+    assert keys["mcp_servers.hal0-admin.headers.X-hal0-Agent"] == "hermes-agent"
     # ADR-0014: graph extraction defaults OFF.
-    assert "enabled: false" in rendered
-    # model.context_length must NOT be emitted — hermes treats it as a
-    # GLOBAL override that bleeds onto cloud models. Per-model context
-    # lives in custom_providers instead.
-    assert "context_length" not in rendered.split("providers:")[0]
+    assert keys["memory.graph.enabled"] is False
+    # model.context_length is NEVER set — hermes treats it as a global override
+    # that bleeds onto cloud models.
+    assert "model.context_length" not in keys
 
 
-def test_render_config_yaml_no_primary_emits_safe_placeholder() -> None:
-    rendered = hp._render_config_yaml(primary=None, agent_id="hermes-agent")
-    assert 'default: ""' in rendered
-    # Placeholder URL points at hal0-api (8080/v1) — historically this
-    # was a phantom 8000 with no daemon behind it.
-    assert "127.0.0.1:8080/v1" in rendered
-
-
-def test_render_config_yaml_chat_slots_become_aliases() -> None:
-    rendered = hp._render_config_yaml(
-        primary={"model_id": "p", "backend_url": "u", "context_length": 8000},
-        chat_slots=[
-            {"alias": "coder", "model_id": "qwen-coder", "backend_url": "http://x"},
-        ],
-        agent_id="hermes-agent",
+def test_overlay_no_primary_under_live_resolve_uses_virtual() -> None:
+    # No ready slot → _resolve_primary_slot hands a placeholder primary, but
+    # under live-resolve the overlay still points at the hal0/chat virtual
+    # against the gateway (not a dead default).
+    keys = _build_overlay_keys(
+        primary={
+            "model_id": "primary",
+            "backend_url": "http://127.0.0.1:8080/v1",
+            "context_length": 32768,
+        },
     )
-    assert "model_aliases:" in rendered
-    assert "coder:" in rendered
-    assert '"qwen-coder"' in rendered
+    # ADR-0023: the canonical default virtual is hal0/agent (was hal0/chat).
+    assert keys["model.default"] == "hal0/agent"
+    assert "127.0.0.1:8080/v1" in keys["model.base_url"]
+
+
+def test_overlay_chat_slots_become_aliases() -> None:
+    keys = _build_overlay_keys(
+        chat_slots=[{"alias": "coder", "model_id": "qwen-coder", "backend_url": "http://x"}],
+    )
+    assert keys["model_aliases.coder.model"] == "qwen-coder"
+    assert keys["model_aliases.coder.provider"] == "custom"
+    assert keys["model_aliases.coder.base_url"] == "http://x"
 
 
 # ── feat/hermes-role-slots: per-model context via custom_providers ───────────
@@ -658,87 +678,10 @@ def test_collect_chat_slots_carries_context_length() -> None:
     assert by_model == {"m1": 65536, "m2": 8192, "m3": None}
 
 
-def test_resolve_custom_providers_keys_by_model_id() -> None:
-    chat_slots = [
-        {"alias": "primary", "model_id": "qwen3-coder", "context_length": 65536},
-        {"alias": "agent-hermes", "model_id": "hermes-4-14b", "context_length": 65536},
-        {"alias": "utility", "model_id": "qwen3-zero", "context_length": 32768},
-    ]
-    cp = hp._resolve_custom_providers(chat_slots, hal0_base_url="http://127.0.0.1:8080/v1")
-    assert cp == [
-        {
-            "name": "hal0",
-            "base_url": "http://127.0.0.1:8080/v1",
-            "models": {
-                "qwen3-coder": {"context_length": 65536},
-                "hermes-4-14b": {"context_length": 65536},
-                "qwen3-zero": {"context_length": 32768},
-            },
-        }
-    ]
-
-
-def test_resolve_custom_providers_omits_slots_without_context() -> None:
-    chat_slots = [
-        {"alias": "primary", "model_id": "m1", "context_length": 40000},
-        {"alias": "utility", "model_id": "m2", "context_length": None},
-    ]
-    cp = hp._resolve_custom_providers(chat_slots, hal0_base_url="http://127.0.0.1:8080/v1")
-    assert list(cp[0]["models"]) == ["m1"]
-
-
-def test_resolve_custom_providers_none_when_nothing_resolves() -> None:
-    assert hp._resolve_custom_providers([], hal0_base_url="http://127.0.0.1:8080/v1") is None
-    chat_slots = [{"alias": "primary", "model_id": "m1", "context_length": None}]
-    assert hp._resolve_custom_providers(chat_slots, hal0_base_url="http://x/v1") is None
-
-
-def test_render_config_yaml_emits_custom_providers_block() -> None:
-    yaml = pytest.importorskip("yaml")
-    chat_slots = [
-        {
-            "alias": "primary",
-            "model_id": "qwen3-coder-next-reap-40b-a3b-q4kxl",
-            "backend_url": "http://127.0.0.1:8080/v1",
-            "context_length": 65536,
-        },
-        {
-            "alias": "agent-hermes",
-            "model_id": "hermes-4-14b-q5km",
-            "backend_url": "http://127.0.0.1:8080/v1",
-            "context_length": 65536,
-        },
-    ]
-    cp = hp._resolve_custom_providers(chat_slots, hal0_base_url="http://127.0.0.1:8080/v1")
-    rendered = hp._render_config_yaml(
-        primary={
-            "model_id": "qwen3-coder-next-reap-40b-a3b-q4kxl",
-            "backend_url": "http://127.0.0.1:8080/v1",
-            "context_length": 65536,
-        },
-        chat_slots=chat_slots,
-        agent_id="hermes-agent",
-        custom_providers=cp,
-    )
-    cfg = yaml.safe_load(rendered)
-    # No global model.context_length override.
-    assert "context_length" not in cfg["model"]
-    # Per-model context, keyed by MODEL ID (not alias), under the gateway.
-    assert cfg["custom_providers"] == [
-        {
-            "name": "hal0",
-            "base_url": "http://127.0.0.1:8080/v1",
-            "models": {
-                "qwen3-coder-next-reap-40b-a3b-q4kxl": {"context_length": 65536},
-                "hermes-4-14b-q5km": {"context_length": 65536},
-            },
-        }
-    ]
-
-
-def test_render_config_yaml_omits_custom_providers_when_none() -> None:
-    rendered = hp._render_config_yaml(primary=None, agent_id="hermes-agent")
-    assert "custom_providers:" not in rendered
+# custom_providers (per-model context_length block) was dropped in the
+# config-set redesign: it is a YAML LIST that `hermes config set` can't
+# express, and under live-resolve + discover_models hal0-api's /v1/models
+# already serves per-model context_length. Its tests were removed with it.
 
 
 # ── feat/hermes-role-slots: delegation + auxiliary role→slot wiring ──────────
@@ -841,64 +784,35 @@ def test_resolve_auxiliary_tasks_routes_to_npu_virtual_when_utility_on_npu() -> 
         assert aux[task] == {"provider": "main", "model": "", "base_url": ""}
 
 
-def test_render_config_yaml_emits_delegation_and_auxiliary_blocks() -> None:
-    yaml = pytest.importorskip("yaml")
+def test_overlay_emits_delegation_and_auxiliary_keys() -> None:
     deleg = hp._resolve_delegation(_ROLE_SLOTS, hal0_base_url=_HAL0_V1)
     aux = hp._resolve_auxiliary_tasks(_ROLE_SLOTS, hal0_base_url=_HAL0_V1)
-    rendered = hp._render_config_yaml(
-        primary={
-            "model_id": "qwen3-coder-next-reap-40b-a3b-q4kxl",
-            "backend_url": _HAL0_V1,
-            "context_length": 32768,
-        },
+    keys = _build_overlay_keys(
+        primary={"model_id": "chat-m", "backend_url": _HAL0_V1, "context_length": 32768},
         chat_slots=hp._collect_chat_slots(_ROLE_SLOTS),
-        agent_id="hermes-agent",
         delegation=deleg,
         auxiliary_tasks=aux,
     )
-    cfg = yaml.safe_load(rendered)
-    # delegation block → agent slot model at the hal0 /v1 endpoint.
-    assert cfg["delegation"] == {
-        "model": "hermes-4-14b-q5km",
-        "provider": "custom",
-        "base_url": _HAL0_V1,
-    }
+    # delegation → agent slot model at the hal0 /v1 endpoint.
+    assert keys["delegation.model"] == "hermes-4-14b-q5km"
+    assert keys["delegation.provider"] == "custom"
+    assert keys["delegation.base_url"] == _HAL0_V1
     # auxiliary compaction/search/title → utility model at hal0 /v1.
-    assert cfg["auxiliary"]["compression"] == {
-        "provider": "custom",
-        "model": "qwen3-zero-coder-v2-0.8b-f16",
-        "base_url": _HAL0_V1,
-    }
-    assert cfg["auxiliary"]["session_search"]["model"] == "qwen3-zero-coder-v2-0.8b-f16"
-    assert cfg["auxiliary"]["title_generation"]["base_url"] == _HAL0_V1
-    assert cfg["auxiliary"]["vision"]["provider"] == "main"
+    assert keys["auxiliary.compression.provider"] == "custom"
+    assert keys["auxiliary.compression.model"] == "qwen3-zero-coder-v2-0.8b-f16"
+    assert keys["auxiliary.compression.base_url"] == _HAL0_V1
+    assert keys["auxiliary.session_search.model"] == "qwen3-zero-coder-v2-0.8b-f16"
+    # vision stays on the main chat provider (no base_url key emitted).
+    assert keys["auxiliary.vision.provider"] == "main"
+    assert "auxiliary.vision.base_url" not in keys
 
 
-def test_render_config_yaml_omits_delegation_when_slot_missing() -> None:
-    yaml = pytest.importorskip("yaml")
+def test_overlay_omits_delegation_when_slot_missing() -> None:
     aux = hp._resolve_auxiliary_tasks(_ROLE_SLOTS[:1], hal0_base_url=_HAL0_V1)
-    rendered = hp._render_config_yaml(
-        primary={"model_id": "p", "backend_url": _HAL0_V1, "context_length": 8000},
-        delegation=None,
-        auxiliary_tasks=aux,
-        agent_id="hermes-agent",
-    )
-    assert "delegation:" not in rendered
-    cfg = yaml.safe_load(rendered)
+    keys = _build_overlay_keys(delegation=None, auxiliary_tasks=aux)
+    assert not any(k.startswith("delegation.") for k in keys)
     # No utility slot → aux compaction group falls back to provider:"main".
-    assert cfg["auxiliary"]["compression"]["provider"] == "main"
-
-
-def test_render_config_yaml_default_auxiliary_is_all_main() -> None:
-    # Callers that don't pass auxiliary_tasks keep the pre-role-slots shape:
-    # every task on provider:"main", no delegation block.
-    yaml = pytest.importorskip("yaml")
-    rendered = hp._render_config_yaml(primary=None, agent_id="hermes-agent")
-    cfg = yaml.safe_load(rendered)
-    assert "delegation" not in cfg
-    assert {"vision", "web_extract", "compression", "session_search"} <= set(cfg["auxiliary"])
-    for task_cfg in cfg["auxiliary"].values():
-        assert task_cfg["provider"] == "main"
+    assert keys["auxiliary.compression.provider"] == "main"
 
 
 def test_config_write_renders_role_slots_from_live_state(
@@ -919,7 +833,11 @@ def test_config_write_renders_role_slots_from_live_state(
     from hal0.agents import personas as _personas
 
     monkeypatch.setattr(_personas, "PERSONAS_ROOT", tmp_path / "personas-empty")
-    io = hp.PhaseIO(fetch_slots=lambda: list(_ROLE_SLOTS), fetch_model_contexts=lambda: {})
+    io = hp.PhaseIO(
+        fetch_slots=lambda: list(_ROLE_SLOTS),
+        fetch_model_contexts=lambda: {},
+        run=fake_hermes_run(),
+    )
     out = hp._phase_config_write(hp.context_for("config_write", state, io=io))
     assert out.status == hp.PhaseStatus.OK
     assert out.details["delegation_model"] == "hermes-4-14b-q5km"
@@ -928,20 +846,13 @@ def test_config_write_renders_role_slots_from_live_state(
     assert cfg["delegation"]["model"] == "hermes-4-14b-q5km"
     assert cfg["delegation"]["base_url"] == _HAL0_V1
     assert cfg["auxiliary"]["compression"]["model"] == "qwen3-zero-coder-v2-0.8b-f16"
-    # No global model.context_length override; per-model context comes via
-    # custom_providers keyed by model_id under the gateway.
+    # No global model.context_length override (per-model context comes from
+    # live /v1/models discovery now, not a custom_providers block).
     assert "context_length" not in cfg["model"]
-    assert cfg["custom_providers"] == [
-        {
-            "name": "hal0",
-            "base_url": _HAL0_V1,
-            "models": {
-                "qwen3-coder-next-reap-40b-a3b-q4kxl": {"context_length": 32768},
-                "hermes-4-14b-q5km": {"context_length": 65536},
-                "qwen3-zero-coder-v2-0.8b-f16": {"context_length": 16384},
-            },
-        }
-    ]
+    assert "custom_providers" not in cfg
+    # The two irreducible list keys land via the targeted YAML merge.
+    assert cfg["skills"]["external_dirs"] == hp.SKILLS_EXTERNAL_DIRS
+    assert cfg["hooks"]["on_session_start"] == [hp.SESSION_START_HOOK]
 
 
 # ── #661/#635: reasoning wiring — chat slot + display flags ──────────────────
@@ -961,94 +872,42 @@ def test_config_write_renders_role_slots_from_live_state(
 # thinking-off by design.
 
 
-def test_rendered_config_has_show_reasoning_true() -> None:
-    """display.show_reasoning: true is required for thinking-model TUI visibility."""
-    yaml = pytest.importorskip("yaml")
-    rendered = hp._render_config_yaml(
-        primary={
-            "model_id": "qwen3-coder-next-reap-40b-a3b-q4kxl",
-            "backend_url": _HAL0_V1,
-            "context_length": 32768,
-        },
-        agent_id="hermes-agent",
+def test_overlay_has_show_reasoning_true() -> None:
+    """display.show_reasoning: true is required for thinking-model TUI visibility
+    (#635 gotcha: without it, reasoning output is silently suppressed)."""
+    keys = _build_overlay_keys()
+    assert keys["display.show_reasoning"] is True
+
+
+def test_overlay_has_streaming_true() -> None:
+    """display.streaming: true is required alongside show_reasoning — without it
+    the TUI hangs on the <think> block waiting for the full response (#635)."""
+    keys = _build_overlay_keys()
+    assert keys["display.streaming"] is True
+
+
+def test_overlay_has_model_max_tokens() -> None:
+    """model.max_tokens must be a positive int — Qwen3 thinking models silently
+    drain the budget in <think> and return empty content otherwise (#635)."""
+    keys = _build_overlay_keys()
+    max_tokens = keys["model.max_tokens"]
+    assert isinstance(max_tokens, int) and max_tokens > 0
+
+
+def test_overlay_model_base_url_set() -> None:
+    """model.base_url is always set. Hermes's bare ``provider: custom`` requires
+    it or it falls back to OpenRouter and 400s '... is not a valid model ID'
+    (#635, memory hermes_bare_custom_needs_model_base_url). Under live-resolve
+    the no-slot fallback still points at the gateway."""
+    keys = _build_overlay_keys(
+        primary={"model_id": "qwen3-27b", "backend_url": _HAL0_V1, "context_length": 32768},
     )
-    cfg = yaml.safe_load(rendered)
-    display = cfg.get("display") or {}
-    assert display.get("show_reasoning") is True, (
-        "display.show_reasoning must be true for Qwen3 thinking visibility "
-        "(#635 gotcha: without it, reasoning output is silently suppressed)"
+    assert keys["model.base_url"]
+    # No-slot fallback (placeholder primary) still wires the gateway.
+    fb = _build_overlay_keys(
+        primary={"model_id": "primary", "backend_url": _HAL0_V1, "context_length": 32768},
     )
-
-
-def test_rendered_config_has_streaming_true() -> None:
-    """display.streaming: true is required alongside show_reasoning for thinking models.
-
-    Without streaming, the TUI hangs on the <think> block while waiting for
-    the full response before displaying anything (#635 + memory note).
-    """
-    yaml = pytest.importorskip("yaml")
-    rendered = hp._render_config_yaml(
-        primary={
-            "model_id": "qwen3-coder-next-reap-40b-a3b-q4kxl",
-            "backend_url": _HAL0_V1,
-            "context_length": 32768,
-        },
-        agent_id="hermes-agent",
-    )
-    cfg = yaml.safe_load(rendered)
-    display = cfg.get("display") or {}
-    assert display.get("streaming") is True, (
-        "display.streaming must be true for thinking models (#635 gotcha: "
-        "without streaming, the TUI hangs silently on the <think> block)"
-    )
-
-
-def test_rendered_config_has_model_max_tokens() -> None:
-    """model.max_tokens is required to prevent silent TUI on Qwen3 thinking models.
-
-    Without a max_tokens cap, Qwen3 can exhaust the budget in <think> and
-    return an empty content field — which looks like a broken wiring even
-    when everything else is correct (#635 + smoke-test timeout comment in
-    _smoke_chat_roundtrip).
-    """
-    yaml = pytest.importorskip("yaml")
-    rendered = hp._render_config_yaml(
-        primary={
-            "model_id": "qwen3-coder-next-reap-40b-a3b-q4kxl",
-            "backend_url": _HAL0_V1,
-            "context_length": 32768,
-        },
-        agent_id="hermes-agent",
-    )
-    cfg = yaml.safe_load(rendered)
-    model_cfg = cfg.get("model") or {}
-    max_tokens = model_cfg.get("max_tokens")
-    assert isinstance(max_tokens, int) and max_tokens > 0, (
-        "model.max_tokens must be a positive integer — "
-        "Qwen3 thinking models silently drain the budget otherwise (#635)"
-    )
-
-
-def test_rendered_config_model_base_url_set() -> None:
-    """model.base_url is always present in the rendered config.
-
-    Hermes's bare ``provider: custom`` requires model.base_url to be set
-    or it falls back to OpenRouter and emits '... is not a valid model ID' 400
-    (#635 gotcha, also tracked in memory hermes_bare_custom_needs_model_base_url).
-    """
-    yaml = pytest.importorskip("yaml")
-    # Verify both the primary-slot branch and the no-slot fallback branch.
-    for primary in [
-        {"model_id": "qwen3-27b", "backend_url": _HAL0_V1, "context_length": 32768},
-        None,
-    ]:
-        rendered = hp._render_config_yaml(primary=primary, agent_id="hermes-agent")
-        cfg = yaml.safe_load(rendered)
-        model_cfg = cfg.get("model") or {}
-        assert model_cfg.get("base_url"), (
-            f"model.base_url must be set (primary={primary!r}) — "
-            "bare provider:custom without base_url routes to OpenRouter"
-        )
+    assert fb["model.base_url"]
 
 
 def test_delegation_targets_agent_slot_not_chat() -> None:
@@ -1091,15 +950,17 @@ def test_config_write_phase_writes_yaml_idempotently(
     from hal0.agents import personas as _personas
 
     monkeypatch.setattr(_personas, "PERSONAS_ROOT", tmp_path / "personas-empty")
-    io = hp.PhaseIO(fetch_slots=lambda: [], fetch_model_contexts=lambda: {})
+    io = hp.PhaseIO(fetch_slots=lambda: [], fetch_model_contexts=lambda: {}, run=fake_hermes_run())
     out1 = hp._phase_config_write(hp.context_for("config_write", state, io=io))
     assert out1.status == hp.PhaseStatus.OK
     cfg = Path(out1.details["config_path"])
     assert cfg.exists()
     first_hash = out1.hash
-    # Re-run is a no-op (hash equals on-disk).
+    # Re-run is idempotent: config set re-writes the same values + the YAML
+    # merge is a no-op, so the on-disk file (and its hash) is unchanged.
     out2 = hp._phase_config_write(hp.context_for("config_write", state, io=io))
-    assert out2.details.get("unchanged") is True
+    assert out2.status == hp.PhaseStatus.OK
+    assert out2.details["list_merge_changed"] is False
     assert out2.hash == first_hash
 
 
@@ -1118,7 +979,7 @@ def test_config_write_phase_applies_overrides(
     from hal0.agents import personas as _personas
 
     monkeypatch.setattr(_personas, "PERSONAS_ROOT", tmp_path / "personas-empty")
-    io = hp.PhaseIO(fetch_slots=lambda: [], fetch_model_contexts=lambda: {})
+    io = hp.PhaseIO(fetch_slots=lambda: [], fetch_model_contexts=lambda: {}, run=fake_hermes_run())
     out = hp._phase_config_write(hp.context_for("config_write", state, io=io))
     assert out.status == hp.PhaseStatus.OK
     cfg = Path(out.details["config_path"]).read_text()
@@ -1139,7 +1000,7 @@ def test_config_write_records_fallbacks_for_placeholder_primary_and_default_mcp(
     from hal0.agents import personas as _personas
 
     monkeypatch.setattr(_personas, "PERSONAS_ROOT", tmp_path / "personas-empty")
-    io = hp.PhaseIO(fetch_slots=lambda: [], fetch_model_contexts=lambda: {})
+    io = hp.PhaseIO(fetch_slots=lambda: [], fetch_model_contexts=lambda: {}, run=fake_hermes_run())
     out = hp._phase_config_write(hp.context_for("config_write", state, io=io))
     assert out.status == hp.PhaseStatus.OK
     sites = {f["site"] for f in out.details["fallbacks"]}
@@ -1159,7 +1020,11 @@ def test_config_write_records_no_fallbacks_when_inputs_live(
     from hal0.agents import personas as _personas
 
     monkeypatch.setattr(_personas, "PERSONAS_ROOT", tmp_path / "personas-empty")
-    io = hp.PhaseIO(fetch_slots=lambda: list(_ROLE_SLOTS), fetch_model_contexts=lambda: {})
+    io = hp.PhaseIO(
+        fetch_slots=lambda: list(_ROLE_SLOTS),
+        fetch_model_contexts=lambda: {},
+        run=fake_hermes_run(),
+    )
     out = hp._phase_config_write(hp.context_for("config_write", state, io=io))
     assert out.status == hp.PhaseStatus.OK
     assert out.details["fallbacks"] == []
@@ -1206,13 +1071,15 @@ def test_legacy_hal0_profile_plugin_removed() -> None:
 
 def test_hal0_memory_provider_plugin_file_present() -> None:
     repo_root = hp.REPO_ROOT_FOR_INSTALLER
-    src = repo_root / "installer" / "agents" / "hermes" / "plugins" / "hal0-memory" / "__init__.py"
-    body = src.read_text()
+    plugin_dir = repo_root / "installer" / "agents" / "hermes" / "plugins" / "hal0-memory"
+    # The plugin is a package (__init__ re-export + register, provider.py,
+    # _client.py); read the combined source so lifecycle methods (defined in
+    # provider.py) are found.
+    body = "\n".join(p.read_text() for p in sorted(plugin_dir.glob("*.py")))
     assert "Hal0MemoryProvider" in body
     assert "MemoryProvider" in body
-    # ADR-0014: graph defaults OFF; ADR-0013-aware namespace.
-    assert "graph" in body
-    assert "private:" in body or "private:hermes-agent" in body
+    assert "register" in body  # entry point; graph forwarding is server-side now (ADR-0023)
+    assert "private:" in body
     # Lifecycle methods upstream calls.
     for method in ("system_prompt_block", "prefetch", "sync_turn"):
         assert method in body
@@ -1329,9 +1196,7 @@ def test_namespace_register_refreshes_existing_card(
         if name == "memory_search":
             return {
                 "ok": True,
-                "result": {
-                    "items": [{"id": "old_mem_id", "metadata": {"agent_id": "hermes-agent"}}]
-                },
+                "result": {"items": [{"id": "old_mem_id", "metadata": {"agent_id": "hermes"}}]},
             }
         if name == "memory_delete":
             return {"ok": True, "result": {"deleted": 1}}
@@ -1509,13 +1374,7 @@ def test_model_automap_writes_aliases_from_chat_slots(
     hermes_home.mkdir()
     state = hp.BootstrapState(hermes_home=str(hermes_home))
     # Pre-render config.yaml so model_automap has something to rewrite.
-    (hermes_home / "config.yaml").write_text(
-        hp._render_config_yaml(
-            primary={"model_id": "p", "backend_url": "u", "context_length": 8000},
-            agent_id="hermes-agent",
-        ),
-        encoding="utf-8",
-    )
+    (hermes_home / "config.yaml").write_text("model:\n  default: p\n", encoding="utf-8")
     monkeypatch.setattr(hp, "OVERRIDES_PATH", tmp_path / "no.yaml")
     # PR-1-bundle: real ``/api/slots`` payload uses ``type=="llm"`` for
     # chat slots, NOT ``capability=="chat"``. The pre-fix filter looked
@@ -1539,6 +1398,7 @@ def test_model_automap_writes_aliases_from_chat_slots(
             },
         ],
         fetch_model_contexts=lambda: {},
+        run=fake_hermes_run(),
     )
     monkeypatch.setattr(
         hp,
@@ -1550,7 +1410,7 @@ def test_model_automap_writes_aliases_from_chat_slots(
     rendered = (hermes_home / "config.yaml").read_text()
     assert "coder" in out.details["aliases_written"]
     assert "primary" in out.details["aliases_written"]
-    # YAML body actually carries the aliases.
+    # config set wrote the model_aliases.* keys into the config.
     assert "qwen-coder" in rendered
 
 
@@ -1560,15 +1420,9 @@ def test_model_automap_idempotent_hash_skip(
     hermes_home = tmp_path / "hh"
     hermes_home.mkdir()
     state = hp.BootstrapState(hermes_home=str(hermes_home))
-    (hermes_home / "config.yaml").write_text(
-        hp._render_config_yaml(
-            primary={"model_id": "p", "backend_url": "u", "context_length": 8000},
-            agent_id="hermes-agent",
-        ),
-        encoding="utf-8",
-    )
+    (hermes_home / "config.yaml").write_text("model:\n  default: p\n", encoding="utf-8")
     monkeypatch.setattr(hp, "OVERRIDES_PATH", tmp_path / "no.yaml")
-    io = hp.PhaseIO(fetch_slots=lambda: [], fetch_model_contexts=lambda: {})
+    io = hp.PhaseIO(fetch_slots=lambda: [], fetch_model_contexts=lambda: {}, run=fake_hermes_run())
     monkeypatch.setattr(
         hp,
         "_resolve_primary_slot",
@@ -1576,9 +1430,9 @@ def test_model_automap_idempotent_hash_skip(
     )
     out1 = hp._phase_model_automap(hp.context_for("model_automap", state, io=io))
     out2 = hp._phase_model_automap(hp.context_for("model_automap", state, io=io))
-    # First run rewrites (or doesn't, if already canonical); second run
-    # observes hash equality and marks unchanged.
-    assert out2.details.get("unchanged") is True
+    # config set is idempotent: re-applying the same keys leaves a byte-identical
+    # config, so both runs report the same content hash.
+    assert out1.status == hp.PhaseStatus.OK
     assert out1.hash == out2.hash
 
 
@@ -1589,6 +1443,179 @@ def test_voice_wire_skips_when_no_voice_slot(
     io = hp.PhaseIO(fetch_slots=lambda: [])
     out = hp._phase_voice_wire(hp.context_for("voice_wire", state, io=io))
     assert out.status == hp.PhaseStatus.SKIP
+
+
+def test_voice_wire_finds_local_tts_and_transcription_slots(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: _find_slot used _slot_kind which read 'kind' before 'type'.
+
+    Real /api/slots sets kind='local' (deployment shape) on all local slots,
+    so _slot_kind returned 'local' instead of 'tts'/'transcription'.  voice_wire
+    always skipped with 'no stt/tts slots ready', never writing the env vars.
+    """
+    hermes_home = tmp_path / "hh"
+    hermes_home.mkdir()
+    secrets_env = tmp_path / "hermes.env"
+    monkeypatch.setattr(hp, "HERMES_SECRETS_ENV", secrets_env)
+    monkeypatch.setattr(hp, "OVERRIDES_PATH", tmp_path / "no.yaml")
+    (hermes_home / "config.yaml").write_text("model:\n  default: primary\n", encoding="utf-8")
+    tts_url = "http://127.0.0.1:8084/v1"
+    stt_url = "http://127.0.0.1:8088/v1"
+    # Both slots have kind='local' (the local-vs-remote deployment field) AND
+    # the functional type field.  Before the fix, _slot_kind returned 'local'
+    # for both, so _find_slot(slots, 'tts') and _find_slot(slots, 'stt')
+    # always returned None and voice_wire always skipped.
+    slots = [
+        {
+            "name": "kokoro",
+            "type": "tts",
+            "kind": "local",
+            "state": "ready",
+            "backend_url": tts_url,
+        },
+        {
+            "name": "whisper",
+            "type": "transcription",
+            "kind": "local",
+            "state": "ready",
+            "backend_url": stt_url,
+        },
+    ]
+    state = hp.BootstrapState(hermes_home=str(hermes_home))
+    io = hp.PhaseIO(
+        fetch_slots=lambda: slots,
+        fetch_model_contexts=lambda: {},
+    )
+    out = hp._phase_voice_wire(hp.context_for("voice_wire", state, io=io))
+    assert out.status == hp.PhaseStatus.OK, (
+        f"expected OK but got {out.status!r}: {out.reason!r} — "
+        "voice_wire skipped local tts/transcription slots (kind='local' bug)"
+    )
+    env_text = secrets_env.read_text()
+    assert f"TTS_OPENAI_BASE_URL={tts_url}" in env_text, (
+        f"TTS URL not written to secrets env. env contents:\n{env_text}"
+    )
+    assert f"STT_OPENAI_BASE_URL={stt_url}" in env_text, (
+        f"STT URL not written to secrets env. env contents:\n{env_text}"
+    )
+
+
+def test_voice_wire_provisions_stt_for_npu_trio_facade(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: NPU-trio stt facade (type=transcription, state=offline, served_by=anchor)
+    was rejected by _find_slot because _is_ready checks state and 'offline' is not in the
+    ready set. The facade has no unit of its own — the npu anchor's FLM child serves it.
+    Fix: _find_slot should accept the facade when its named anchor is ready.
+    """
+    hermes_home = tmp_path / "hh"
+    hermes_home.mkdir()
+    secrets_env = tmp_path / "hermes.env"
+    monkeypatch.setattr(hp, "HERMES_SECRETS_ENV", secrets_env)
+    monkeypatch.setattr(hp, "OVERRIDES_PATH", tmp_path / "no.yaml")
+    (hermes_home / "config.yaml").write_text("model:\n  default: primary\n", encoding="utf-8")
+    tts_url = "http://127.0.0.1:8084/v1"
+    # NPU trio: anchor (llm, ready) + stt facade (transcription, offline, served_by anchor)
+    # The facade mirrors live container_enrichment output: served_by is the anchor name.
+    slots = [
+        {
+            "name": "kokoro",
+            "type": "tts",
+            "kind": "local",
+            "state": "ready",
+            "backend_url": tts_url,
+        },
+        {
+            "name": "npu",
+            "type": "llm",
+            "kind": "local",
+            "state": "ready",
+        },
+        {
+            "name": "stt",
+            "type": "transcription",
+            "kind": "local",
+            "state": "offline",  # facade has no unit; routes through npu anchor
+            "served_by": "npu",
+        },
+    ]
+    state = hp.BootstrapState(hermes_home=str(hermes_home))
+    io = hp.PhaseIO(
+        fetch_slots=lambda: slots,
+        fetch_model_contexts=lambda: {},
+    )
+    out = hp._phase_voice_wire(hp.context_for("voice_wire", state, io=io))
+    assert out.status == hp.PhaseStatus.OK, (
+        f"expected OK but got {out.status!r}: {out.reason!r} — "
+        "voice_wire skipped NPU-trio stt facade (offline state bug)"
+    )
+    env_text = secrets_env.read_text()
+    assert f"TTS_OPENAI_BASE_URL={tts_url}" in env_text
+    assert "STT_OPENAI_BASE_URL=" in env_text, (
+        f"STT URL not written to secrets env. env contents:\n{env_text}"
+    )
+    # The facade has no explicit backend_url, so _slot_backend_url falls back
+    # to the default HAL0 API gateway — voice clients send STT there, which
+    # routes to the NPU trio.
+    assert f"STT_OPENAI_BASE_URL={hp._DEFAULT_PRIMARY_BACKEND_URL}" in env_text, (
+        f"STT URL incorrect. env contents:\n{env_text}"
+    )
+
+
+def test_voice_wire_does_not_provision_stt_when_npu_anchor_is_not_ready(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Safety: stt facade served_by an offline anchor must NOT write STT_OPENAI_BASE_URL.
+
+    The secondary _find_slot pass should only accept a facade when its named
+    anchor is _is_ready — if the anchor is offline/error/starting the facade
+    has no live backend and voice_wire must not point voice clients at it.
+    TTS may still be written (independent slot), or SKIP if neither is ready.
+    """
+    hermes_home = tmp_path / "hh"
+    hermes_home.mkdir()
+    secrets_env = tmp_path / "hermes.env"
+    monkeypatch.setattr(hp, "HERMES_SECRETS_ENV", secrets_env)
+    monkeypatch.setattr(hp, "OVERRIDES_PATH", tmp_path / "no.yaml")
+    (hermes_home / "config.yaml").write_text("model:\n  default: primary\n", encoding="utf-8")
+    tts_url = "http://127.0.0.1:8084/v1"
+    # NPU anchor is offline — facade must not be accepted.
+    slots = [
+        {
+            "name": "kokoro",
+            "type": "tts",
+            "kind": "local",
+            "state": "ready",
+            "backend_url": tts_url,
+        },
+        {
+            "name": "npu",
+            "type": "llm",
+            "kind": "local",
+            "state": "offline",  # anchor is not ready
+        },
+        {
+            "name": "stt",
+            "type": "transcription",
+            "kind": "local",
+            "state": "offline",
+            "served_by": "npu",
+        },
+    ]
+    state = hp.BootstrapState(hermes_home=str(hermes_home))
+    io = hp.PhaseIO(
+        fetch_slots=lambda: slots,
+        fetch_model_contexts=lambda: {},
+    )
+    out = hp._phase_voice_wire(hp.context_for("voice_wire", state, io=io))
+    # TTS is ready so we get OK (not SKIP), but STT must be absent.
+    assert out.status in (hp.PhaseStatus.OK, hp.PhaseStatus.SKIP)
+    if secrets_env.exists():
+        env_text = secrets_env.read_text()
+        assert "STT_OPENAI_BASE_URL=" not in env_text, (
+            f"STT URL must not be written when anchor is offline. env:\n{env_text}"
+        )
 
 
 # ── #246 phase impls — smoke_tests + self_report ────────────────────────────
@@ -1726,7 +1753,9 @@ def test_gateway_secrets_wire_writes_dropin(
     assert out.status == hp.PhaseStatus.OK
     assert dropin_file.exists()
     body = dropin_file.read_text(encoding="utf-8")
-    assert "EnvironmentFile=/var/lib/hal0/secrets/agents/hermes.env" in body
+    # Optional (`-`): a missing vault on a fresh install must not hard-fail the
+    # unit (matches hal0-agent@.service's EnvironmentFile=-).
+    assert "EnvironmentFile=-/var/lib/hal0/secrets/agents/hermes.env" in body
     assert "[Service]" in body
     # Mode 0o644 — NOT 0o600, which would block systemd from reading the
     # unit fragment. The secrets themselves are in the 0600 vault.

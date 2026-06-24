@@ -38,6 +38,7 @@ from hal0.updater.updater import (
     _atomic_symlink_swap,
     _cosign_skip,
     _current_symlink,
+    _is_newer,
     _is_pre_release,
     _parse_manifest,
     _previous_record,
@@ -849,3 +850,29 @@ def test_version_tuple_timestamp_nightly_beats_date_only_same_base() -> None:
     """
     assert _version_tuple("0.5.1-nightly.20260615120000") > _version_tuple("0.5.1-nightly.20260615")
     assert _version_tuple("0.5.1-nightly.20260615") > _version_tuple("0.5.0-nightly.20260615")
+
+
+# ── _is_newer — PEP 440 comparison (regression for the 0.8.0b3→0.8.1-beta.1 miss) ──
+
+
+def test_is_newer_beta_across_patch_boundary() -> None:
+    """Regression: a pip-normalised beta (``0.8.0b3``) must order *below* the next
+    patch's beta in tag form (``0.8.1-beta.1``).
+
+    The old ``_version_tuple`` digit-parser read ``0.8.0b3`` as ``(0, 8, 3)`` and
+    ``0.8.1-beta.1`` as ``(0, 8, 1, 1)``, so every box on a ``0.8.0bN`` beta saw the
+    new ``0.8.1`` as "not newer" and ``hal0 update`` reported nothing to apply.
+    """
+    assert _is_newer("0.8.1-beta.1", "0.8.0b3") is True
+    assert _is_newer("0.8.0b3", "0.8.1-beta.1") is False
+    # Same release (tag form vs pip-normalised) is not an upgrade.
+    assert _is_newer("0.8.1-beta.1", "0.8.1b1") is False
+    # Within a beta line still advances.
+    assert _is_newer("0.8.1-beta.2", "0.8.1-beta.1") is True
+
+
+def test_is_newer_falls_back_to_tuple_for_nightly() -> None:
+    """Nightly tags are not valid PEP 440, so ``_is_newer`` falls back to the
+    digit-tuple compare and keeps timestamp monotonicity."""
+    assert _is_newer("0.5.1-nightly.20260615120000", "0.5.1-nightly.20260615") is True
+    assert _is_newer("0.5.1-nightly.20260615", "0.5.0-nightly.20260615") is True

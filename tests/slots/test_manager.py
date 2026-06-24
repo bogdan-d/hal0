@@ -56,8 +56,8 @@ def _no_spawn_context_refresh(monkeypatch):
 def test_seeded_slots_matches_plan_section_10_2() -> None:
     # ``vision`` added in #515 (first-class vision capability, reusing the
     # curated multimodal MoE primaries + their mmproj sidecar).
-    # ``primary`` renamed to ``chat`` in #654/#633.
-    assert SEEDED_SLOTS == ("chat", "embed", "rerank", "stt", "tts", "img", "vision", "agent")
+    # ADR-0023: ``chat`` retired as a seed; ``utility`` (cheap helper) added.
+    assert SEEDED_SLOTS == ("utility", "embed", "rerank", "stt", "tts", "img", "vision", "agent")
 
 
 def test_npu_seeded_slots_matches_plan_section_10_2() -> None:
@@ -211,7 +211,7 @@ async def test_add_slot_writes_toml(
 async def test_add_slot_rejects_seeded_collision(tmp_hal0_home: str) -> None:
     sm = SlotManager()
     with pytest.raises(SlotConfigError, match="seeded"):
-        await sm.add_slot("chat", type="llm", model="x", port=8090)
+        await sm.add_slot("utility", type="llm", model="x", port=8090)
 
 
 async def test_add_slot_rejects_npu_seeded_collision(tmp_hal0_home: str) -> None:
@@ -250,9 +250,9 @@ async def test_add_slot_rejects_invalid_name(tmp_hal0_home: str) -> None:
 async def test_remove_slot_refuses_seeded(tmp_hal0_home: str) -> None:
     sm = SlotManager()
     with pytest.raises(SlotConfigError, match="seeded"):
-        await sm.remove_slot("chat")  # canonical name
+        await sm.remove_slot("utility")  # canonical name
     with pytest.raises(SlotConfigError, match="seeded"):
-        await sm.remove_slot("primary")  # back-compat alias → chat (still seeded)
+        await sm.remove_slot("agent-hermes")  # back-compat alias → agent (still seeded)
     with pytest.raises(SlotConfigError, match="seeded"):
         await sm.remove_slot("agent")
 
@@ -691,7 +691,7 @@ async def test_delete_removes_files_and_protects_seeded(
     await sm.delete("extra")
     assert not (Path(tmp_hal0_home) / "etc" / "hal0" / "slots" / "extra.toml").exists()
     with pytest.raises(SlotConfigError):
-        await sm.delete("chat")
+        await sm.delete("utility")
 
 
 async def test_update_config_rewrites_toml(

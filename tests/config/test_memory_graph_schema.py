@@ -1,11 +1,13 @@
-"""Unit tests for the ADR-0014 [memory.graph] schema additions.
+"""Unit tests for the ADR-0023 [memory.graph] schema.
 
-Pins the contract every other ADR-0014 surface depends on:
+ADR-0023 replaced the inert cognee-era ``route``/``upstream`` enum with a single
+``extraction_slot`` knob. These pin the contract every memory-graph surface
+depends on:
 
-  - default OFF + route="upstream" matches the v0.3 ship matrix.
-  - upstream + model required when enabled=true + route="upstream".
-  - "primary" / "agent" routes accept no upstream block.
-  - route enum rejects typos at load time with the field path.
+  - default OFF + ``extraction_slot == "utility"``.
+  - the slot-name grammar (lowercase alnum/-/_, ≤32, leading alphanumeric).
+  - legacy ``route``/``upstream`` keys in an old hal0.toml are silently dropped
+    on load (``extra="ignore"``) rather than failing validation.
 """
 
 from __future__ import annotations
@@ -14,7 +16,6 @@ import pytest
 from pydantic import ValidationError
 
 from hal0.config.schema import (
-    GraphUpstreamConfig,
     Hal0Config,
     MemoryConfig,
     MemoryGraphConfig,
@@ -28,93 +29,66 @@ class TestMemoryGraphDefaults:
         assert isinstance(c.memory, MemoryConfig)
         assert isinstance(c.memory.graph, MemoryGraphConfig)
         assert c.memory.graph.enabled is False
-        assert c.memory.graph.route == "upstream"
-        assert c.memory.graph.upstream is None
+        assert c.memory.graph.extraction_slot == "utility"
 
-    def test_disabled_round_trips_without_upstream(self) -> None:
-        """An off-by-default block must round-trip without an upstream entry."""
+    def test_disabled_round_trips(self) -> None:
+        """An off-by-default block must round-trip cleanly."""
         mg = MemoryGraphConfig()
         dumped = mg.model_dump()
-        # rebuild from the dump — should validate cleanly.
-        MemoryGraphConfig.model_validate(dumped)
+        rebuilt = MemoryGraphConfig.model_validate(dumped)
+        assert rebuilt.extraction_slot == "utility"
+
+    def test_legacy_route_upstream_keys_are_no_longer_emitted(self) -> None:
+        """The dumped block carries only the ADR-0023 fields."""
+        dumped = MemoryGraphConfig().model_dump()
+        assert set(dumped) == {"enabled", "extraction_slot"}
 
 
-class TestMemoryGraphRouteEnum:
-    @pytest.mark.parametrize("route", ["upstream", "primary", "agent"])
-    def test_valid_routes(self, route: str) -> None:
-        # primary + agent don't need an upstream block (the §2 contract:
-        # only route="upstream" demands one).
-        mg = MemoryGraphConfig(enabled=False, route=route)
-        assert mg.route == route
+class TestExtractionSlotGrammar:
+    @pytest.mark.parametrize("slot", ["utility", "agent", "coder-mini", "slot_1", "a", "npu"])
+    def test_valid_slot_names(self, slot: str) -> None:
+        mg = MemoryGraphConfig(extraction_slot=slot)
+        assert mg.extraction_slot == slot
 
-    def test_invalid_route_rejected_with_field_path(self) -> None:
+    @pytest.mark.parametrize(
+        "slot",
+        [
+            "",  # empty
+            "BadCase",  # uppercase
+            "-leading-dash",  # leading non-alnum
+            "_leading_underscore",  # leading underscore
+            "has space",  # space
+            "x" * 33,  # too long (>32)
+            "slot!",  # punctuation
+        ],
+    )
+    def test_invalid_slot_names_rejected(self, slot: str) -> None:
         with pytest.raises(ValidationError) as ei:
-            MemoryGraphConfig(route="bogus")
-        msg = str(ei.value)
-        assert "route" in msg
-        assert "bogus" in msg
+            MemoryGraphConfig(extraction_slot=slot)
+        assert "extraction_slot" in str(ei.value)
 
 
-class TestMemoryGraphUpstreamRule:
-    def test_enabled_upstream_requires_model(self) -> None:
-        """enabled=true + route=upstream + missing upstream → ValidationError."""
-        with pytest.raises(ValidationError) as ei:
-            MemoryGraphConfig(enabled=True, route="upstream")
-        assert "upstream" in str(ei.value)
-
-    def test_enabled_upstream_with_empty_model_rejected(self) -> None:
-        with pytest.raises(ValidationError) as ei:
-            MemoryGraphConfig(
-                enabled=True,
-                route="upstream",
-                upstream=GraphUpstreamConfig(provider="openrouter", model=""),
-            )
-        assert "upstream" in str(ei.value)
-
-    def test_enabled_upstream_with_provider_and_model_ok(self) -> None:
-        mg = MemoryGraphConfig(
-            enabled=True,
-            route="upstream",
-            upstream=GraphUpstreamConfig(
-                provider="openrouter",
-                model="anthropic/claude-3.5-sonnet",
-            ),
-        )
+class TestLegacyKeyDrop:
+    def test_legacy_route_and_upstream_keys_silently_dropped(self) -> None:
+        """An old hal0.toml block with ``route``/``upstream`` loads cleanly and
+        those keys are dropped (extra="ignore") — no hard-fail on upgrade."""
+        legacy = {
+            "enabled": True,
+            "route": "primary",
+            "upstream": {"provider": "openrouter", "model": "anthropic/claude-3.5-sonnet"},
+        }
+        mg = MemoryGraphConfig.model_validate(legacy)
         assert mg.enabled is True
-        assert mg.upstream is not None
-        assert mg.upstream.model == "anthropic/claude-3.5-sonnet"
+        # Legacy route value did NOT become the extraction_slot; default holds.
+        assert mg.extraction_slot == "utility"
+        dumped = mg.model_dump()
+        assert "route" not in dumped
+        assert "upstream" not in dumped
 
-    @pytest.mark.parametrize("route", ["primary", "agent"])
-    def test_enabled_local_routes_dont_need_upstream(self, route: str) -> None:
-        """primary + agent routes are valid with no upstream block."""
-        mg = MemoryGraphConfig(enabled=True, route=route)
-        assert mg.enabled is True
-        assert mg.upstream is None
-
-    def test_disabled_with_upstream_still_validates(self) -> None:
-        """A user-prep-only upstream block (enabled=false) round-trips."""
-        mg = MemoryGraphConfig(
-            enabled=False,
-            route="upstream",
-            upstream=GraphUpstreamConfig(
-                provider="openrouter", model="anthropic/claude-3.5-sonnet"
-            ),
+    def test_legacy_keys_dropped_via_hal0_config(self) -> None:
+        """Same legacy block nested under a full Hal0Config load drops cleanly."""
+        c = Hal0Config.model_validate(
+            {"memory": {"graph": {"enabled": False, "route": "agent", "upstream": None}}}
         )
-        assert mg.enabled is False
-
-
-class TestGraphUpstreamConfig:
-    def test_empty_provider_rejected(self) -> None:
-        with pytest.raises(ValidationError):
-            GraphUpstreamConfig(provider="", model="x")
-
-    def test_whitespace_provider_rejected(self) -> None:
-        with pytest.raises(ValidationError):
-            GraphUpstreamConfig(provider="   ", model="x")
-
-    def test_unknown_provider_accepted_for_forward_compat(self) -> None:
-        # extra="allow" + named set is suggestion-only: unknown
-        # providers round-trip so the upstreams catalog can grow ahead
-        # of this enum.
-        u = GraphUpstreamConfig(provider="future-vendor", model="foo")
-        assert u.provider == "future-vendor"
+        assert c.memory.graph.enabled is False
+        assert c.memory.graph.extraction_slot == "utility"

@@ -2,7 +2,6 @@
 
 from hal0.normalize.resolver import (  # noqa: F401
     DEFAULT_CHAINS,
-    VIRTUAL_ALIASES,
     LiveSlotResolver,
     Resolution,
     SlotView,

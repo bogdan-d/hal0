@@ -67,7 +67,20 @@ log = logging.getLogger(__name__)
 #: picker (Phase 5) populates their ``model.default`` fields. ``agent``
 #: is the GPU MoE chat-role sibling of ``chat`` (moved here from the NPU
 #: set in #679 — it is a GPU slot, not the NPU FLM anchor).
-SEEDED_SLOTS: tuple[str, ...] = ("chat", "embed", "rerank", "stt", "tts", "img", "vision", "agent")
+# ADR-0023: `utility` (cheap helper) + `agent` (capable/default anchor) are the two
+# canonical llm seeds. `chat` is retired as a slot/role name (the `chat` *capability*
+# is unaffected; any llm slot serves it). `utility` is seeded so the memory
+# extraction target is always present on a fresh box.
+SEEDED_SLOTS: tuple[str, ...] = (
+    "utility",
+    "embed",
+    "rerank",
+    "stt",
+    "tts",
+    "img",
+    "vision",
+    "agent",
+)
 
 #: NPU FLM shadow slots seeded only when the FastFlowLM ``.deb`` is
 #: installed (``shutil.which('flm')`` truthy): the ASR + embed tags that
@@ -82,8 +95,11 @@ NPU_SEEDED_SLOTS: tuple[str, ...] = ("stt-npu", "embed-npu")
 #: NEVER stored on disk and NEVER appear in list() / iter_configs() /
 #: /api/slots. ``agent-hermes`` maps to ``agent`` (a GPU seed slot, #679)
 #: so no new TOML is created — the alias just redirects old references.
+#: ADR-0023 retired the `primary` and `chat` aliases. The canonical roles are
+#: `agent` (default anchor) + `utility` (helper); a lingering operator-custom `chat`
+#: slot is reachable by its own name via generalized `hal0/<slot>` resolution, not an
+#: alias. Only the Hermes-era `agent-hermes` → `agent` redirect remains.
 SLOT_ALIASES: dict[str, str] = {
-    "primary": "chat",
     "agent-hermes": "agent",
 }
 
@@ -121,6 +137,18 @@ _CONFIG_DRIFT_KEYS: tuple[str, ...] = ("--ctx-size", "--model", "--alias", "-b",
 # can distinguish "warm but quiet" from "warm and serving".
 _IDLE_AFTER_S: float = 300.0
 _IDLE_MONITOR_INTERVAL_S: float = 30.0
+# Hard-eviction default TTL (#902). A slot idle past this long (resolved
+# per-slot: TOML idle_timeout_s overrides, then this global default) is
+# *unloaded* — freeing host RAM — not merely relabeled IDLE. 0 disables
+# eviction; per-slot idle_timeout_s = 0 pins that slot.
+_EVICT_AFTER_S: float = 300.0
+
+# Anchor slots pinned against TTL eviction *under default config* — i.e.
+# when their TOML carries no explicit idle_timeout_s. Evicting these would
+# defeat always-warm chat, the agent loop, and the NPU trio anchor. An
+# explicit per-slot idle_timeout_s in TOML still wins (lets an operator
+# opt a named anchor back into eviction); explicit 0 keeps it pinned.
+_PINNED_BY_DEFAULT: frozenset[str] = frozenset({"agent", "utility", "npu"})
 
 
 # ── Hook protocols ───────────────────────────────────────────────────────────
@@ -263,6 +291,7 @@ class SlotManager:
         pull_runner: PullRunner | None = None,
         model_cache_check: ModelCacheCheck | None = None,
         idle_after_s: float = _IDLE_AFTER_S,
+        evict_after_s: float = _EVICT_AFTER_S,
         idle_monitor_interval_s: float = _IDLE_MONITOR_INTERVAL_S,
         event_bus: Any | None = None,
         upstreams_registry: Any | None = None,
@@ -309,6 +338,10 @@ class SlotManager:
         # ``start_idle_monitor()`` (the API lifespan owns the lifecycle so
         # tests can inject shorter intervals).
         self._idle_after_s: float = idle_after_s
+        # Hard-eviction TTL default (#902): a slot idle past its resolved
+        # idle_timeout_s is unloaded, not just relabeled.  Per-slot TOML
+        # idle_timeout_s overrides this global default.
+        self._evict_after_s: float = evict_after_s
         self._idle_monitor_interval_s: float = idle_monitor_interval_s
         self._idle_monitor_task: asyncio.Task[None] | None = None
         # GpuArbiter (Phase D, spec §7) — constructed lazily on first
@@ -951,6 +984,14 @@ class SlotManager:
                     force=True,
                 )
                 return await self.status(slot_name)
+
+            # Seed/default may pin a model id that never landed locally under
+            # that exact id (e.g. a catalog id like ``gemma-4-12b-it`` while the
+            # scanned gguf registered as ``gemma-4-12b-it-ud-q4-k-xl``). Rather
+            # than crash-loop on a non-servable id, fall back to a locally
+            # registered model matching the slot's capability. No-op for FLM/NPU
+            # (tag-served), already-local ids, and pullable catalog ids.
+            resolved_model = self._resolve_servable_model(resolved_model, cfg)
 
             # NPU FLM trio shadow (stt/embed, device=npu): the chat anchor's
             # single FLM process serves these via the anchor's [npu] toggles.
@@ -2044,6 +2085,127 @@ class SlotManager:
             )
             return False
 
+    def _resolve_servable_model(self, model_id: str, cfg: SlotConfig | dict[str, Any]) -> str:
+        """Resolve a slot's configured model id to one that can actually serve.
+
+        A seed/default may pin an id that never landed locally under that exact
+        id — e.g. a catalog id (``gemma-4-12b-it``, ``upstream=hal0``, no file)
+        while the operator's scanned gguf registered under the normalised stem
+        (``gemma-4-12b-it-ud-q4-k-xl``). Pinned to the ghost, the slot would
+        crash-loop on a ``--model`` path that doesn't exist. When that happens
+        we fall back to a locally-registered model matching the slot's
+        capability and log it loudly so the operator can fix the config.
+
+        Returns ``model_id`` unchanged when:
+          * the slot is FLM/NPU (``device=npu``) — those are served by tag, not
+            a local gguf file, so registry-path checks don't apply;
+          * the configured model is already registered with a file on disk;
+          * the configured id is a known curated model (still to be pulled —
+            don't pre-empt a legitimate download with a fallback);
+          * no local model matches the slot's capability.
+        """
+        d = _cfg_to_dict(cfg)
+        device = d.get("device") or d.get("slot", {}).get("device")
+        if device == "npu":
+            return model_id
+        if self._default_model_cache_check(model_id):
+            return model_id
+        try:
+            from hal0.registry.curated import get_curated
+
+            if get_curated(model_id) is not None:
+                return model_id  # pullable as configured — let load() pull it
+        except ImportError:
+            pass
+        slot_type = (d.get("type") or d.get("slot", {}).get("type") or "").lower()
+        capability = _SLOT_TYPE_TO_CAPABILITY.get(slot_type)
+        if not capability:
+            return model_id
+        fallback = self._fallback_local_model(capability, configured_id=model_id)
+        if fallback is None or fallback.id == model_id:
+            return model_id
+        log.warning(
+            "slot.model_default_fallback",
+            extra={
+                "configured": model_id,
+                "fallback": fallback.id,
+                "capability": capability,
+            },
+        )
+        return fallback.id
+
+    @staticmethod
+    def _fallback_local_model(capability: str, configured_id: str = ""):
+        """Pick a locally-registered model (file on disk) to stand in for a
+        non-servable slot default.
+
+        Candidates must carry ``capability`` AND a real on-disk file. They are
+        additionally filtered through :func:`_looks_diffusion_or_nontext` so an
+        image/video/diffusion artifact (which :func:`discover._guess_capability`
+        may have mislabelled ``chat``) can never be served into a text slot —
+        the live ``ltx-2-19b-dev-fp8`` incident, where a 25GB video model was
+        the largest "chat" candidate and llama-server then failed to load it.
+
+        Selection order (a text slot wants a look-alike of its configured id,
+        not merely the biggest model on the box):
+          1. **Name similarity** — the candidate sharing the most leading
+             hyphen tokens with ``configured_id`` (e.g. ``gemma-4-12b-it`` →
+             ``gemma-4-12b-it-ud-q4-k-xl``). Ties broken by larger size, then id.
+          2. **Size** — only when nothing shares a leading token: the largest
+             on-disk model, tie-broken by id (the legacy behaviour).
+
+        ``None`` when no candidate matches.
+        """
+        try:
+            from hal0.registry.store import ModelRegistry
+        except ImportError:
+            return None
+        try:
+            models = ModelRegistry().list()
+        except Exception:
+            return None
+        candidates = []
+        for m in models:
+            caps = getattr(m, "capabilities", None) or []
+            if capability not in caps:
+                continue
+            # Never serve a diffusion/image/video artifact into a text slot,
+            # even if it leaked into the chat candidate pool via a default
+            # capability guess (see _looks_diffusion_or_nontext).
+            if _looks_diffusion_or_nontext(m):
+                continue
+            path = getattr(m, "path", "") or ""
+            if not path:
+                continue
+            try:
+                if not Path(path).exists():
+                    continue
+            except OSError:
+                continue
+            candidates.append(m)
+        if not candidates:
+            return None
+        config_tokens = _id_tokens(configured_id)
+
+        def _shared_leading(m) -> int:
+            return _leading_token_overlap(config_tokens, _id_tokens(getattr(m, "id", "")))
+
+        best_overlap = max(_shared_leading(m) for m in candidates)
+        if best_overlap > 0:
+            # Prefer the closest name match; size + id only tie-break peers
+            # that share the same number of leading tokens.
+            candidates.sort(
+                key=lambda m: (
+                    -_shared_leading(m),
+                    -(getattr(m, "size_bytes", 0) or 0),
+                    getattr(m, "id", ""),
+                )
+            )
+        else:
+            # Nothing resembles the configured id — fall back to size.
+            candidates.sort(key=lambda m: (-(getattr(m, "size_bytes", 0) or 0), m.id))
+        return candidates[0]
+
     @staticmethod
     def _default_model_cache_check(model_id: str) -> bool:
         """Default predicate: registered + path-on-disk → cached.
@@ -2196,17 +2358,20 @@ class SlotManager:
         self,
         *,
         idle_after_s: float | None = None,
+        evict_after_s: float | None = None,
         interval_s: float | None = None,
     ) -> None:
-        """Start the background sweeper that demotes READY → IDLE.
+        """Start the background sweeper that demotes READY → IDLE and evicts.
 
         Idempotent — calling twice while the task is alive is a no-op.
-        Callers in the API lifespan invoke this once at startup; tests
-        construct a SlotManager with shorter intervals and start the
-        monitor explicitly.
+        Callers in the API lifespan invoke this once at startup (wiring
+        ``evict_after_s`` from ``slots.idle_timeout_s``); tests construct a
+        SlotManager with shorter intervals and start the monitor explicitly.
         """
         if idle_after_s is not None:
             self._idle_after_s = idle_after_s
+        if evict_after_s is not None:
+            self._evict_after_s = evict_after_s
         if interval_s is not None:
             self._idle_monitor_interval_s = interval_s
         existing = self._idle_monitor_task
@@ -2244,25 +2409,91 @@ class SlotManager:
         except asyncio.CancelledError:
             raise
 
+    async def _evict_timeout_for(self, slot_name: str) -> float | None:
+        """Resolve the idle TTL after which a slot is hard-evicted (#902).
+
+        Returns ``None`` when the slot is pinned (never TTL-evicted):
+          * an explicit ``idle_timeout_s = 0`` in the slot's TOML, or
+          * a default-pinned anchor (chat / agent / npu) with no explicit
+            per-slot value, or
+          * a non-positive global default with no explicit per-slot value.
+
+        Otherwise returns the effective TTL in seconds: the per-slot TOML
+        ``idle_timeout_s`` when set (overrides the global), else the global
+        ``_evict_after_s`` default.  ``0`` consistently means "disabled" at
+        both levels, matching the config-schema contract.
+        """
+        canonical = self._resolve_alias(slot_name)
+        try:
+            cfg = await self._load_slot_config(canonical)
+        except (SlotConfigError, SlotNotFound):
+            cfg = {}
+        raw = cfg.get("idle_timeout_s")
+        if isinstance(raw, bool):  # bool is an int subclass — never a TTL
+            raw = None
+        if isinstance(raw, int):
+            return None if raw <= 0 else float(raw)
+        # No explicit per-slot value: pin the named anchors, else fall back
+        # to the global default (itself disabled when non-positive).
+        if canonical in _PINNED_BY_DEFAULT:
+            return None
+        return float(self._evict_after_s) if self._evict_after_s > 0 else None
+
     async def _sweep_idle_once(self) -> None:
-        """One pass: flip any READY slot past idle-timeout to IDLE."""
+        """One idle-sweep pass over every tracked slot.
+
+        Stage 1 (soft): a READY slot idle past ``_idle_after_s`` is
+        relabeled IDLE so dashboards distinguish "warm but quiet" from
+        "warm and serving".
+
+        Stage 2 (hard, #902): a slot idle past its resolved per-slot TTL
+        (:meth:`_evict_timeout_for`) is **unloaded**, freeing host RAM —
+        the only way to reclaim it, since llama-server allocates KV
+        statically at ``ctx_size``.  ``idle_timeout_s = 0`` (or a pinned
+        anchor) is never evicted.  A slot mid-request
+        (``serving_count > 0``) is never touched; the dispatcher reloads an
+        evicted slot transparently on its next request (wake-on-request),
+        so eviction is safe.
+        """
         now = time.time()
         for slot_name, ts in list(self._last_used.items()):
-            if (now - ts) < self._idle_after_s:
-                continue
+            idle_for = now - ts
             if self._serving_count.get(slot_name, 0) > 0:
                 continue
-            if self._current_state(slot_name) != SlotState.READY:
+            state = self._current_state(slot_name)
+            if state not in (SlotState.READY, SlotState.IDLE):
                 continue
-            try:
-                await self._transition(
-                    slot_name,
-                    SlotState.IDLE,
-                    message=f"idle for {now - ts:.0f}s",
-                )
-            except IllegalSlotTransition:
-                # Raced with an unload — fine; next sweep will skip it.
+
+            # Stage 2 — hard TTL eviction.
+            evict_after = await self._evict_timeout_for(slot_name)
+            if evict_after is not None and idle_for >= evict_after:
+                try:
+                    await self.unload(slot_name)
+                    log.info(
+                        "slot.idle_evicted",
+                        extra={"slot": slot_name, "idle_s": round(idle_for)},
+                    )
+                except IllegalSlotTransition:
+                    # Raced with another transition — next sweep retries.
+                    pass
+                except Exception as exc:  # never let one slot kill the sweep
+                    log.warning(
+                        "slot.idle_evict_failed",
+                        extra={"slot": slot_name, "error": str(exc)},
+                    )
                 continue
+
+            # Stage 1 — soft demotion READY → IDLE.
+            if state == SlotState.READY and idle_for >= self._idle_after_s:
+                try:
+                    await self._transition(
+                        slot_name,
+                        SlotState.IDLE,
+                        message=f"idle for {idle_for:.0f}s",
+                    )
+                except IllegalSlotTransition:
+                    # Raced with an unload — fine; next sweep will skip it.
+                    continue
 
     async def get_config(self, slot_name: str) -> dict[str, Any]:
         """Return the slot's TOML config as a plain dict (read-only view).
@@ -2505,6 +2736,112 @@ class SlotManager:
 
 
 # ── module-level helpers ─────────────────────────────────────────────────────
+
+
+# Slot ``type`` → the model capability a fallback search should match when the
+# slot's configured ``model.default`` is not locally servable. Inverse of
+# ``capabilities.catalog._CAPABILITY_TO_SLOT_TYPE`` — duplicated here (not
+# imported) to stay clear of the capabilities import cycle that ``slots.*``
+# deliberately avoids.
+_SLOT_TYPE_TO_CAPABILITY: dict[str, str] = {
+    "llm": "chat",
+    "embedding": "embed",
+    "reranking": "rerank",
+    "transcription": "asr",
+    "tts": "tts",
+    "image": "image",
+}
+
+# ── Diffusion / non-text fallback guard (#940 hardening) ──────────────────────
+#
+# discover._guess_capability defaults any unrecognised gguf to "chat", so
+# video/image/diffusion ggufs land in the chat candidate pool. Combined with
+# the fallback's old "largest-first" pick this grabbed the biggest wrong model
+# — live, the chat utility slot fell back to ltx-2-19b-dev-fp8, a 25GB VIDEO
+# diffusion model, which llama-server then failed to load. The fallback must
+# never select an image/video/diffusion/non-text model for a text slot, so we
+# screen candidates by several independent signals before they qualify.
+
+#: Substrings in a model id / name / path that mark a diffusion / image /
+#: video artifact (matched on a normalised lower-case, separator-collapsed
+#: form so ``sd-``/``sd_``/``SDXL`` all hit). Word-ish tokens are matched on
+#: token boundaries; the rest are plain substring contains.
+_DIFFUSION_NAME_TOKENS: frozenset[str] = frozenset(
+    {"sdxl", "sd", "flux", "ltx", "wan", "comfyui", "turbo", "refiner", "upscaler", "esrgan", "vae"}
+)
+_DIFFUSION_NAME_SUBSTRINGS: tuple[str, ...] = ("diffus", "lora", "unet", "controlnet")
+#: Non-text model file suffixes the llama-server / FLM text providers cannot
+#: serve — a gguf default-guessed as chat is fine, these are not. Kept to the
+#: diffusion/checkpoint formats; ``.bin`` is deliberately excluded (ggml ASR
+#: weights use it and are legitimately text-adjacent).
+_NONTEXT_MODEL_SUFFIXES: frozenset[str] = frozenset({".safetensors", ".ckpt", ".pth", ".onnx"})
+#: Capabilities that are inherently non-text. A candidate advertising any of
+#: these can never serve a chat/embed/rerank/asr/tts slot.
+_NONTEXT_CAPABILITIES: frozenset[str] = frozenset({"image", "video"})
+
+
+def _looks_diffusion_or_nontext(model: Any) -> bool:
+    """True when *model* looks like a diffusion / image / video / non-text artifact.
+
+    Robust to mislabelled capabilities: a video gguf that
+    :func:`discover._guess_capability` defaulted to ``chat`` is still caught
+    by its id/name/path tokens and (for non-gguf checkpoints) its file suffix.
+    Conservative — only fires on strong signals so a legitimately-named text
+    model (e.g. ``wandb``-tagged) is not excluded by an accidental substring.
+    """
+    caps = {str(c).lower() for c in (getattr(model, "capabilities", None) or [])}
+    if caps & _NONTEXT_CAPABILITIES:
+        return True
+    tags = {str(t).lower() for t in (getattr(model, "tags", None) or [])}
+    if tags & _NONTEXT_CAPABILITIES or "diffusion" in tags:
+        return True
+    path = str(getattr(model, "path", "") or "")
+    if path:
+        suffix = Path(path).suffix.lower()
+        if suffix in _NONTEXT_MODEL_SUFFIXES:
+            return True
+    haystacks = (
+        str(getattr(model, "id", "") or ""),
+        str(getattr(model, "name", "") or ""),
+        path,
+    )
+    for raw in haystacks:
+        if not raw:
+            continue
+        tokens = set(_id_tokens(raw))
+        if tokens & _DIFFUSION_NAME_TOKENS:
+            return True
+        collapsed = raw.lower()
+        if any(sub in collapsed for sub in _DIFFUSION_NAME_SUBSTRINGS):
+            return True
+    return False
+
+
+def _id_tokens(value: str) -> list[str]:
+    """Split a model id / name / path into lower-case alphanumeric tokens.
+
+    ``gemma-4-12b-it_UD-Q4_K_XL`` → ``['gemma', '4', '12b', 'it', 'ud', ...]``.
+    Any run of non-alphanumeric characters is a separator, so ``sd-``, ``sd_``,
+    ``sd.`` and ``SDXL`` all tokenise predictably.
+    """
+    return [tok for tok in re.split(r"[^a-z0-9]+", value.lower()) if tok]
+
+
+def _leading_token_overlap(a: list[str], b: list[str]) -> int:
+    """Count of shared leading tokens between two token lists.
+
+    Used to rank fallback candidates by name similarity to the configured id:
+    ``gemma-4-12b-it`` vs ``gemma-4-12b-it-ud-q4-k-xl`` shares 4 leading
+    tokens, beating an unrelated (0-overlap) but larger chat model.
+    """
+    if not a or not b:
+        return 0
+    shared = 0
+    for x, y in zip(a, b, strict=False):
+        if x != y:
+            break
+        shared += 1
+    return shared
 
 
 def _cfg_to_dict(cfg: SlotConfig | dict[str, Any]) -> dict[str, Any]:

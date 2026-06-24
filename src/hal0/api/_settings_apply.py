@@ -90,10 +90,11 @@ SERVICE_HAL0_API: str = "hal0-api"
 #                                            supported path).
 #   * ``[memory.embedding].{rerank_*}``     → immediate (consumed on each
 #                                            ``memory_search`` call).
-#   * ``[memory.graph].{enabled,route,upstream}`` → immediate (the route
-#                                            hot-reloads on next call;
-#                                            ``upstream`` credentials
-#                                            resolve lazily).
+#   * ``[memory.graph].{enabled,extraction_slot}`` → immediate (ADR-0023: the
+#                                            /api/memory/graph PUT handler owns
+#                                            the drop-in write + hindsight-api
+#                                            restart; the registry only tags the
+#                                            keys as valid).
 #   * ``[meta].schema_version``             → manual-restart (migrations
 #                                            run on next hal0-api boot
 #                                            after the value is bumped).
@@ -129,10 +130,11 @@ _HAL0_REGISTRY: dict[str, ApplyPlanEntry] = {
     "memory.embedding.rerank_max_candidates": {"apply_class": "immediate", "services": []},
     "memory.embedding.rerank_connect_timeout_s": {"apply_class": "immediate", "services": []},
     "memory.embedding.rerank_read_timeout_s": {"apply_class": "immediate", "services": []},
-    # [memory.graph]
+    # [memory.graph] — ADR-0023: extraction_slot propagates to hindsight-api via a
+    # systemd drop-in + restart (handled in the /api/memory/graph PUT handler, which
+    # is the sole writer; the apply pipeline only needs to know the key is valid).
     "memory.graph.enabled": {"apply_class": "immediate", "services": []},
-    "memory.graph.route": {"apply_class": "immediate", "services": []},
-    "memory.graph.upstream": {"apply_class": "immediate", "services": []},
+    "memory.graph.extraction_slot": {"apply_class": "immediate", "services": []},
     # [meta]
     "meta.schema_version": {"apply_class": "manual-restart", "services": []},
 }

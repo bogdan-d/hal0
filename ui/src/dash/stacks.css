@@ -1,0 +1,185 @@
+/* hal0 — Stacks view (Focus layout). From the stacks_overhaul design handoff;
+ * all classes prefixed .stk- to avoid collisions. Reuses the live token set;
+ * the four tokens the design assumes that dashboard.css lacks are shimmed here. */
+:root {
+  --rad-xs: 4px;
+  --ls-tight: -0.01em;
+  --ls-title: -0.02em;
+  --shadow-menu: 0 16px 48px -16px rgba(0, 0, 0, 0.7);
+}
+
+/* ─── Toolbar (summary) ──────────────────────────────────────────────── */
+.stk-toolbar {
+  display: flex; align-items: center; gap: 12px;
+  padding-bottom: 14px; margin-bottom: 20px;
+  border-bottom: 1px solid var(--line); flex-wrap: wrap;
+}
+.stk-summary { display: flex; align-items: center; gap: 8px; font-size: 12.5px; }
+.stk-sum-item { display: inline-flex; align-items: baseline; gap: 3px; }
+.stk-sum-item b { font-size: 14px; font-weight: 500; }
+.stk-sum-sep { color: var(--fg-5); margin: 0 2px; }
+
+/* ─── Shared atoms ───────────────────────────────────────────────────── */
+.stk-spacer { flex: 1; min-width: 0; }
+
+.stk-badge {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 3px 9px; border-radius: var(--rad-pill);
+  font-family: var(--jbm); font-size: 10px; font-weight: 500;
+  border: 1px solid var(--line); color: var(--fg-4); white-space: nowrap;
+}
+.stk-badge.live { color: var(--ok); border-color: var(--ok-line); background: var(--ok-soft); }
+
+.stk-tag {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 1px 6px; border-radius: var(--rad-xs);
+  font-family: var(--jbm); font-size: 9.5px; letter-spacing: 0.01em;
+  background: var(--bg-3); color: var(--fg-4); border: 1px solid var(--line-soft); white-space: nowrap;
+}
+.stk-tag.shared { background: var(--accent-soft); color: var(--accent); border-color: var(--accent-line); }
+
+.stk-missing-btn {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 3px 9px; border-radius: var(--rad-pill);
+  font-family: var(--jbm); font-size: 10px; font-weight: 500;
+  background: var(--warn-soft); color: var(--warn); border: 1px solid var(--warn-line);
+  cursor: pointer; white-space: nowrap; transition: filter var(--dur-fast) var(--ease);
+}
+.stk-missing-btn:hover { filter: brightness(1.12); }
+.stk-missing-btn.sm { padding: 2px 7px; font-size: 9.5px; }
+.stk-missing-btn svg { width: 10px; height: 10px; }
+
+.stk-icon-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 28px; height: 28px; border-radius: var(--rad-sm);
+  background: transparent; border: 1px solid var(--line); color: var(--fg-3);
+  cursor: pointer; transition: all var(--dur-fast) var(--ease); flex-shrink: 0;
+}
+.stk-icon-btn:hover { border-color: var(--line-strong); color: var(--fg); background: var(--bg-2); }
+.stk-icon-btn svg { width: 13px; height: 13px; }
+
+.stk-csr-name { font-family: var(--jbm); font-size: 10.5px; color: var(--fg-4); width: 56px; flex-shrink: 0; }
+.stk-csr-model { font-family: var(--jbm); font-size: 10.5px; color: var(--fg-2); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ─── Focus: hero (active stack) ─────────────────────────────────────── */
+.stk-focus { display: flex; flex-direction: column; gap: 0; }
+
+.stk-hero {
+  border: 1px solid var(--accent-line); border-radius: var(--rad-lg);
+  background: var(--bg-1); overflow: hidden; position: relative;
+}
+.stk-hero::before {
+  content: ""; position: absolute; top: 0; left: 0; right: 0; height: 1px;
+  background: linear-gradient(90deg, transparent 5%, var(--accent) 45%, transparent 95%);
+}
+.stk-hero::after {
+  content: ""; position: absolute; inset: 0;
+  background: radial-gradient(ellipse 55% 120px at 50% 0%, var(--accent-glow), transparent 80%);
+  pointer-events: none;
+}
+.stk-hero-h {
+  display: flex; align-items: flex-start; justify-content: space-between;
+  gap: 16px; padding: 20px 22px 14px; position: relative; z-index: 1;
+}
+.stk-hero-eye { font-family: var(--jbm); font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.12em; color: var(--fg-5); margin-bottom: 7px; }
+.stk-hero-name { font-family: var(--jbm); font-size: 19px; font-weight: 600; letter-spacing: var(--ls-title); color: var(--fg); margin-bottom: 4px; }
+.stk-hero-intent { font-size: 13px; color: var(--fg-3); }
+.stk-hero-meta { display: flex; flex-direction: column; align-items: flex-end; gap: 8px; flex-shrink: 0; }
+.stk-hero-ver { font-family: var(--jbm); font-size: 10px; color: var(--fg-5); }
+
+.stk-hero-slots {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+  border-top: 1px solid var(--line-soft); position: relative; z-index: 1;
+  background: var(--line-soft); gap: 1px;
+}
+.stk-hero-slot { background: color-mix(in oklab, var(--bg-1) 85%, var(--accent-bg) 15%); padding: 13px 16px; display: flex; flex-direction: column; gap: 5px; }
+.stk-hs-row { display: flex; align-items: center; gap: 7px; }
+.stk-hs-name { font-family: var(--jbm); font-size: 12.5px; font-weight: 500; color: var(--fg); flex: 1; }
+.stk-hs-state { font-family: var(--jbm); font-size: 10px; }
+.stk-hs-state.serving { color: var(--ok); }
+.stk-hs-state.ready { color: var(--ok); opacity: 0.75; }
+.stk-hs-state.warming { color: var(--warn); }
+.stk-hs-state.idle { color: var(--fg-4); }
+.stk-hs-state.offline { color: var(--fg-5); }
+.stk-hs-profile { font-family: var(--jbm); font-size: 10.5px; color: var(--fg-4); padding-left: 14px; }
+.stk-hs-model { font-family: var(--jbm); font-size: 10.5px; color: var(--fg-2); padding-left: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.stk-hero-f {
+  display: flex; align-items: center; gap: 8px;
+  padding: 11px 16px; border-top: 1px solid var(--line-soft);
+  background: var(--bg); position: relative; z-index: 1;
+}
+.stk-hero-tags { display: flex; gap: 5px; flex-wrap: wrap; }
+
+/* ─── Focus: library grid ────────────────────────────────────────────── */
+.stk-lib-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 10px; margin-top: 4px; }
+.stk-lib-card {
+  display: flex; flex-direction: column;
+  border: 1px solid var(--line); border-radius: var(--rad-lg);
+  background: var(--bg-1); overflow: hidden;
+  transition: border-color var(--dur-fast) var(--ease); animation: stk-in 0.22s var(--ease) both;
+}
+.stk-lib-card:hover { border-color: var(--line-strong); }
+.stk-lib-h { display: flex; justify-content: space-between; gap: 10px; padding: 12px 14px 9px; }
+.stk-lib-id { flex: 1; min-width: 0; }
+.stk-lib-name { font-family: var(--jbm); font-size: 12.5px; font-weight: 500; color: var(--fg); margin-bottom: 3px; }
+.stk-lib-intent { font-size: 11.5px; color: var(--fg-4); line-height: 1.35; text-wrap: pretty; }
+.stk-lib-slotlist { display: flex; flex-direction: column; border-top: 1px solid var(--line-soft); }
+.stk-lib-slotrow { display: flex; align-items: center; gap: 7px; padding: 5px 14px; border-bottom: 1px solid var(--line-soft); }
+.stk-lib-slotrow:last-child { border-bottom: none; }
+.stk-lib-slotrow.miss { background: var(--err-soft); }
+.stk-lib-slotrow svg { flex-shrink: 0; width: 9px; height: 9px; color: var(--warn); }
+.stk-lib-f { display: flex; align-items: center; gap: 6px; padding: 8px 11px; border-top: 1px solid var(--line-soft); background: var(--bg); margin-top: auto; }
+
+/* ─── Dialogs ─────────────────────────────────────────────────────────── */
+.stk-scrim {
+  position: fixed; inset: 0; background: rgba(0, 0, 0, 0.65); backdrop-filter: blur(3px);
+  z-index: 100; display: flex; align-items: center; justify-content: center; padding: 24px;
+}
+.stk-dialog {
+  width: 100%; max-width: 480px; background: var(--bg-1);
+  border: 1px solid var(--line-strong); border-radius: var(--rad-lg);
+  box-shadow: var(--shadow-menu); overflow: hidden; animation: stk-dialog-in 0.18s var(--ease) both;
+}
+.stk-dlg-h { display: flex; align-items: center; justify-content: space-between; padding: 13px 16px; border-bottom: 1px solid var(--line); }
+.stk-dlg-eye { font-family: var(--jbm); font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--fg-4); }
+.stk-dlg-x { display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 26px; border-radius: var(--rad-sm); background: transparent; border: none; color: var(--fg-4); cursor: pointer; transition: all var(--dur-fast) var(--ease); }
+.stk-dlg-x:hover { background: var(--bg-2); color: var(--fg); }
+.stk-dlg-x svg { width: 14px; height: 14px; }
+.stk-dlg-b { padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+.stk-dlg-stack { font-family: var(--jbm); font-size: 15px; font-weight: 500; color: var(--fg); letter-spacing: var(--ls-tight); }
+.stk-dlg-hint { font-size: 12.5px; color: var(--fg-3); line-height: 1.45; }
+.stk-dlg-warn {
+  display: flex; align-items: center; gap: 9px; padding: 10px 12px;
+  border-radius: var(--rad-sm); background: var(--warn-soft); border: 1px solid var(--warn-line);
+  font-family: var(--jbm); font-size: 11.5px; color: var(--warn);
+}
+.stk-dlg-warn svg { width: 13px; height: 13px; flex-shrink: 0; }
+
+.stk-slot-list { display: flex; flex-direction: column; gap: 5px; }
+.stk-slot-row { display: flex; align-items: center; gap: 9px; padding: 8px 10px; border-radius: var(--rad-sm); border: 1px solid var(--line); background: var(--bg); font-family: var(--jbm); font-size: 11.5px; }
+.stk-slot-row.miss { border-color: var(--err-line); background: var(--err-soft); }
+.stk-slot-row .sname { width: 58px; flex-shrink: 0; color: var(--fg-4); }
+.stk-slot-row .smodel { flex: 1; color: var(--fg-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.stk-slot-row .smiss { font-size: 10px; color: var(--err); flex-shrink: 0; }
+
+.stk-pull-item { display: flex; align-items: center; gap: 9px; padding: 10px 12px; border-radius: var(--rad-sm); background: var(--warn-soft); border: 1px solid var(--warn-line); }
+.stk-pull-slot { font-family: var(--jbm); font-size: 10.5px; color: var(--fg-4); width: 56px; flex-shrink: 0; }
+.stk-pull-model { font-family: var(--jbm); font-size: 11px; color: var(--fg-2); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.stk-pull-done { font-family: var(--jbm); font-size: 10px; color: var(--ok); flex-shrink: 0; display: flex; align-items: center; gap: 4px; }
+.stk-pull-done svg { width: 11px; height: 11px; }
+
+.stk-dlg-f { display: flex; align-items: center; justify-content: flex-end; gap: 8px; padding: 11px 16px; border-top: 1px solid var(--line); background: var(--bg); }
+
+/* Import file-drop (not in the handoff; styled to match the dialog body). */
+.stk-drop { display: flex; flex-direction: column; align-items: center; gap: 10px; cursor: pointer; padding: 26px; border: 1px dashed var(--line-strong); border-radius: var(--rad-sm); background: var(--bg); color: var(--fg-3); }
+.stk-drop:hover { border-color: var(--accent-line); color: var(--fg); }
+.stk-drop-glyph svg { width: 20px; height: 20px; }
+
+/* ─── Animations ─────────────────────────────────────────────────────── */
+@keyframes stk-in { from { transform: translateY(5px); } to { transform: none; } }
+@keyframes stk-dialog-in { from { opacity: 0; transform: scale(0.97) translateY(6px); } to { opacity: 1; transform: none; } }
+
+@media (max-width: 760px) {
+  .stk-hero-slots { grid-template-columns: 1fr; }
+}

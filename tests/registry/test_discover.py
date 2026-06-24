@@ -8,11 +8,20 @@ import pytest
 
 from hal0.config.schema import ModelsConfig
 from hal0.registry.discover import (
+    backfill_coordless,
     find_candidates,
     register_candidate,
     scan_and_register,
 )
+from hal0.registry.model import Model
 from hal0.registry.store import ModelRegistry
+
+
+def test_model_mmproj_defaults_none() -> None:
+    """A Model with no sidecar carries mmproj=None (the registry contract
+    the llama-server provider reads via model_info.get('mmproj'))."""
+    m = Model(id="x", path="/tmp/x.gguf")
+    assert m.mmproj is None
 
 
 @pytest.fixture
@@ -90,6 +99,19 @@ def test_capability_guess(model_root: Path) -> None:
     assert caps["qwen3-4b-instruct-q4_k_m.gguf"] == "chat"
 
 
+def test_capability_guess_classifies_diffusion_media() -> None:
+    """Clearly-diffusion media files classify as image/video, not the chat
+    default — keeps them out of the chat fallback pool (#940 hardening)."""
+    from hal0.registry.discover import _guess_capability
+
+    assert _guess_capability("ltx-2-19b-dev-fp8.gguf") == "video"
+    assert _guess_capability("wan2.1-t2v-14b.gguf") == "video"
+    assert _guess_capability("flux1-dev.gguf") == "image"
+    assert _guess_capability("sdxl-base-1.0.safetensors") == "image"
+    # A plain chat model is still 'chat' — the new branches are last-resort.
+    assert _guess_capability("qwen3-4b-instruct-q4_k_m.gguf") == "chat"
+
+
 def test_curated_match_by_filename(model_root: Path) -> None:
     """A discovered file whose name matches a curated entry's hf_file
     must surface that curated entry on the candidate."""
@@ -158,8 +180,154 @@ def test_scan_and_register_idempotent(model_root: Path, registry: ModelRegistry)
     assert second["added"] == []
 
 
+@pytest.fixture
+def vision_root(tmp_path: Path) -> Path:
+    """A model directory laid out like the real chat model + mmproj sidecar."""
+    root = tmp_path / "models"
+    root.mkdir()
+    vision_dir = root / "qwopus3.6-27b-v2"
+    vision_dir.mkdir()
+    (vision_dir / "qwopus3.6-27b-v2.STRIX_LEAN.gguf").write_bytes(b"m" * 256)
+    # The sidecar — note the .mmproj extension is NOT in file_extensions,
+    # so association must key on the filename, not the suffix.
+    (vision_dir / "mmproj-F32.mmproj").write_bytes(b"p" * 64)
+    # A plain chat model with no sidecar in its own directory.
+    plain_dir = root / "plain-chat"
+    plain_dir.mkdir()
+    (plain_dir / "plain-chat-q4_k_m.gguf").write_bytes(b"c" * 128)
+    return root
+
+
+def test_find_candidates_associates_sidecar(vision_root: Path) -> None:
+    """A *mmproj* file beside a main model attaches to that model's
+    candidate; the sidecar itself is never emitted as a candidate."""
+    candidates = find_candidates(
+        roots=[vision_root],
+        extensions=[".gguf", ".safetensors"],
+        known_paths=set(),
+    )
+    by_name = {c.path.name: c for c in candidates}
+    # The sidecar is not a routable candidate.
+    assert "mmproj-F32.mmproj" not in by_name
+    # The main model carries the sidecar's resolved path.
+    main = by_name["qwopus3.6-27b-v2.STRIX_LEAN.gguf"]
+    assert main.mmproj is not None
+    assert Path(main.mmproj).name == "mmproj-F32.mmproj"
+    assert Path(main.mmproj).is_file()
+
+
+def test_find_candidates_no_sidecar_is_none(vision_root: Path) -> None:
+    """A model in a directory with no sidecar resolves mmproj=None
+    (no false positives leaking across directories)."""
+    candidates = find_candidates(
+        roots=[vision_root],
+        extensions=[".gguf", ".safetensors"],
+        known_paths=set(),
+    )
+    by_name = {c.path.name: c for c in candidates}
+    assert by_name["plain-chat-q4_k_m.gguf"].mmproj is None
+
+
+def test_scan_and_register_attaches_and_omits_sidecar(
+    vision_root: Path, registry: ModelRegistry
+) -> None:
+    """End-to-end: the registered main model resolves its mmproj path, and
+    no standalone model is registered for the sidecar."""
+    cfg = ModelsConfig(roots=[str(vision_root)])
+    scan_and_register(registry, cfg)
+    models = registry.list()
+    # No registered model points at the sidecar.
+    assert all("mmproj" not in Path(m.path).name.lower() for m in models)
+    # The main vision model carries its sidecar path.
+    main = next(m for m in models if m.path.endswith("STRIX_LEAN.gguf"))
+    assert main.mmproj is not None
+    assert Path(main.mmproj).name == "mmproj-F32.mmproj"
+    # The plain model has no sidecar.
+    plain = next(m for m in models if m.path.endswith("plain-chat-q4_k_m.gguf"))
+    assert plain.mmproj is None
+
+
 def test_scan_and_register_missing_root_is_silent(tmp_path: Path, registry: ModelRegistry) -> None:
     cfg = ModelsConfig(roots=[str(tmp_path / "does-not-exist")])
     result = scan_and_register(registry, cfg)
     assert result["added"] == []
-    assert result["scanned_roots"] == [str(tmp_path / "does-not-exist")]
+    # The configured (missing) root is scanned silently. scan_roots() also folds
+    # in the effective store/pull_root, so this is a membership check, not exact.
+    assert str(tmp_path / "does-not-exist") in result["scanned_roots"]
+
+
+def test_backfill_coordless_fills_from_curated(registry: ModelRegistry) -> None:
+    """An existing registry row with empty coords whose on-disk filename matches
+    a curated entry is repaired in place; the id is unchanged."""
+    mid = "qwen3-6-35b-a3b-nsc-ace-saber-mtp-f16-to-rocmfp4-strix-lean"
+    fname = "Qwen3.6-35B-A3B-NSC-ACE-SABER-MTP-F16-to-ROCmFP4-STRIX_LEAN.gguf"
+    registry.add(
+        Model(
+            id=mid,
+            path=f"/models/{fname}",
+            name="",
+            hf_repo="",
+            hf_filename="",
+            capabilities=["chat"],
+        )
+    )
+    repaired = backfill_coordless(registry)
+    assert repaired == [mid]
+    row = registry.get(mid)
+    assert row.id == mid  # id never changes
+    assert row.hf_repo == "jcbtc/chadrock-35b-ace-saber-rocmfp4-mtp"
+    assert row.hf_filename == fname
+    assert row.name  # display name filled
+
+
+def test_backfill_coordless_is_idempotent(registry: ModelRegistry) -> None:
+    """A second backfill pass is a no-op once coords are present."""
+    fname = "Qwopus3.6-27B-Coder-MTP-Q6_K.gguf"
+    mid = "qwopus3-6-27b-coder-mtp-q6-k"
+    registry.add(Model(id=mid, path=f"/models/{fname}", hf_repo="", hf_filename=""))
+    assert backfill_coordless(registry) == [mid]
+    assert backfill_coordless(registry) == []
+
+
+def test_backfill_coordless_skips_rows_with_coords(registry: ModelRegistry) -> None:
+    """A row that already carries coords is never touched, even with a curated
+    match by filename."""
+    fname = "Qwopus3.6-27B-Coder-MTP-Q6_K.gguf"
+    registry.add(
+        Model(
+            id="qwopus3-6-27b-coder-mtp-q6-k",
+            path=f"/models/{fname}",
+            hf_repo="someone/custom-repo",
+            hf_filename=fname,
+        )
+    )
+    assert backfill_coordless(registry) == []
+    assert registry.get("qwopus3-6-27b-coder-mtp-q6-k").hf_repo == "someone/custom-repo"
+
+
+def test_backfill_coordless_no_curated_match_left_alone(registry: ModelRegistry) -> None:
+    """A coord-less row with no curated filename match is left as-is."""
+    registry.add(Model(id="mystery", path="/models/mystery.gguf", hf_repo="", hf_filename=""))
+    assert backfill_coordless(registry) == []
+
+
+def test_scan_and_register_backfills_existing_coordless_row(
+    tmp_path: Path, registry: ModelRegistry
+) -> None:
+    """End-to-end: scan_and_register repairs an existing coord-less row whose
+    file is already registered (so it never re-surfaces as a candidate)."""
+    root = tmp_path / "models"
+    root.mkdir()
+    fname = "Qwopus3.6-27B-Coder-MTP-Q6_K.gguf"
+    fpath = root / fname
+    fpath.write_bytes(b"x" * 64)
+    mid = "qwopus3-6-27b-coder-mtp-q6-k"
+    registry.add(
+        Model(id=mid, path=str(fpath.resolve()), hf_repo="", hf_filename="", capabilities=["chat"])
+    )
+    cfg = ModelsConfig(roots=[str(root)])
+    result = scan_and_register(registry, cfg)
+    assert mid in result["backfilled"]
+    row = registry.get(mid)
+    assert row.hf_repo == "Jackrong/Qwopus3.6-27B-Coder-MTP-GGUF"
+    assert row.hf_filename == fname

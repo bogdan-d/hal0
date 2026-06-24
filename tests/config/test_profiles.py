@@ -111,8 +111,32 @@ class TestResolveProfileFlags:
     def test_mtp_true_appends_bundle(self) -> None:
         p = ProfileConfig(image="ghcr.io/hal0ai/foo:bar", flags="-fa on -b 512", mtp=True)
         result = resolve_profile_flags(p)
-        assert result.startswith("-fa on -b 512 ")
+        # base flags are preserved verbatim and the MTP bundle is present. The
+        # bundle now leads (it supplies defaults the profile's explicit flags
+        # override); a profile with no --spec flags keeps the bundle intact.
+        assert "-fa on -b 512" in result
         assert "--spec-type draft-mtp" in result
+
+    def test_explicit_profile_spec_flags_win_over_bundle(self) -> None:
+        """A profile that pins its own --spec-draft-* values keeps them; the MTP
+        bundle only fills the gaps. Regression: the bundle used to be appended
+        verbatim and silently clobbered explicit profile spec flags."""
+        p = ProfileConfig(
+            image="ghcr.io/hal0ai/foo:bar",
+            flags="-fa on --spec-draft-type-k f16 --spec-draft-type-v f16 --spec-draft-p-min 0.25",
+            mtp=True,
+        )
+        result = resolve_profile_flags(p)
+        # explicit values survive, exactly once, with no clobber/duplication
+        assert "--spec-draft-type-k f16" in result
+        assert "--spec-draft-p-min 0.25" in result
+        assert "--spec-draft-type-k q8_0" not in result
+        assert "--spec-draft-p-min 0.0" not in result
+        assert result.split().count("--spec-draft-type-k") == 1
+        assert result.split().count("--spec-draft-p-min") == 1
+        # gap-filling: bundle flags the profile did not set are still supplied
+        assert "--spec-type draft-mtp" in result
+        assert "--spec-draft-n-max 4" in result
 
     def test_mtp_true_contains_all_key_flags(self) -> None:
         p = ProfileConfig(image="ghcr.io/hal0ai/foo:bar", flags="-fa on", mtp=True)
@@ -120,8 +144,10 @@ class TestResolveProfileFlags:
         assert "--spec-draft-device ROCm0" in result
         assert "--spec-draft-ngl all" in result
         assert "--spec-draft-n-max 4" in result
-        assert "--spec-draft-type-k q4_0" in result
-        assert "--spec-draft-type-v q4_0" in result
+        assert "--spec-draft-type-k q8_0" in result
+        assert "--spec-draft-type-v q8_0" in result
+        assert "--spec-draft-threads 16" in result
+        assert "--spec-draft-poll 1" in result
 
     def test_mtp_bundle_literal_match(self) -> None:
         """MTP_FLAG_BUNDLE constant is verbatim in the resolved string."""

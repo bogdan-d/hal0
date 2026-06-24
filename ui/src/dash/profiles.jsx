@@ -19,6 +19,8 @@ import {
   useProfileCreate,
   useProfileUpdate,
   useProfileDelete,
+  useProfileExport,
+  useProfileImport,
 } from '@/api/hooks/useProfiles'
 import { prettyProfile } from './profile-names'
 
@@ -75,115 +77,77 @@ function SlotPill({ name }) {
 
 // ── Profile card ──────────────────────────────────────────────────────────────
 
-function ProfileCard({ p, index, onEdit, onClone, onDelete }) {
+// Info row in the stacks-card "slotlist" idiom: hued dot · label · value.
+function PfRow({ label, value, hue }) {
+  return (
+    <div className="stk-lib-slotrow">
+      <span className="pf-row-dot" style={hue ? { background: hue, boxShadow: `0 0 6px ${hue}` } : null} />
+      <span className="stk-csr-name mono">{label}</span>
+      <span className="stk-csr-model mono">{value}</span>
+    </div>
+  );
+}
+
+// Profile card — adopts the Stacks library-card shell (.stk-lib-*) so the
+// Profiles and Stacks grids read as one family. Same data + actions as before.
+function ProfileCard({ p, index, onEdit, onClone, onDelete, onExport }) {
   const meta = bk(backendOf(p));
   const isSeed = !!p.seed;
   const usedBy = p.used_by || [];
   const inUse = usedBy.length;
+  const metric = p.tps != null ? `${p.tps.toFixed(1)} tok/s`
+    : p.rtf != null ? `${p.rtf.toFixed(2)}× rtf` : null;
 
   return (
-    <div className="pf-card" style={{ '--bk': meta.color, animationDelay: (index * 34) + 'ms' }}>
-      <span className="pf-accent" />
-      <div className="pf-card-top">
-        <div className="pf-headline">
-          <div className="pf-intent">{intentOf(p)}</div>
-          <div className="pf-slug-row mono">
-            <span className="pf-slug">{p.name}</span>
-            {p.cloned_from && <span className="pf-based">↳ {p.cloned_from}</span>}
+    <div className="stk-lib-card" style={{ animationDelay: (index * 34) + 'ms' }}>
+      <div className="stk-lib-h">
+        <div className="stk-lib-id">
+          <div className="stk-lib-name">{p.name}</div>
+          <div className="stk-lib-intent">
+            {intentOf(p)}{p.cloned_from && <span className="pf-based mono"> · ↳ {p.cloned_from}</span>}
           </div>
         </div>
-        <div className="pf-metric">
-          {p.tps != null ? (
-            <>
-              <span className="pf-tps num">{p.tps.toFixed(1)}</span>
-              <span className="pf-tps-u mono">tok/s · bench</span>
-            </>
-          ) : p.rtf != null ? (
-            <>
-              <span className="pf-tps num">{p.rtf.toFixed(2)}×</span>
-              <span className="pf-tps-u mono">RTF · synth</span>
-            </>
-          ) : (
-            <span className="pf-tps-u mono">—</span>
-          )}
+        <div className="pf-card-meta">
+          <span className="stk-tag pf-bk" style={{ '--bk': meta.color, color: meta.color, borderColor: 'color-mix(in srgb, ' + meta.color + ' 34%, transparent)', background: 'color-mix(in srgb, ' + meta.color + ' 10%, transparent)' }}>
+            {meta.label}
+          </span>
+          {metric && <span className="mono pf-card-metric">{metric}</span>}
         </div>
       </div>
 
-      <div className="pf-chips">
-        <span className="pf-chip backend" style={{ '--bk': meta.color }}>
-          <span className="pf-chip-dot" />{meta.label}
-        </span>
-        {p.quant && <span className="pf-chip">{p.quant}</span>}
-        {p.mtp && <span className="pf-chip mtp">{Icons.zap} MTP</span>}
-        <span className="pf-grow" />
+      <div className="stk-lib-slotlist">
+        {p.quant && <PfRow label="quant" value={p.quant} />}
+        {p.mtp && <PfRow label="mtp" value="speculative" hue="var(--accent)" />}
+        <PfRow label="image" value={p.image} />
+        {p.resolved_flags && <PfRow label="flags" value={p.resolved_flags} />}
+      </div>
+
+      <div className="stk-lib-f">
+        {inUse
+          ? <span className="stk-tag" title={'used by ' + usedBy.join(', ')}>used by {inUse}</span>
+          : <span className="mono pf-card-unused">unused</span>}
         {isSeed
-          ? <span className="pf-chip seed immutable" title="Seed profiles are read-only">{Icons.lock} seed</span>
-          : <span className="pf-chip custom">custom</span>}
-      </div>
-
-      <div className="pf-image mono">
-        <span className="pf-image-lbl">image</span>
-        <span className="pf-image-uri">{p.image}</span>
-      </div>
-
-      {p.resolved_flags && (
-        <div className="pf-flags">
-          <span className="pf-flags-lbl mono">flags</span>
-          <code className="pf-flags-code">{p.resolved_flags}</code>
-        </div>
-      )}
-
-      <div className="pf-foot">
-        <div className="pf-usage">
-          {inUse ? (
-            <>
-              <span className="pf-usage-lbl mono">used by</span>
-              <span className="pf-slots">{usedBy.map(s => <SlotPill key={s} name={s} />)}</span>
-            </>
-          ) : (
-            <span className="pf-unused mono">unused · safe to delete</span>
-          )}
-        </div>
-        <div className="pf-actions">
-          {isSeed ? (
-            <button
-              className="pf-btn"
-              onClick={() => onClone(p)}
-              title="Seeds are immutable — fork a custom copy"
-              data-testid={`pf-btn-editcopy-${p.name}`}
-            >
-              {Icons.copy} Edit a copy
-            </button>
-          ) : (
-            <>
-              <button
-                className="pf-btn"
-                onClick={() => onClone(p)}
-                title="Clone this profile"
-                data-testid={`pf-btn-clone-${p.name}`}
-              >
-                {Icons.copy}
-              </button>
-              <button
-                className="pf-btn"
-                onClick={() => onEdit(p)}
-                title="Edit"
-                data-testid={`pf-btn-edit-${p.name}`}
-              >
-                {Icons.edit} Edit
-              </button>
-            </>
-          )}
-          <button
-            className="pf-btn danger"
-            onClick={() => onDelete(p)}
-            disabled={isSeed}
-            title={isSeed ? 'Seed profiles cannot be deleted' : inUse ? 'In use — detach slots first' : 'Delete'}
-            data-testid={`pf-btn-delete-${p.name}`}
-          >
-            {Icons.trash}
+          ? <span className="stk-tag pf-seed" title="Seed profiles are read-only">{Icons.lock} seed</span>
+          : <span className="stk-tag shared pf-custom">custom</span>}
+        <span className="stk-spacer" />
+        {isSeed ? (
+          <button className="stk-icon-btn" style={{ width: 26, height: 26 }} onClick={() => onClone(p)}
+            title="Seeds are immutable — fork a custom copy" data-testid={`pf-btn-editcopy-${p.name}`}>
+            {Icons.copy}
           </button>
-        </div>
+        ) : (
+          <>
+            <button className="stk-icon-btn" style={{ width: 26, height: 26 }} onClick={() => onClone(p)}
+              title="Clone this profile" data-testid={`pf-btn-clone-${p.name}`}>{Icons.copy}</button>
+            <button className="stk-icon-btn" style={{ width: 26, height: 26 }} onClick={() => onEdit(p)}
+              title="Edit" data-testid={`pf-btn-edit-${p.name}`}>{Icons.edit}</button>
+          </>
+        )}
+        <button className="stk-icon-btn" style={{ width: 26, height: 26 }} onClick={() => onDelete(p)} disabled={isSeed}
+          title={isSeed ? 'Seed profiles cannot be deleted' : inUse ? 'In use — detach slots first' : 'Delete'}
+          data-testid={`pf-btn-delete-${p.name}`}>{Icons.trash}</button>
+        <button className="stk-icon-btn" style={{ width: 26, height: 26 }} onClick={() => onExport(p)}
+          title="Export this profile as a .hal0profile.json" data-testid={`pf-btn-export-${p.name}`}>{Icons.download}</button>
       </div>
     </div>
   );
@@ -498,6 +462,106 @@ function DeleteConfirm({ p, onCancel, onConfirmed }) {
   );
 }
 
+// ── Import modal (file → dry-run → commit) ────────────────────────────────────
+// Reuses the Stacks dialog shell (.stk-scrim / .stk-dialog / .stk-dlg-*). A
+// profile references no models, so the preview is just identity + integrity +
+// collision — no model resolve/pull affordance.
+
+function ImportModal({ existing, onClose, onImported }) {
+  const imp = useProfileImport();
+  const [envelope, setEnvelope] = useState(null);
+  const [report, setReport] = useState(null);
+  const [name, setName] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
+
+  async function onFile(file) {
+    setErr('');
+    try {
+      const text = await file.text();
+      const env = JSON.parse(text);
+      setEnvelope(env);
+      const r = await imp.mutateAsync({ envelope: env, dry_run: true });
+      setReport(r);
+      setName(r.name || '');
+    } catch (e) {
+      setErr(e?.message || 'Not a valid .hal0profile.json envelope');
+      setEnvelope(null); setReport(null);
+    }
+  }
+
+  const taken = existing.includes(name);
+  const nameValid = NAME_RE.test(name);
+  const canCommit = !!report && nameValid && !busy;
+
+  async function commit() {
+    if (!report || !name.trim()) return;
+    setBusy(true);
+    try {
+      await imp.mutateAsync({ envelope, name, dry_run: false });
+      toast(`Imported ${name}`, 'ok');
+      onImported();
+    } catch (e) {
+      if (e?.code === 'profiles.exists' || e?.status === 409) {
+        setErr(`“${name}” already exists — pick another name`);
+      } else {
+        toast(e?.message || 'Import failed', 'err');
+      }
+    } finally { setBusy(false); }
+  }
+
+  return (
+    <div className="stk-scrim" onMouseDown={() => { if (!busy) onClose(); }}>
+      <div className="stk-dialog" onMouseDown={e => e.stopPropagation()} role="dialog" aria-label="Import profile" aria-busy={busy}>
+        <div className="stk-dlg-h">
+          <span className="stk-dlg-eye">Import profile</span>
+          <button className="stk-dlg-x" onClick={onClose} aria-label="Close" disabled={busy}>{Icons.close}</button>
+        </div>
+        <div className="stk-dlg-b">
+          {!report ? (
+            <label className="stk-drop">
+              <input type="file" accept=".hal0profile.json,.json,application/json" style={{ display: 'none' }}
+                onChange={e => e.target.files?.[0] && onFile(e.target.files[0])} data-testid="pf-import-file" />
+              <span className="stk-drop-glyph">{Icons.attach}</span>
+              <span className="mono">Choose a .hal0profile.json file</span>
+              {err && <span className="stk-dlg-warn">{Icons.alert}{err}</span>}
+            </label>
+          ) : (
+            <>
+              <div className="stk-dlg-hint">
+                {report.name || 'profile'} · schema v{report.schema_version} · checksum {report.checksum_ok ? '✓ ok' : '✗ mismatch'}
+              </div>
+              {report.collides && (
+                <div className="stk-dlg-warn">{Icons.alert}A profile named “{report.name}” already exists — choose a different name to import.</div>
+              )}
+              <div className="stk-slot-list">
+                <div className="stk-slot-row">
+                  <span className="sname">Save as</span>
+                  <input className={'pf-input mono' + (name && !nameValid ? ' err' : '')} value={name}
+                    onChange={e => { setName(e.target.value); setErr(''); }} maxLength={32} placeholder="my-profile"
+                    style={{ flex: 1, background: 'transparent', border: 'none', color: 'var(--fg)', fontFamily: 'var(--jbm)' }}
+                    data-testid="pf-import-name" />
+                </div>
+              </div>
+              {name && !nameValid && <div className="stk-dlg-warn">{Icons.alert}lowercase · digits · - · _ · ≤32</div>}
+              {taken && nameValid && <div className="stk-dlg-warn">{Icons.alert}“{name}” already exists</div>}
+              {err && <div className="stk-dlg-warn">{Icons.alert}{err}</div>}
+            </>
+          )}
+        </div>
+        <div className="stk-dlg-f">
+          <button className="btn ghost sm" onClick={onClose} disabled={busy}>Cancel</button>
+          {report && (
+            <button className="btn sm" onClick={commit} disabled={!canCommit} data-testid="pf-import-confirm">
+              {busy ? 'Importing…' : 'Import'}
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Summary cell ─────────────────────────────────────────────────────────────────
 
 function Stat({ value, label, accent }) {
@@ -516,7 +580,7 @@ function Stat({ value, label, accent }) {
 // Profiles tab reads as part of the same family instead of the old big-h1 view
 // header. The base .engine-h styling is global (connections.css); .pf-engine-h
 // only de-emphasises the pointer cursor and accent the panel owns.
-function ProfilesHeader({ count, onNew }) {
+function ProfilesHeader({ count, onNew, onImport }) {
   return (
     <div className="engine-h pf-engine-h">
       <span className="engine-glyph">{Icons.slots}</span>
@@ -531,11 +595,18 @@ function ProfilesHeader({ count, onNew }) {
         </span>
       )}
       <span className="grow" />
-      {onNew && (
+      {(onNew || onImport) && (
         <span className="eh-right">
-          <button className="pf-btn primary" onClick={onNew} data-testid="pf-btn-new">
-            {Icons.plus} New profile
-          </button>
+          {onImport && (
+            <button className="pf-btn" onClick={onImport} data-testid="pf-btn-import">
+              {Icons.attach} Import
+            </button>
+          )}
+          {onNew && (
+            <button className="pf-btn primary" onClick={onNew} data-testid="pf-btn-new">
+              {Icons.plus} New profile
+            </button>
+          )}
         </span>
       )}
     </div>
@@ -545,13 +616,29 @@ function ProfilesHeader({ count, onNew }) {
 function ProfilesView() {
   const query = useProfiles();
   const profiles = query.data ?? [];
+  const exportMut = useProfileExport();
 
   const [drawer, setDrawer] = useState(null);   // {mode, source}
   const [confirm, setConfirm] = useState(null);
+  const [importing, setImporting] = useState(false);
 
   const seeds = profiles.filter(p => p.seed);
   const custom = profiles.filter(p => !p.seed);
   const inUseCount = profiles.filter(p => (p.used_by || []).length).length;
+
+  async function onExport(p) {
+    const name = p.name;
+    try {
+      const env = await exportMut.mutateAsync(name);
+      const blob = new Blob([JSON.stringify(env, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = `${name}.hal0profile.json`;
+      document.body.appendChild(a); a.click(); a.remove();
+      URL.revokeObjectURL(url);
+      toast(`Exported ${name}`, 'ok');
+    } catch (err) { toast(err?.message || 'Export failed', 'err'); }
+  }
 
   if (query.isLoading) {
     return (
@@ -576,7 +663,7 @@ function ProfilesView() {
   return (
     <div className="view">
       <div className="pf-engine">
-        <ProfilesHeader count={profiles.length} onNew={() => setDrawer({ mode: 'create' })} />
+        <ProfilesHeader count={profiles.length} onNew={() => setDrawer({ mode: 'create' })} onImport={() => setImporting(true)} />
         <div className="pf-summary">
           <Stat value={profiles.length} label="profiles" />
           <span className="pf-stat-div" />
@@ -602,7 +689,8 @@ function ProfilesView() {
               <ProfileCard key={p.name} p={p} index={i}
                 onEdit={pp => setDrawer({ mode: 'edit', source: pp })}
                 onClone={pp => setDrawer({ mode: 'clone', source: pp })}
-                onDelete={pp => setConfirm(pp)} />
+                onDelete={pp => setConfirm(pp)}
+                onExport={onExport} />
             ))}
           </Section>
 
@@ -611,7 +699,8 @@ function ProfilesView() {
               <ProfileCard key={p.name} p={p} index={i}
                 onEdit={pp => setDrawer({ mode: 'edit', source: pp })}
                 onClone={pp => setDrawer({ mode: 'clone', source: pp })}
-                onDelete={pp => setConfirm(pp)} />
+                onDelete={pp => setConfirm(pp)}
+                onExport={onExport} />
             ))}
           </Section>
         </>
@@ -628,6 +717,13 @@ function ProfilesView() {
       )}
       {confirm && (
         <DeleteConfirm p={confirm} onCancel={() => setConfirm(null)} onConfirmed={() => setConfirm(null)} />
+      )}
+      {importing && (
+        <ImportModal
+          existing={profiles.map(p => p.name)}
+          onClose={() => setImporting(false)}
+          onImported={() => setImporting(false)}
+        />
       )}
     </div>
   );

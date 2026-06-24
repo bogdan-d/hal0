@@ -91,6 +91,24 @@ def _version_tuple(v: str) -> tuple[int, ...]:
     return tuple(parts) or (0,)
 
 
+def _is_newer(candidate: str, current: str) -> bool:
+    """Return True if PEP 440 version ``candidate`` is strictly newer than ``current``.
+
+    Uses ``packaging.version.Version`` so pip-normalised forms (``0.8.0b3``) order
+    correctly against tag-derived manifest forms (``0.8.1-beta.1``); the naive
+    ``_version_tuple`` digit-parser read ``0.8.0b3`` as ``(0, 8, 3)`` and missed the
+    upgrade. Falls back to the tuple compare only when a string is not valid PEP 440.
+    """
+    try:
+        from packaging.version import InvalidVersion, Version
+    except Exception:
+        return _version_tuple(candidate) > _version_tuple(current)
+    try:
+        return Version(candidate) > Version(current)
+    except InvalidVersion:
+        return _version_tuple(candidate) > _version_tuple(current)
+
+
 def _current_channel(request: Request) -> str:
     """Read the current channel from the cached Hal0Config (falls back to load)."""
     cfg = getattr(request.app.state, "hal0_config", None)
@@ -362,7 +380,7 @@ async def update_state(request: Request) -> dict[str, Any]:
             if hal0_revoked and latest:
                 hal0_revoked_version = latest
             # A revoked latest is not offered (but its reason is surfaced).
-            if latest and not hal0_revoked and _version_tuple(latest) > _version_tuple(__version__):
+            if latest and not hal0_revoked and _is_newer(latest, __version__):
                 hal0_available = latest
     except (OSError, ValueError):
         pass
@@ -437,9 +455,7 @@ async def check_updates(request: Request) -> dict[str, Any]:
         revoked_reason = str(manifest.get("revoked_reason") or "")
 
     # A revoked (yanked) latest is never offered as an available update.
-    update_available = (
-        bool(latest) and not revoked and _version_tuple(latest) > _version_tuple(__version__)
-    )
+    update_available = bool(latest) and not revoked and _is_newer(latest, __version__)
     return {
         "current": __version__,
         "latest": latest or None,

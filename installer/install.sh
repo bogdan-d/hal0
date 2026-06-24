@@ -9,8 +9,6 @@
 # Env overrides:
 #   HAL0_PREFIX        installation root (default /opt/hal0)
 #   HAL0_PORT          API port (default 8080)
-#   HAL0_USER          system user (default root — slot template uses root
-#                      because the container is the real sandbox boundary)
 #   HAL0_PYTHON        python interpreter (default python3)
 #   HAL0_NO_PROBE=1    skip the hardware probe at the end
 #   HAL0_TOOLBOX_IMAGE_VULKAN, HAL0_TOOLBOX_IMAGE_ROCM, ...
@@ -110,7 +108,6 @@ done
 ui_banner
 
 HAL0_PORT="${HAL0_PORT:-8080}"
-HAL0_USER="${HAL0_USER:-root}"
 PY="${HAL0_PYTHON:-python3}"
 
 # API binds 0.0.0.0:8080 unconditionally. TLS is upstream's job — see
@@ -224,7 +221,7 @@ ui_step "Pre-flight checks"
 if [[ "${DEV_MODE}" -eq 0 && "$(id -u)" -ne 0 ]]; then
     if command -v sudo >/dev/null; then
         warn "Re-exec under sudo"
-        exec sudo -E HAL0_PORT="${HAL0_PORT}" HAL0_USER="${HAL0_USER}" HAL0_PYTHON="${PY}" \
+        exec sudo -E HAL0_PORT="${HAL0_PORT}" HAL0_PYTHON="${PY}" \
             HAL0_PREFIX="${HAL0_PREFIX:-}" HAL0_NO_PROBE="${HAL0_NO_PROBE:-}" \
             bash "$0" "$@"
     else
@@ -527,7 +524,8 @@ HAL0_UI_DIST=${HAL0_UI_DIST_VAL}
 # Memory subsystem (Hindsight engine + /mcp/memory + the Agent → Memory tab)
 # is ENABLED by default as of v0.5 (brain re-enablement). Comment out to ship
 # with memory dark. Needs the shared hindsight-api daemon (installer/systemd/
-# hindsight-api.service); set [memory] engine = "cognee" to fall back.
+# hindsight-api.service). If the daemon is unreachable, hal0 degrades to the
+# in-memory pgvector provider (ADR-0023; the cognee engine was removed).
 HAL0_MEMORY_ENABLED=1
 # HF_TOKEN — HuggingFace token for gated / large model pulls. Easiest path:
 # set it in the dashboard (Settings -> Secrets -> HuggingFace token) for a live,
@@ -590,7 +588,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=${HAL0_USER}
+User=root
 # Group-writable umask so files the API writes into a shared editable tree stay
 # editable by the hal0 group (Hermes & in-runtime agents) — part of the #843
 # root-clobber fix. Harmless on an immutable FHS install.
@@ -608,6 +606,14 @@ SyslogIdentifier=hal0-api
 WantedBy=multi-user.target
 EOF
 info "wrote ${API_UNIT}"
+
+# Hardened mode removed: hal0-api now always runs as root (User=root above), so
+# updates / systemd drop-in writes / service restarts work without a privileged
+# seam. Remove any stale run-as-hal0 drop-in left by an older hardened-perms
+# install so upgrading such a box reverts the unit cleanly to User=root.
+API_DROPIN_DST_DIR="${UNIT_DIR}/hal0-api.service.d"
+rm -f "${API_DROPIN_DST_DIR}/20-run-as-hal0.conf" 2>/dev/null || true
+rmdir "${API_DROPIN_DST_DIR}" 2>/dev/null || true
 
 OPENWEBUI_UNIT_SRC="${REPO_ROOT}/packaging/systemd/hal0-openwebui.service"
 OPENWEBUI_UNIT_DST="${UNIT_DIR}/hal0-openwebui.service"
@@ -676,6 +682,49 @@ if [[ -f "${AGENT_UNIT_SRC}" ]]; then
     else
         warn "${GUARD_SRC} not found — run-as-hal0 guard not installed"
     fi
+
+    # Slot privilege seam removed: hal0-api runs as root and writes per-slot
+    # units / runs systemctl directly (the ContainerProvider's former euid
+    # routing through hal0-slotctl is gone). Remove any stale helper + sudoers
+    # grant left by an older hardened-perms install.
+    rm -f "${LIB_DIR}/bin/hal0-slotctl" 2>/dev/null || true
+    if [[ "${DEV_MODE}" -eq 0 ]]; then
+        rm -f /etc/sudoers.d/hal0-slotctl 2>/dev/null || true
+    fi
+
+    # Privileged seam #2 (D hardened-perms): hal0-agentenv writes the per-agent
+    # .env files that the hardened model pins root:root — the secrets vault
+    # (/var/lib/hal0/secrets/agents/<agent>.env) and the driver env
+    # (/etc/hal0/agents/<agent>.env). When hal0-api runs unprivileged it cannot
+    # write those root-owned dirs, so the hermes provisioner delegates the two
+    # writes here. Inert under the default root install (the provisioner branches
+    # on euid). Lands at the absolute /usr/lib/hal0/bin path the provider's
+    # _HAL0_AGENTENV default hardcodes (dev mode shadows it under PREFIX).
+    AGENTENV_SRC="${REPO_ROOT}/installer/wrappers/hal0-agentenv"
+    if [[ -f "${AGENTENV_SRC}" ]]; then
+        install -d "${LIB_DIR}/bin"
+        install -m 0755 "${AGENTENV_SRC}" "${LIB_DIR}/bin/hal0-agentenv"
+        info "wrote ${LIB_DIR}/bin/hal0-agentenv"
+    else
+        warn "${AGENTENV_SRC} not found — agent-env seam helper not installed"
+    fi
+
+    # sudoers grant for the agent-env seam. Real installs only; visudo-validate
+    # before activating so a malformed drop-in can never wedge sudo for the box.
+    if [[ "${DEV_MODE}" -eq 0 ]]; then
+        AGENTENV_SUDOERS_SRC="${REPO_ROOT}/packaging/sudoers/hal0-agentenv"
+        AGENTENV_SUDOERS_DST="/etc/sudoers.d/hal0-agentenv"
+        if [[ -f "${AGENTENV_SUDOERS_SRC}" ]]; then
+            if visudo -cf "${AGENTENV_SUDOERS_SRC}" >/dev/null 2>&1; then
+                install -m 0440 "${AGENTENV_SUDOERS_SRC}" "${AGENTENV_SUDOERS_DST}"
+                info "wrote ${AGENTENV_SUDOERS_DST}"
+            else
+                warn "${AGENTENV_SUDOERS_SRC} failed visudo check — agent-env sudoers grant not installed"
+            fi
+        else
+            warn "${AGENTENV_SUDOERS_SRC} not found — agent-env sudoers grant not installed"
+        fi
+    fi
 else
     warn "${AGENT_UNIT_SRC} not found — hal0-agent@ template not installed"
 fi
@@ -710,8 +759,14 @@ else
     # curl|bash installer must stay fast). --no-extensions: OpenWebUI + Hermes
     # are installed by the dedicated stages below, not here. Interactive
     # `hal0 setup` (post-install) handles model downloads + extension choices.
-    "${HAL0_BIN}" setup --auto --no-pull --no-extensions \
-        ${MODELS_DIR:+--storage-dir "${MODELS_DIR}"} \
+    # Build argv as an array so --storage-dir and its value stay TWO separate
+    # tokens. The old `${MODELS_DIR:+--storage-dir "${MODELS_DIR}"}` collapsed
+    # into a single arg ("--storage-dir /mnt/ai-models") that typer rejected
+    # with "No such option", silently skipping --auto seeding on --models-dir
+    # installs.
+    _setup_args=(--auto --no-pull --no-extensions)
+    [[ -n "${MODELS_DIR}" ]] && _setup_args+=(--storage-dir "${MODELS_DIR}")
+    "${HAL0_BIN}" setup "${_setup_args[@]}" \
         || warn "first-run setup failed; run 'hal0 setup' after install"
 fi
 
@@ -823,10 +878,31 @@ else
         warn "  (only the host 'flm validate' probe is disabled). Install FastFlowLM manually if upstream ships a build for this host."
     fi
 
-    # libxrt-npu2 — best-effort. Available only when the host's apt sources
-    # carry an XRT NPU build (e.g. a pre-existing vendor repo on upgraded
-    # boxes). The FLM container image bundles its own runtime, so a miss here
-    # only disables the HOST `flm validate` probe, not the npu slot itself.
+    # The FastFlowLM .deb hard-depends on libxrt2 + libxrt-npu2 (AMDXDNA NPU
+    # runtime), which ship from the lemonade-team PPA — NOT Ubuntu's own repos.
+    # Without the PPA a fresh box hits `fastflowlm : Depends: libxrt-npu2 but it
+    # is not installable` and skips FLM entirely. Add the PPA (Ubuntu only — it
+    # builds for `noble`; the FLM container bundles its own runtime so this is
+    # only for the host `flm validate` probe) before the libxrt install.
+    # Best-effort + idempotent: a failure here just disables host NPU probing;
+    # GPU/CPU hal0 is unaffected.
+    if [[ "$(distro_id)" == "ubuntu" ]] \
+        && ! apt-cache policy libxrt-npu2 2>/dev/null | grep -q lemonade-team; then
+        if command -v add-apt-repository >/dev/null 2>&1 \
+            || apt-get install -y software-properties-common >/dev/null 2>&1; then
+            if add-apt-repository -y ppa:lemonade-team/stable >/dev/null 2>&1; then
+                apt-get update -qq >/dev/null 2>&1 || true
+                info "added lemonade-team PPA (libxrt-npu2 / AMDXDNA NPU runtime)"
+            else
+                warn "could not add lemonade-team PPA — host NPU libs (libxrt-npu2) may be unavailable"
+            fi
+        fi
+    fi
+
+    # libxrt-npu2 — best-effort. Resolved from the lemonade-team PPA added above
+    # (or a pre-existing vendor repo on upgraded boxes). The FLM container image
+    # bundles its own runtime, so a miss here only disables the HOST `flm
+    # validate` probe, not the npu slot itself.
     if apt-get install -y libxrt-npu2 >/dev/null 2>&1; then
         info "libxrt-npu2 installed (AMDXDNA NPU runtime for the host flm probe)"
     else
@@ -1053,9 +1129,9 @@ else
     # ${VAR_DIR} (per useradd above), so HF's default cache lands at
     # ${VAR_DIR}/.cache/huggingface/hub. Pre-create the leaf dir + give
     # hal0 ownership of the cache tree (NOT the whole VAR_DIR — slot
-    # state.json + registry are written by hal0-api which runs as
-    # ${HAL0_USER}, default root) so hal0-user processes can download
-    # HF assets without a PermissionError on first use.
+    # state.json + registry are written by hal0-api, which runs as root)
+    # so hal0-user processes (agents) can download HF assets without a
+    # PermissionError on first use.
     mkdir -p "${VAR_DIR}/.cache/huggingface/hub"
     chown -R hal0:hal0 "${VAR_DIR}/.cache"
 
@@ -1077,6 +1153,17 @@ else
     chmod 2775 "${VAR_DIR}"
     touch "${VAR_DIR}/STATE.md"
     chown hal0:hal0 "${VAR_DIR}/STATE.md"
+
+    # Seed the agent config + secret dirs (root-owned; the agent driver reads
+    # agents/, and systemd reads the secrets/ EnvironmentFile as root). The hermes
+    # provisioner also creates these, but seeding them here keeps them present
+    # before provisioning.
+    #
+    # NOTE: the former HAL0_USER!=root "hardened-perms flip" — which chowned the
+    # whole /etc/hal0 + /var/lib/hal0 tree to an unprivileged service user so a
+    # dropped hal0-api could rewrite config — was removed. hal0-api runs as root,
+    # so it writes config/state, applies updates, and restarts services directly.
+    mkdir -p "${ETC_DIR}/agents" "${VAR_DIR}/secrets/agents"
 
 fi
 
@@ -1303,16 +1390,40 @@ else
         # the drop-in BEFORE first start so platforms connect on boot.
         # HERMES_HOME is unset so the generator bakes the hal0 default
         # (~/.hermes), not a value inherited from the installer env.
+        #
+        # `hermes gateway install` on the systemd path PROMPTS interactively
+        # ("Start the gateway now…?" / "…on boot?") with no flag to bypass.
+        # The installer's contract is non-interactive (see DEBIAN_FRONTEND
+        # above), so we feed it </dev/null: a TTY-less read hits EOF and
+        # hermes falls back to its built-in defaults (install + enable on
+        # boot + start now). Without this, two failure modes appear:
+        #   - on a real TTY the install BLOCKS on the prompt;
+        #   - under a launcher that *closes* fd 0 (some headless/CI runners),
+        #     hermes' input() raises `RuntimeError: lost sys.stdin` — which it
+        #     does NOT catch — so the install aborts AFTER printing the prompt
+        #     but BEFORE writing the unit file. That is what produced the
+        #     "Unit file hermes-gateway.service does not exist" error below.
+        # Redirecting from /dev/null turns that crash into a clean EOF.
+        GATEWAY_UNIT_DST="${UNIT_DIR}/hermes-gateway.service"
         info "installing system-scope hermes gateway (User=hal0)"
-        env -u HERMES_HOME /var/lib/hal0/venvs/hermes/bin/hermes gateway install --system --run-as-user hal0 \
+        env -u HERMES_HOME /var/lib/hal0/venvs/hermes/bin/hermes gateway install --system --run-as-user hal0 </dev/null \
             || warn "hermes gateway install failed — Telegram/Discord bridge unavailable; continuing"
-        systemctl daemon-reload
-        systemctl enable --now hermes-gateway.service \
-            || warn "hermes-gateway enable returned non-zero — continuing (check 'journalctl -u hermes-gateway -n 40')"
-        if wait_active hermes-gateway.service 20; then
-            info "hermes-gateway is running (Telegram/Discord)"
+        # Only enable/start if hermes actually laid down the unit. If the
+        # install genuinely failed the file is absent; `systemctl enable` would
+        # otherwise emit a scary "Unit file … does not exist" error and trip
+        # the ERR trap. Skip honestly with a warning instead.
+        if [[ -f "${GATEWAY_UNIT_DST}" ]]; then
+            systemctl daemon-reload
+            systemctl enable --now hermes-gateway.service \
+                || warn "hermes-gateway enable returned non-zero — continuing (check 'journalctl -u hermes-gateway -n 40')"
+            if wait_active hermes-gateway.service 20; then
+                info "hermes-gateway is running (Telegram/Discord)"
+            else
+                warn "hermes-gateway not yet active; check 'journalctl -u hermes-gateway -n 40'"
+            fi
         else
-            warn "hermes-gateway not yet active; check 'journalctl -u hermes-gateway -n 40'"
+            warn "hermes-gateway unit not installed (${GATEWAY_UNIT_DST} missing) — Telegram/Discord bridge unavailable"
+            warn "  retry with 'sudo -u hal0 env -u HERMES_HOME /var/lib/hal0/venvs/hermes/bin/hermes gateway install --system --run-as-user hal0 </dev/null'"
         fi
     elif [[ -f "${AGENT_UNIT_DST}" ]]; then
         # No venv after the provision block: it was skipped (HAL0_SKIP_HERMES=1)
@@ -1322,7 +1433,23 @@ else
 
 fi
 
-HOST="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
+# Real LAN IPv4 addresses — filtered to skip container / virtual bridge
+# interfaces (podman/cni/docker/veth/flannel/virbr/...). Without this filter,
+# `hostname -I` leaks noise like the podman 10.88.0.1 gateway into the "Reach
+# hal0 at" list and can even pick it as the primary HOST. Falls back to
+# `hostname -I` (then localhost) when iproute2 is unavailable.
+lan_ipv4s() {
+    if command -v ip >/dev/null 2>&1; then
+        ip -o -4 addr show scope global 2>/dev/null | awk '
+            $2 ~ /^(lo|podman|cni|docker|veth|br-|flannel|kube|virbr|tailscale)/ { next }
+            { sub(/\/.*/, "", $4); print $4 }'
+    else
+        hostname -I 2>/dev/null | tr ' ' '\n'
+    fi
+}
+
+HOST="$(lan_ipv4s | head -1)"
+[[ -z "${HOST}" ]] && HOST="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
 [[ -z "${HOST}" ]] && HOST=localhost
 
 # ── Reachability discovery ─────────────────────────────────────────────────
@@ -1333,13 +1460,10 @@ HOST="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
 REACH_LINES=()
 
 DASHBOARD_URL="http://${HOST}:${HAL0_PORT}/"
-# All IPv4 addresses on this host. `hostname -I` already excludes
-# loopback.
-if command -v hostname >/dev/null 2>&1; then
-    for ip in $(hostname -I 2>/dev/null); do
-        REACH_LINES+=("LAN"$'\t'"http://${ip}:${HAL0_PORT}/")
-    done
-fi
+# Real LAN IPv4s (container/bridge interfaces filtered out — see lan_ipv4s).
+for ip in $(lan_ipv4s); do
+    REACH_LINES+=("LAN"$'\t'"http://${ip}:${HAL0_PORT}/")
+done
 # Tailscale — show whichever tailnet IPs are present. Never fatal.
 if command -v tailscale >/dev/null 2>&1; then
     for ts in $(tailscale ip -4 2>/dev/null) $(tailscale ip -6 2>/dev/null); do
@@ -1361,105 +1485,6 @@ if command -v ip >/dev/null 2>&1; then
     done
 fi
 
-# ── Live hello prompt ──────────────────────────────────────────────────────
-# Fires only when ALL of the following are true:
-#   * not --dev
-#   * not --no-start
-#   * HAL0_NO_HELLO is unset
-#   * the hal0 API is responding to /api/health
-#   * at least one model is already pulled (so we don't silently spend
-#     5+ minutes downloading on first install — cheap operators can
-#     `hal0 model pull qwen3-4b` and re-run the installer to see the
-#     greeting fire)
-# Every step is wrapped so failure logs a single info line and moves on.
-HELLO_RESULT=""
-if [[ "${DEV_MODE}" -eq 0 && "${NO_START}" -eq 0 && -z "${HAL0_NO_HELLO:-}" ]]; then
-    HELLO_BASE="http://127.0.0.1:${HAL0_PORT}"
-    # `wait_active hal0-api` only proves systemd marked the unit active —
-    # uvicorn may still be importing the app and not yet bound to the
-    # port. A single probe here races that cold start and prints a false
-    # "API not responding"; poll /api/health for a few seconds first.
-    HELLO_API_UP=0
-    for _ in $(seq 1 15); do
-        if curl -sf --max-time 2 "${HELLO_BASE}/api/health" >/dev/null 2>&1; then
-            HELLO_API_UP=1
-            break
-        fi
-        sleep 1
-    done
-    if [[ "${HELLO_API_UP}" -eq 1 ]]; then
-        # Find a pulled model. `hal0 model list --installed` returns one
-        # id per line. We pick the first; on a fresh install this is
-        # empty and we skip with a hint.
-        FIRST_MODEL="$("${HAL0_BIN}" model list --installed 2>/dev/null | awk 'NR==1{print $1}' || true)"
-        if [[ -z "${FIRST_MODEL}" || "${FIRST_MODEL}" == "ID" ]]; then
-            HELLO_RESULT="skipped: no model pulled — try '${HAL0_BIN} model pull qwen3-4b' then rerun installer"
-        else
-            HELLO_SLOT="hello"
-            # Best-effort slot create + load. Errors don't stop us.
-            "${HAL0_BIN}" slot create "${HELLO_SLOT}" --backend cpu --provider llama-server >/dev/null 2>&1 || true
-            "${HAL0_BIN}" model assign "${FIRST_MODEL}" --slot "${HELLO_SLOT}" >/dev/null 2>&1 || true
-            "${HAL0_BIN}" slot load "${HELLO_SLOT}" >/dev/null 2>&1 || true
-
-            # Wait up to 30 s for the slot to report ready.
-            HELLO_DEADLINE=$((SECONDS + 30))
-            HELLO_READY=0
-            while (( SECONDS < HELLO_DEADLINE )); do
-                if curl -sf --max-time 2 "${HELLO_BASE}/api/slots/${HELLO_SLOT}" 2>/dev/null \
-                   | grep -q '"state":"ready"'; then
-                    HELLO_READY=1
-                    break
-                fi
-                sleep 1
-            done
-
-            if [[ "${HELLO_READY}" -eq 1 ]]; then
-                # Stream the greeting. python -c parses SSE and echoes
-                # content deltas in real time. 20 s ceiling on the
-                # whole exchange so a sluggish backend doesn't stall
-                # the installer.
-                printf '\n   %shal0 says:%s\n\n   %s' "${BOLD}" "${RST}" "${AMBER}"
-                set +e
-                timeout 20 curl -sN -X POST \
-                    -H 'Content-Type: application/json' \
-                    -d "{\"model\":\"${HELLO_SLOT}\",\"stream\":true,\"messages\":[{\"role\":\"system\",\"content\":\"You are hal0, just installed on a new machine. Greet the user in one short friendly sentence.\"},{\"role\":\"user\",\"content\":\"Say hi.\"}]}" \
-                    "${HELLO_BASE}/v1/chat/completions" 2>/dev/null \
-                | "${VENV_DIR}/bin/python" -c '
-import json, sys
-for raw in sys.stdin:
-    raw = raw.strip()
-    if not raw.startswith("data: "):
-        continue
-    payload = raw[6:]
-    if payload == "[DONE]":
-        break
-    try:
-        delta = json.loads(payload)["choices"][0]["delta"].get("content", "")
-    except Exception:
-        continue
-    if delta:
-        sys.stdout.write(delta)
-        sys.stdout.flush()
-'
-                rc=$?
-                set -e
-                printf '%s\n\n' "${RST}"
-                if [[ $rc -ne 0 ]]; then
-                    HELLO_RESULT="hello stream errored (exit ${rc}) — slot stayed up; try the dashboard"
-                else
-                    HELLO_RESULT="ok"
-                fi
-            else
-                HELLO_RESULT="skipped: slot ${HELLO_SLOT} not ready within 30s — check 'journalctl -u hal0-slot@${HELLO_SLOT}'"
-            fi
-        fi
-    else
-        HELLO_RESULT="skipped: API not responding at ${HELLO_BASE}/api/health"
-    fi
-fi
-if [[ -n "${HELLO_RESULT}" && "${HELLO_RESULT}" != "ok" ]]; then
-    info "live hello ${HELLO_RESULT}"
-fi
 
 # ── QR code ────────────────────────────────────────────────────────────────
 # Render a QR for DASHBOARD_URL above the summary box if qrencode is on
@@ -1510,10 +1535,13 @@ fi
 SUMMARY_LINES+=(
     ""
     "$(printf '%sNext steps:%s' "${BOLD}" "${RST}")"
-    "$(printf '  %shal0 status%s         system + slot summary' "${BOLD}" "${RST}")"
-    "$(printf '  %shal0 slot list%s      list configured slots' "${BOLD}" "${RST}")"
-    "$(printf '  %shal0 model list%s     list known models' "${BOLD}" "${RST}")"
-    "$(printf '  %shal0 config show%s    inspect %s/hal0.toml' "${BOLD}" "${RST}" "${ETC_DIR}")"
+    "$(printf '  %shal0 setup%s          guided first-run: pick a bundle + pull models' "${BOLD}" "${RST}")"
+    "$(printf '  %shal0 model pull <id>%s download a model (browse with %shal0 model list%s)' "${BOLD}" "${RST}" "${BOLD}" "${RST}")"
+    "$(printf '  %shal0 status%s         system + slot + memory summary' "${BOLD}" "${RST}")"
+    "$(printf '  %shal0 slot list%s      inspect configured slots' "${BOLD}" "${RST}")"
+    "$(printf '  %shal0 update%s         check for + apply updates' "${BOLD}" "${RST}")"
+    ""
+    "$(printf '%sDocs %shttps://github.com/Hal0ai/hal0%s  ·  %sLogs %sjournalctl -fu hal0-api%s' "${DIM}" "${BLU}" "${RST}" "${DIM}" "${BLU}" "${RST}")"
 )
 
 ui_box "hal0 is ready" "${SUMMARY_LINES[@]}"

@@ -41,6 +41,8 @@ export const ENDPOINTS = {
     `/api/slots/${encodeURIComponent(name)}/pull`,
   slotPullStream: (name: string) =>
     `/api/slots/${encodeURIComponent(name)}/pull/stream`,
+  slotResolved: (name: string) =>
+    `/api/slots/${encodeURIComponent(name)}/resolved`,
 
   // ── Models / pull lifecycle ──────────────────────────────────────
   models: '/api/models',
@@ -206,7 +208,9 @@ export const ENDPOINTS = {
   // lifecycle mutations) was removed, so only the server list remains.
   mcpServers: '/api/mcp/servers',
 
-  // ── Memory (ADR-0014 graph-extraction gate) ──────────────────────
+  // ── Memory (ADR-0023 graph-extraction gate) ──────────────────────
+  // status → { enabled, extraction_slot, slot_resolves, available_slots, ... }
+  // PUT body → { enabled?, extraction_slot? }
   memoryGraphStatus: '/api/memory/graph/status',
   memoryGraph: '/api/memory/graph',
 
@@ -289,6 +293,20 @@ export const ENDPOINTS = {
   // ── Profiles (container slot templates) ─────────────────────────
   profiles: '/api/profiles',
   profile: (name: string) => `/api/profiles/${encodeURIComponent(name)}`,
+  // POST export (envelope) | import (collection-level POST: dry-run, then create).
+  profileExport: (name: string) => `/api/profiles/${encodeURIComponent(name)}/export`,
+  profileImport: '/api/profiles/import',
+
+  // ── Stacks (named, portable slot+profile+model bundles) ─────────
+  // GET list (+ active + drift) | POST create. Per-stack: GET detail | PUT |
+  // DELETE | POST apply (?dry_run=true → diff) | POST export (envelope).
+  // import/snapshot are collection-level POSTs.
+  stacks: '/api/stacks',
+  stack: (slug: string) => `/api/stacks/${encodeURIComponent(slug)}`,
+  stackApply: (slug: string) => `/api/stacks/${encodeURIComponent(slug)}/apply`,
+  stackExport: (slug: string) => `/api/stacks/${encodeURIComponent(slug)}/export`,
+  stackImport: '/api/stacks/import',
+  stackSnapshot: '/api/stacks/snapshot',
 
   // Install state — backs the post-install banner and passive install-state hook.
   // Retained for useInstallState.ts (banner/status surface). The FirstRun picker
