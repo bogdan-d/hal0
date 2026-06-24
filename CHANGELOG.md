@@ -10,6 +10,25 @@ Tags older than v0.2.0 ship release notes inside the GitHub release
 page; this CHANGELOG starts at v0.2.0 (the Lemonade migration cut).
 For ADR-level architecture context see `docs/internal/adr/`.
 
+## [v0.8.2b1] — 2026-06-23
+
+Profiles gain the same portable export/import/sharing model stacks already have.
+Safe upgrade from v0.8.1-beta.2.
+
+### Added
+- **Portable profile export/import.** A profile can now be exported to a
+  self-contained, checksummed `.hal0profile.json` envelope and imported on another
+  host — the same file-based sharing model stacks use. The envelope carries the
+  profile template plus a sha256 content checksum and an independent
+  `schema_version`; no secrets or host paths are serialized. New routes
+  `GET /api/profiles/{name}`, `POST /api/profiles/{name}/export`, and
+  `POST /api/profiles/import` (dry-run reports checksum validity + name collision;
+  commit creates under a chosen name, `409 profiles.exists` on a duplicate). New
+  MCP tools mirror the `stack_*` set: `profile_list` / `profile_status` /
+  `profile_export` (autonomous read) and `profile_import` / `profile_delete`
+  (gated). The dashboard adds an Export button to every profile card and an Import
+  dialog (file → dry-run preview → commit). (#962)
+
 ## [v0.8.1-beta.2] — 2026-06-23
 
 Bugfix on the 0.8.1 beta line — restores fleet auto-update. Safe upgrade from
