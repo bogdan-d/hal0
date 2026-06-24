@@ -49,6 +49,27 @@ export interface ProfileBody {
   quant?: string
 }
 
+/** Portable profile bundle (.hal0profile.json), mirrors StackEnvelope. */
+export interface ProfileEnvelope {
+  kind: string
+  schema_version: number
+  hal0_version: string
+  exported_at: string
+  name: string
+  checksum: string
+  profile: ProfileBody
+}
+
+/** Dry-run import result — identity + integrity + collision (no model refs). */
+export interface ProfileImportDryResult {
+  dry_run: true
+  valid: boolean
+  checksum_ok: boolean
+  name: string
+  schema_version: number
+  collides: boolean
+}
+
 export function useProfiles() {
   return useQuery({
     queryKey: ['profiles'],
@@ -81,5 +102,26 @@ export function useProfileDelete() {
     mutationFn: (name: string) =>
       api<void>(ENDPOINTS.profile(name), { method: 'DELETE', raw: true }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['profiles'] }),
+  })
+}
+
+export function useProfileExport() {
+  return useMutation({
+    mutationFn: (name: string) =>
+      api<ProfileEnvelope>(ENDPOINTS.profileExport(name), { method: 'POST', raw: true }),
+  })
+}
+
+export function useProfileImport() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (payload: { envelope: unknown; dry_run?: boolean; name?: string }) =>
+      api<ProfileImportDryResult | { dry_run: false; profile: Profile }>(
+        ENDPOINTS.profileImport,
+        { method: 'POST', body: payload as any, raw: true },
+      ),
+    onSuccess: (_d, vars) => {
+      if (!vars.dry_run) qc.invalidateQueries({ queryKey: ['profiles'] })
+    },
   })
 }

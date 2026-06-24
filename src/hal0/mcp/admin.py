@@ -231,6 +231,12 @@ AUTONOMOUS_READ_TOOLS: frozenset[str] = frozenset(
         "version_info",
         "stack_list",
         "stack_status",
+        "profile_list",
+        "profile_status",
+        # profile_export is a POST but performs no state change — it
+        # builds a portable envelope from existing catalog data, so it
+        # classifies read-shaped (autonomous) like the other reads.
+        "profile_export",
         # Host-introspection probes (issue #237). Pure-read against
         # /sys/, /proc/, and lsmod — no REST round-trip, no mutation.
         # Hermes-Agent bootstrap consumes these in its env_probe phase.
@@ -272,6 +278,11 @@ GATED_TOOLS: frozenset[str] = frozenset(
         "stack_apply",
         "stack_import",
         "stack_delete",
+        # Profiles: importing creates a new catalog entry and deleting
+        # drops a saved profile — owner-approval gated, mirroring
+        # stack_import/stack_delete.
+        "profile_import",
+        "profile_delete",
         # logs_tail is gated until the redactor in logs.py covers
         # Bearer + X-API-Key + provider keys (sk-/hf-/etc.) — see
         # docs/internal/phase-8-pending/mcp-backend.md §2.
@@ -317,6 +328,10 @@ _REST_MAP: dict[str, tuple[str, str]] = {
     "version_info": ("GET", "/api/status"),
     "stack_list": ("GET", "/api/stacks"),
     "stack_status": ("GET", "/api/stacks/{slug}"),
+    "profile_list": ("GET", "/api/profiles"),
+    "profile_status": ("GET", "/api/profiles/{name}"),
+    # profile_export is a read-shaped POST — builds the envelope, no state change.
+    "profile_export": ("POST", "/api/profiles/{name}/export"),
     # Autonomous write
     "model_swap": ("POST", "/api/slots/{name}/swap"),
     # Gated write
@@ -330,6 +345,8 @@ _REST_MAP: dict[str, tuple[str, str]] = {
     "stack_apply": ("POST", "/api/stacks/{slug}/apply"),
     "stack_import": ("POST", "/api/stacks/import"),
     "stack_delete": ("DELETE", "/api/stacks/{slug}"),
+    "profile_import": ("POST", "/api/profiles/import"),
+    "profile_delete": ("DELETE", "/api/profiles/{name}"),
     # No live route yet — Memory-engine / Provider team must land the
     # endpoint. We register the tool anyway so the catalog matches the
     # ADR; calls land in a 404 surface until the route exists.
@@ -351,6 +368,9 @@ _PATH_ARGS: dict[str, tuple[str, ...]] = {
     "stack_status": ("slug",),
     "stack_apply": ("slug",),
     "stack_delete": ("slug",),
+    "profile_status": ("name",),
+    "profile_export": ("name",),
+    "profile_delete": ("name",),
 }
 
 
@@ -644,6 +664,17 @@ _ANNOTATIONS: dict[str, ToolAnnotations] = {
     "stack_status": ToolAnnotations(
         readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
     ),
+    "profile_list": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "profile_status": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    # profile_export is a POST but builds an envelope from existing data —
+    # no state change, so it carries the read-shaped annotation.
+    "profile_export": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
     # Host-introspection probes — pure sysfs/procfs reads.
     "gpu_target_version": ToolAnnotations(
         readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
@@ -679,6 +710,10 @@ _ANNOTATIONS: dict[str, ToolAnnotations] = {
     "stack_import": ToolAnnotations(
         readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False
     ),
+    # Import creates a new catalog entry (non-idempotent — re-import conflicts on name).
+    "profile_import": ToolAnnotations(
+        readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False
+    ),
     "config_write": ToolAnnotations(
         readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False
     ),
@@ -707,6 +742,9 @@ _ANNOTATIONS: dict[str, ToolAnnotations] = {
         readOnlyHint=False, destructiveHint=True, idempotentHint=True, openWorldHint=False
     ),
     "stack_delete": ToolAnnotations(
+        readOnlyHint=False, destructiveHint=True, idempotentHint=True, openWorldHint=False
+    ),
+    "profile_delete": ToolAnnotations(
         readOnlyHint=False, destructiveHint=True, idempotentHint=True, openWorldHint=False
     ),
     "memory_delete": ToolAnnotations(
@@ -780,6 +818,16 @@ def build_server(
     _register("version_info", "hal0 version + runtime status.")
     _register("stack_list", "List every stack, with the active stack + drift status.")
     _register("stack_status", "Get one stack's detail, active flag, and drift status.")
+    _register("profile_list", "List every profile in the catalog (seed + custom).")
+    _register(
+        "profile_status",
+        "Get one profile's resolved detail (image, flags, backend, used-by).",
+    )
+    # profile_export is a read-shaped POST — builds the envelope, no state change.
+    _register(
+        "profile_export",
+        "Export a profile to a portable .hal0profile.json envelope (no secrets/host-paths).",
+    )
     # Host-introspection probes (issue #237)
     _register(
         "gpu_target_version",
@@ -820,6 +868,11 @@ def build_server(
     )
     _register("stack_import", "Import a stack from a .hal0stack.json envelope (gated).")
     _register("stack_delete", "Delete a custom stack from the catalog (gated).")
+    _register(
+        "profile_import",
+        "Import a profile from a .hal0profile.json envelope (gated).",
+    )
+    _register("profile_delete", "Delete a custom profile from the catalog (gated).")
     _register(
         "provider_credential_write",
         "Write provider credentials (gated; secrets never echoed back).",
