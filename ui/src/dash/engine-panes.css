@@ -530,18 +530,126 @@
   background: var(--bg-1);
 }
 
-/* hero band — iGPU GTT memory map (2fr) + combined-throughput tile (1fr),
-   pinned at the top of BOTH states (P2). */
+/* hero band — iGPU GTT memory map (1/2) + iGPU usage gauge (1/4) +
+   combined-throughput tile (1/4), pinned at the top of BOTH states (P2).
+   The memory map was 2fr/1fr (≈3/4); halving it frees a 1/4 column for the
+   live GPU gauge. */
 .infer-pane .hero-band {
   display: grid;
-  grid-template-columns: 2fr 1fr;
+  grid-template-columns: 2fr 1fr 1fr;
   gap: 20px;
   align-items: start;
+}
+@media (max-width: 1100px) {
+  .infer-pane .hero-band {
+    grid-template-columns: 1fr 1fr;
+  }
 }
 @media (max-width: 880px) {
   .infer-pane .hero-band {
     grid-template-columns: 1fr;
   }
+}
+
+/* ─── iGPU usage gauge (270° radial — mirrors the NPU/Comfy gauge, in the
+   iGPU device hue --dev-rocm) ─────────────────────────────────────────── */
+.infer-pane .gpu-gauge-tile {
+  border: 1px solid var(--line);
+  border-radius: var(--rad);
+  background: var(--bg);
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+}
+.infer-pane .gpu-gauge-tile .blk-h {
+  align-self: stretch;
+}
+.infer-pane .gauge {
+  position: relative;
+}
+.infer-pane .gauge svg {
+  display: block;
+}
+.infer-pane .gauge .gtrack {
+  fill: none;
+  stroke: var(--bg-3);
+}
+.infer-pane .gauge .gfill {
+  fill: none;
+  stroke: var(--yellow);
+  stroke-linecap: round;
+  filter: drop-shadow(0 0 6px rgba(229, 184, 79, 0.5));
+  transition: stroke-dasharray 0.6s var(--ease, cubic-bezier(0.22, 1, 0.36, 1));
+}
+.infer-pane .gauge .gc {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+}
+.infer-pane .gauge .gc .pct {
+  font-family: var(--jbm);
+  font-size: 30px;
+  font-weight: 500;
+  letter-spacing: -0.03em;
+  color: var(--fg);
+  line-height: 1;
+}
+.infer-pane .gauge .gc .pct .s {
+  font-size: 14px;
+  color: var(--fg-3);
+}
+.infer-pane .gauge .gc .lbl {
+  font-family: var(--jbm);
+  font-size: 9.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
+  color: var(--dev-rocm);
+  margin-top: 7px;
+}
+.infer-pane .gauge .gc .sub {
+  font-family: var(--jbm);
+  font-size: 10px;
+  color: var(--fg-4);
+  margin-top: 3px;
+  white-space: nowrap;
+}
+/* clock + temperature readout below the gauge (two stat columns, mirrors
+   the NPU pane's .aie-stat readouts) */
+.infer-pane .gpu-readout {
+  display: flex;
+  gap: 24px;
+  align-self: stretch;
+  justify-content: center;
+}
+.infer-pane .gpu-readout .st {
+  text-align: center;
+}
+.infer-pane .gpu-readout .sv {
+  font-family: var(--jbm);
+  font-size: 17px;
+  font-weight: 500;
+  letter-spacing: -0.02em;
+  color: var(--fg);
+  line-height: 1;
+}
+.infer-pane .gpu-readout .sv .u {
+  font-size: 10px;
+  color: var(--fg-4);
+  margin-left: 3px;
+  letter-spacing: 0;
+}
+.infer-pane .gpu-readout .sl {
+  font-family: var(--jbm);
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--fg-4);
+  margin-top: 5px;
 }
 
 /* ─── Memory map ────────────────────────────────────────────────────── */
@@ -724,6 +832,35 @@
 }
 .infer-pane .tp-aside .pk {
   color: var(--fg-3);
+}
+/* prefill (TTFT) readout — pinned to the tile bottom (margin-top:auto) so it
+   fills the space under the spark and lines up with the gauge/mem tiles. */
+.infer-pane .tp-prefill {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-top: auto;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+}
+.infer-pane .tp-prefill .pf-lbl {
+  font-family: var(--jbm);
+  font-size: 10px;
+  color: var(--fg-4);
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+}
+.infer-pane .tp-prefill .pf-val {
+  font-family: var(--jbm);
+  font-size: 16px;
+  color: var(--fg-2);
+}
+.infer-pane .tp-prefill .pf-val .u {
+  font-size: 9px;
+  color: var(--fg-4);
+  margin-left: 3px;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
 }
 
 /* ─── Slot cards (P2) ───────────────────────────────────────────────── */

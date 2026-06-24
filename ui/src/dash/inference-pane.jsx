@@ -36,6 +36,7 @@ import {
   useSlotSwap,
 } from '@/api/hooks/useSlots'
 import { useModels } from '@/api/hooks/useModels'
+import { useStatsHardware } from '@/api/hooks/useStatsHardware'
 import { useMemoryMapModel } from './memory-map'
 import { slotIndicatorFromPhase, isSlotLive } from './slot-status.js'
 
@@ -263,7 +264,7 @@ function SparkBars({ data = [], hotN = 4 }) {
   )
 }
 
-function TpTile({ value, ticks, peak, servingN }) {
+function TpTile({ value, ticks, peak, servingN, prefillMs }) {
   return (
     <div className="tp-tile" data-testid="infer-tp">
       <div className="blk-h" style={{ margin: 0 }}>
@@ -285,6 +286,103 @@ function TpTile({ value, ticks, peak, servingN }) {
         </div>
       </div>
       <SparkBars data={ticks} />
+      <div className="tp-prefill" data-testid="infer-prefill">
+        <span className="pf-lbl">prefill</span>
+        <span className="pf-val">
+          {prefillMs == null ? '—' : prefillMs}
+          {prefillMs != null && <span className="u">ms ttft</span>}
+        </span>
+      </div>
+    </div>
+  )
+}
+
+// ── iGPU usage gauge (270° radial) ──────────────────────────────────────
+// Same SVG semicircle as the NPU (purple) and ComfyUI (blue) panes; here it
+// carries the iGPU device hue (--dev-rocm) and reads live GPU usage off
+// /api/stats/hardware. `pct` null → renders an em-dash (never a fake 0).
+function Gauge({ pct, label, sub, size = 132 }) {
+  const sw = Math.round(size * 0.065)
+  const r = size / 2 - sw - 4
+  const cx = size / 2
+  const cy = size / 2
+  const C = 2 * Math.PI * r
+  const arc = C * 0.75 // 270° sweep
+  const p = Math.max(0, Math.min(1, (pct || 0) / 100))
+  const fill = p * arc
+  return (
+    <div className="gauge" style={{ width: size, height: size }}>
+      <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`}>
+        <circle
+          className="gtrack"
+          cx={cx}
+          cy={cy}
+          r={r}
+          strokeWidth={sw}
+          strokeDasharray={`${arc} ${C}`}
+          strokeLinecap="round"
+          transform={`rotate(135 ${cx} ${cy})`}
+        />
+        <circle
+          className="gfill"
+          cx={cx}
+          cy={cy}
+          r={r}
+          strokeWidth={sw}
+          strokeDasharray={`${fill} ${C}`}
+          transform={`rotate(135 ${cx} ${cy})`}
+        />
+      </svg>
+      <div className="gc">
+        <div className="pct">
+          {pct == null ? '—' : Math.round(pct)}
+          {pct != null && <span className="s">%</span>}
+        </div>
+        <div className="lbl">{label}</div>
+        {sub ? <div className="sub">{sub}</div> : null}
+      </div>
+    </div>
+  )
+}
+
+// iGPU usage tile for the hero band — gauge of GPU compute %, captioned with
+// the live shader clock (MHz) and edge temperature (°C). Forced-high perf
+// pinning (gpu-compute.service) makes the % unreliable; we tag it "pinned"
+// so the reading is captioned, not silently trusted (mirrors the backend
+// util_is_forced_high contract).
+function GpuGauge() {
+  const hw = useStatsHardware()
+  const d = hw.data || {}
+  const util = typeof d.gpu_util === 'number' ? d.gpu_util : null
+  const pct = util == null ? null : util * 100
+  const mhz = typeof d.gpu_clock_mhz === 'number' && d.gpu_clock_mhz > 0 ? d.gpu_clock_mhz : null
+  const temp = typeof d.gpu_temp_c === 'number' ? d.gpu_temp_c : null
+  const forced = !!d.util_is_forced_high
+  return (
+    <div className="gpu-gauge-tile" data-testid="infer-gpu-gauge">
+      <div className="blk-h" style={{ margin: 0 }}>
+        <span className="ic">
+          <Ic name="mem" size={13} />
+        </span>{' '}
+        igpu usage{forced ? ' · pinned' : ''}
+      </div>
+      <Gauge pct={pct} label="igpu" />
+      <div className="gpu-readout">
+        <div className="st">
+          <div className="sv">
+            {mhz == null ? '—' : mhz}
+            {mhz != null && <span className="u">MHz</span>}
+          </div>
+          <div className="sl">clock</div>
+        </div>
+        <div className="st">
+          <div className="sv">
+            {temp == null ? '—' : Math.round(temp)}
+            {temp != null && <span className="u">°C</span>}
+          </div>
+          <div className="sl">temp</div>
+        </div>
+      </div>
     </div>
   )
 }
@@ -598,12 +696,23 @@ export function InferenceHeroBand() {
   const ticks = historyRef.current
   const peak = ticks.length ? Math.max(...ticks) : null
 
+  // Combined prefill — avg TTFT (ms) across this pane's serving slots. The
+  // backend deliberately doesn't scrape a prompt-eval rate, so TTFT is the
+  // available prefill signal (slot.metrics.ttft). null → em-dash, never 0.
+  const ttftVals = slots
+    .map((s) => s?.metrics?.ttft)
+    .filter((t) => typeof t === 'number' && t > 0)
+  const prefillMs = ttftVals.length
+    ? Math.round(ttftVals.reduce((a, b) => a + b, 0) / ttftVals.length)
+    : null
+
   return (
     <div className="infer-pane infer-hero-top" data-testid="infer-hero-band">
       <div className="proto">
         <div className="hero-band">
           <MemGtt mm={mm} full />
-          <TpTile value={value} ticks={ticks} peak={peak} servingN={servingN} />
+          <GpuGauge />
+          <TpTile value={value} ticks={ticks} peak={peak} servingN={servingN} prefillMs={prefillMs} />
         </div>
       </div>
     </div>
