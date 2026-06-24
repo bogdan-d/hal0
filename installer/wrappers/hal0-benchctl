@@ -1,0 +1,106 @@
+#!/bin/bash
+# hal0-benchctl — privileged seam for GPU benchmarking (D hardened-perms).
+#
+# Background: hal0-api / the Hermes agent run as the unprivileged `hal0` system
+# user, but benchmark containers are ROOTFUL (the container is the sandbox
+# boundary) and need /dev/kfd + the images in root's podman store. The only
+# root operations benchmarking needs are "run the harness" and "aggregate the
+# results", so the agent delegates exactly those here, just like hal0-slotctl
+# delegates slot-unit + systemctl ops and hal0-agentenv delegates env writes.
+#
+# This script is the ENTIRE privileged surface. It validates every argument
+# (model path must resolve under /mnt/ai-models, backend whitelist, llama-bench
+# flag whitelist), builds the harness invocation itself, and never evaluates a
+# shell — so the grant in /etc/sudoers.d/hal0-benchctl can never be widened into
+# arbitrary command execution. The harness it execs is root-owned and not
+# writable by the hal0 user.
+set -euo pipefail
+
+HARNESS=/usr/lib/hal0/bench
+MODEL_ROOT=/mnt/ai-models
+RESULTS=/var/lib/hal0/benchmarks
+RESULTS_OWNER=hal0:hal0
+
+die() { echo "hal0-benchctl: $1" >&2; exit 2; }
+
+validate_model() {   # arg: path relative to MODEL_ROOT
+  local rel="$1"
+  [[ -n "$rel" ]]                              || die "missing model path"
+  [[ "$rel" != *..* ]]                         || die "path traversal in model path"
+  [[ "$rel" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*\.gguf$ ]] || die "bad model path: $rel"
+  [[ -f "$MODEL_ROOT/$rel" ]]                  || die "model not found under $MODEL_ROOT: $rel"
+}
+
+validate_backend() {
+  [[ "$1" =~ ^(rocm|vulkan_radv)$ ]] || die "bad backend: $1"
+}
+
+# Only whitelisted llama-bench tuning flags + safe (numeric / comma-list / quant)
+# values are allowed in a sweep. -m/-o and anything else are rejected.
+validate_extra() {
+  local tok expect_val=0
+  for tok in "$@"; do
+    if [[ $expect_val -eq 1 ]]; then
+      [[ "$tok" =~ ^[A-Za-z0-9_,.:+-]+$ ]] || die "bad flag value: $tok"
+      expect_val=0; continue
+    fi
+    case "$tok" in
+      -b|-ub|-ngl|-fa|-ctk|-ctv|-p|-n|-d|-r|-t|-mmp|-pg) expect_val=1 ;;
+      *) die "flag not allowed in sweep: $tok" ;;
+    esac
+  done
+  [[ $expect_val -eq 0 ]] || die "dangling flag without value"
+}
+
+# Hand results back to the agent user after any write.
+post() { chown -R "$RESULTS_OWNER" "$RESULTS" 2>/dev/null || true; }
+
+# Optional leading --exclusive (stop/restart GPU slots for clean numbers).
+take_exclusive() { if [[ "${1:-}" == "--exclusive" ]]; then echo "--exclusive"; fi; }
+
+cmd="${1:-help}"; shift || true
+
+case "$cmd" in
+  run)                       # full curated sweep, all contexts
+    excl="$(take_exclusive "${1:-}")"
+    rc=0; "$HARNESS/run_benchmarks.sh" --contexts all $excl || rc=$?
+    post; exit $rc ;;
+
+  run-model)                 # one model, both backends, all contexts
+    rel="${1:-}"; shift || true
+    validate_model "$rel"
+    excl="$(take_exclusive "${1:-}")"
+    rc=0; "$HARNESS/run_benchmarks.sh" --models "$rel" --contexts all $excl || rc=$?
+    post; exit $rc ;;
+
+  sweep)                     # tuning: one model+backend, whitelisted extra flags
+    rel="${1:-}"; backend="${2:-}"; shift 2 2>/dev/null || die "usage: sweep <model.gguf> <backend> [--exclusive] <flags...>"
+    validate_model "$rel"
+    validate_backend "$backend"
+    excl=""; if [[ "${1:-}" == "--exclusive" ]]; then excl="--exclusive"; shift; fi
+    validate_extra "$@"
+    rc=0; "$HARNESS/run_benchmarks.sh" --models "$rel" --backends "$backend" \
+            --tag sweep --extra "$*" $excl || rc=$?
+    post; exit $rc ;;
+
+  aggregate)                 # rebuild index.json + SUMMARY.md
+    rc=0; "$HARNESS/generate_results_json.py" "$RESULTS" || rc=$?
+    post; exit $rc ;;
+
+  list)
+    ls -1 "$RESULTS/runs" 2>/dev/null || true ;;
+
+  help|"")
+    cat <<EOF
+usage: hal0-benchctl <command>
+  run [--exclusive]                              full curated sweep (all contexts)
+  run-model <rel.gguf> [--exclusive]            one model, both backends
+  sweep <rel.gguf> <backend> [--exclusive] FLAGS  tuning sweep (whitelisted flags)
+  aggregate                                      rebuild index.json + SUMMARY.md
+  list                                           list result files
+backends: rocm | vulkan_radv ; results: $RESULTS
+EOF
+    ;;
+
+  *) die "bad cmd: $cmd" ;;
+esac

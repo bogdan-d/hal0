@@ -725,6 +725,58 @@ if [[ -f "${AGENT_UNIT_SRC}" ]]; then
             warn "${AGENTENV_SUDOERS_SRC} not found — agent-env sudoers grant not installed"
         fi
     fi
+
+    # Privileged seam #3 (D hardened-perms): hal0-benchctl runs the GPU benchmark
+    # harness. Benchmarking is a rootful container op (needs /dev/kfd + the images
+    # in root's podman store), but the agent runs unprivileged, so it delegates the
+    # run/aggregate ops here. The seam validates every argument (model path under
+    # the model dir, backend + llama-bench flag whitelist) and is the entire
+    # privileged surface — no shell, no arbitrary args. Lands at the absolute
+    # /usr/lib/hal0/bin path the seam's callers hardcode.
+    BENCHCTL_SRC="${REPO_ROOT}/installer/wrappers/hal0-benchctl"
+    if [[ -f "${BENCHCTL_SRC}" ]]; then
+        install -d "${LIB_DIR}/bin"
+        install -m 0755 "${BENCHCTL_SRC}" "${LIB_DIR}/bin/hal0-benchctl"
+        info "wrote ${LIB_DIR}/bin/hal0-benchctl"
+    else
+        warn "${BENCHCTL_SRC} not found — benchmark seam helper not installed"
+    fi
+
+    # GPU benchmark harness driven by the seam. Root-owned and off any shared
+    # mount so the unprivileged agent cannot tamper with a script that runs as
+    # root. Results live under VAR_DIR (agent-readable); the seam chowns them back
+    # to hal0 after each run.
+    BENCH_SRC="${REPO_ROOT}/installer/bench"
+    if [[ -d "${BENCH_SRC}" ]]; then
+        install -d "${LIB_DIR}/bench"
+        install -m 0644 "${BENCH_SRC}/config.sh"                "${LIB_DIR}/bench/config.sh"
+        install -m 0755 "${BENCH_SRC}/run_benchmarks.sh"        "${LIB_DIR}/bench/run_benchmarks.sh"
+        install -m 0755 "${BENCH_SRC}/generate_results_json.py" "${LIB_DIR}/bench/generate_results_json.py"
+        install -m 0644 "${BENCH_SRC}/README.md"                "${LIB_DIR}/bench/README.md"
+        install -d "${VAR_DIR}/benchmarks" "${VAR_DIR}/benchmarks/runs" "${VAR_DIR}/benchmarks/logs"
+        chown -R hal0:hal0 "${VAR_DIR}/benchmarks" 2>/dev/null || true
+        chmod 2775 "${VAR_DIR}/benchmarks" "${VAR_DIR}/benchmarks/runs" "${VAR_DIR}/benchmarks/logs" 2>/dev/null || true
+        info "wrote ${LIB_DIR}/bench + ${VAR_DIR}/benchmarks"
+    else
+        warn "${BENCH_SRC} not found — benchmark harness not installed"
+    fi
+
+    # sudoers grant for the benchmark seam. Real installs only; visudo-validate
+    # before activating so a malformed drop-in can never wedge sudo for the box.
+    if [[ "${DEV_MODE}" -eq 0 ]]; then
+        BENCHCTL_SUDOERS_SRC="${REPO_ROOT}/packaging/sudoers/hal0-benchctl"
+        BENCHCTL_SUDOERS_DST="/etc/sudoers.d/hal0-benchctl"
+        if [[ -f "${BENCHCTL_SUDOERS_SRC}" ]]; then
+            if visudo -cf "${BENCHCTL_SUDOERS_SRC}" >/dev/null 2>&1; then
+                install -m 0440 "${BENCHCTL_SUDOERS_SRC}" "${BENCHCTL_SUDOERS_DST}"
+                info "wrote ${BENCHCTL_SUDOERS_DST}"
+            else
+                warn "${BENCHCTL_SUDOERS_SRC} failed visudo check — benchmark sudoers grant not installed"
+            fi
+        else
+            warn "${BENCHCTL_SUDOERS_SRC} not found — benchmark sudoers grant not installed"
+        fi
+    fi
 else
     warn "${AGENT_UNIT_SRC} not found — hal0-agent@ template not installed"
 fi

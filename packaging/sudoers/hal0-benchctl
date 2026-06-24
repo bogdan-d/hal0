@@ -1,0 +1,18 @@
+# hal0 — privileged seam grant for GPU benchmarking (D hardened-perms).
+#
+# The hal0 agent user runs unprivileged, but benchmark containers are rootful
+# and need /dev/kfd + the images in root's podman store. It delegates exactly
+# the benchmark run/aggregate ops to /usr/lib/hal0/bin/hal0-benchctl, which is
+# the entire privileged surface: the helper validates the model path (must
+# resolve under /mnt/ai-models), the backend (rocm|vulkan_radv), and the
+# llama-bench flag whitelist — no wildcards, no shell, no arbitrary args.
+#
+# Install (as root):
+#   install -m 0755 -o root -g root hal0-benchctl /usr/lib/hal0/bin/hal0-benchctl
+#   install -m 0440 -o root -g root hal0-benchctl.sudoers /etc/sudoers.d/hal0-benchctl
+#   visudo -cf /etc/sudoers.d/hal0-benchctl
+#
+# Keep this grant pinned to the helper binary; a broader grant would let the
+# agent run arbitrary root commands. Revoke with: rm /etc/sudoers.d/hal0-benchctl
+
+hal0 ALL=(root) NOPASSWD: /usr/lib/hal0/bin/hal0-benchctl
