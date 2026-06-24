@@ -10,6 +10,15 @@ on:
     branches: [main]
   pull_request:
 
+# Cancel superseded PR runs (the ~8 min γ-suite is the priciest PR check);
+# never cancel a push to main — it's a required check + nightly gate input.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
 jobs:
   e2e:
     name: γ-suite (chromium)
@@ -21,10 +30,10 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Setup Node 20
+      - name: Setup Node 22
         uses: actions/setup-node@v6
         with:
-          node-version: "20"
+          node-version: "22"
           cache: npm
           cache-dependency-path: ui/package-lock.json
 
