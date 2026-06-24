@@ -145,7 +145,9 @@ def test_create_mtp_true_resolved_flags_contains_bundle(client: TestClient) -> N
     assert r.status_code == 201
     body = r.json()
     assert MTP_FLAG_BUNDLE in body["resolved_flags"]
-    assert body["resolved_flags"].startswith("-fa on")
+    # base flags are preserved (the bundle leads as defaults; the profile's own
+    # flags follow and win on any conflict).
+    assert "-fa on" in body["resolved_flags"]
 
 
 def test_create_invalid_empty_image_422(client: TestClient) -> None:
