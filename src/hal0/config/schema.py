@@ -1231,7 +1231,20 @@ def resolve_profile_flags(profile: ProfileConfig, mtp_override: bool | None = No
     base = profile.flags.strip()
     effective_mtp = mtp_override if mtp_override is not None else profile.mtp
     if effective_mtp:
-        return f"{base} {MTP_FLAG_BUNDLE}".strip()
+        # MTP_FLAG_BUNDLE is a set of DEFAULTS. A profile may pin its own
+        # ``--spec-draft-*`` values (a hand-tuned draft KV type, p-min, …); those
+        # must WIN, with the bundle only supplying the flags the profile left
+        # unset. ``merge_flags(defaults, override)`` gives exactly that
+        # precedence — the override (here ``base``) strips any matching flag from
+        # the defaults. Appending the bundle verbatim (the old behaviour) let it
+        # silently clobber a profile's explicit spec flags, e.g. a profile
+        # asking for ``--spec-draft-type-k f16`` still launched with q8_0.
+        #
+        # Local import: ``hal0.config`` is imported before ``hal0.slots``, so a
+        # module-level import would create a cycle.
+        from hal0.slots.flag_merge import merge_flags
+
+        return merge_flags(MTP_FLAG_BUNDLE, base)
     return base
 
 
