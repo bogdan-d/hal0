@@ -36,6 +36,7 @@ from hal0.config.schema import (
     StackSlotEntry,
 )
 from hal0.errors import BadRequest
+from hal0.registry.curated import get_curated
 from hal0.registry.store import ModelRegistry
 
 ENVELOPE_KIND = "hal0.stack"
@@ -77,11 +78,21 @@ def embed_references(
     for mid in sorted(_referenced_model_ids(stack)):
         if registry.has(mid):
             m = registry.get(mid)
+            # A registry row can carry empty coords (e.g. auto-scanned with no
+            # curated match at scan time). Fall back to the curated catalogue so
+            # an exported stack still carries pullable coords when we know them.
+            hf_repo = m.hf_repo or ""
+            hf_filename = m.hf_filename or ""
+            if not (hf_repo and hf_filename):
+                cur = get_curated(mid)
+                if cur is not None:
+                    hf_repo = hf_repo or cur.hf_repo
+                    hf_filename = hf_filename or cur.hf_file
             models[mid] = StackModelMeta(
                 id=m.id,
                 name=m.name,
-                hf_repo=m.hf_repo,
-                hf_filename=m.hf_filename,
+                hf_repo=hf_repo,
+                hf_filename=hf_filename,
                 size_bytes=m.size_bytes,
                 capabilities=list(m.capabilities),
                 backends=list(m.backends),

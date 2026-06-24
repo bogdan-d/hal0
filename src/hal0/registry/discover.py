@@ -313,6 +313,40 @@ def register_candidate(registry: ModelRegistry, candidate: CandidateModel) -> Mo
     return model
 
 
+def backfill_coordless(registry: ModelRegistry) -> list[str]:
+    """Repair existing registry rows that have empty HF coordinates.
+
+    A row auto-registered before its curated coords landed carries empty
+    ``hf_repo``/``hf_filename`` (so it classifies "unresolvable" on stack
+    import and can't be pulled by id). For each such row, match it against the
+    curated catalogue by the on-disk filename and fill in
+    ``hf_repo``/``hf_filename`` — plus ``name``/``tags`` when those are empty —
+    from the curated entry. The model id is never changed.
+
+    Returns the list of ids that were backfilled. Idempotent: a row that
+    already carries both coordinates is left untouched, so a second call is a
+    no-op.
+    """
+    repaired: list[str] = []
+    for row in registry.list():
+        if row.hf_repo and row.hf_filename:
+            continue
+        curated = _match_curated(Path(row.path).name)
+        if curated is None:
+            continue
+        registry.update(
+            row.id,
+            {
+                "hf_repo": row.hf_repo or curated.hf_repo,
+                "hf_filename": row.hf_filename or curated.hf_file,
+                "name": row.name or curated.display_name,
+                "tags": row.tags or list(curated.tags),
+            },
+        )
+        repaired.append(row.id)
+    return repaired
+
+
 def scan_and_register(registry: ModelRegistry, cfg: ModelsConfig) -> dict:
     """Discover candidates under ``cfg.roots`` and register the new ones.
 
@@ -339,6 +373,16 @@ def scan_and_register(registry: ModelRegistry, cfg: ModelsConfig) -> dict:
 
     added: list[str] = []
     skipped: list[dict] = []
+    backfilled: list[str] = []
+
+    # Backfill pass — repair EXISTING coord-less registry rows from the curated
+    # catalogue. find_candidates() skips files already registered by path (they
+    # are in known_paths), so a row auto-registered before the curated coords
+    # landed never re-surfaces as a candidate. Match each coord-less row against
+    # curated by its on-disk filename and fill hf_repo/hf_filename/name/tags.
+    # Idempotent (a row with coords is left alone) and never changes the id.
+    backfilled.extend(backfill_coordless(registry))
+
     for cand in candidates:
         existing_id = cand.curated_match.id if cand.curated_match else cand.suggested_id
         if registry.has(existing_id):
@@ -359,6 +403,7 @@ def scan_and_register(registry: ModelRegistry, cfg: ModelsConfig) -> dict:
 
     return {
         "added": added,
+        "backfilled": backfilled,
         "skipped": skipped,
         "scanned_roots": [str(r) for r in roots],
     }
@@ -373,6 +418,7 @@ def is_skippable(p: Path) -> bool:
 
 __all__ = [
     "CandidateModel",
+    "backfill_coordless",
     "find_candidates",
     "is_skippable",
     "register_candidate",

@@ -94,6 +94,54 @@ class TestEmbedReferences:
         out = embed_references(_stack(), registry=reg)
         assert out.hal0_version == __version__
 
+    def test_coordless_registry_row_filled_from_curated(self, tmp_path: Path) -> None:
+        """A model that IS in the registry but with EMPTY coords, yet present in
+        the curated catalogue, exports with the curated hf_repo/hf_file so the
+        importer can pull it (fix/stack-model-pull-coords)."""
+        mid = "qwen3-6-35b-a3b-nsc-ace-saber-mtp-f16-to-rocmfp4-strix-lean"
+        r = ModelRegistry(registry_dir=tmp_path / "registry")
+        r.add(
+            Model(
+                id=mid,
+                path="/models/saber.gguf",
+                name="",
+                hf_repo="",
+                hf_filename="",
+                capabilities=["chat"],
+            )
+        )
+        stack = StackConfig(
+            name="Saber",
+            slots=[StackSlotEntry(slot="agent", model=mid)],
+        )
+        out = embed_references(stack, registry=r)
+        meta = out.models[mid]
+        assert meta.hf_repo == "jcbtc/chadrock-35b-ace-saber-rocmfp4-mtp"
+        assert (
+            meta.hf_filename == "Qwen3.6-35B-A3B-NSC-ACE-SABER-MTP-F16-to-ROCmFP4-STRIX_LEAN.gguf"
+        )
+
+    def test_coordless_row_without_curated_stays_empty(self, tmp_path: Path) -> None:
+        """A coord-less registry row with no curated match exports empty coords
+        (the fallback only fills what curated knows)."""
+        r = ModelRegistry(registry_dir=tmp_path / "registry")
+        r.add(
+            Model(
+                id="mystery-local-gguf",
+                path="/models/mystery.gguf",
+                hf_repo="",
+                hf_filename="",
+            )
+        )
+        stack = StackConfig(
+            name="Mystery",
+            slots=[StackSlotEntry(slot="agent", model="mystery-local-gguf")],
+        )
+        out = embed_references(stack, registry=r)
+        meta = out.models["mystery-local-gguf"]
+        assert meta.hf_repo == ""
+        assert meta.hf_filename == ""
+
 
 class TestExportEnvelope:
     def test_envelope_shape(self, reg: ModelRegistry, tmp_hal0_home: str) -> None:
