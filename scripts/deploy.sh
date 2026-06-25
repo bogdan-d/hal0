@@ -145,6 +145,36 @@ elif [[ "$DO_BUILD" -eq 0 ]]; then
     warn "skipping UI build (--no-build)"
 fi
 
+# ── 2a. Install the built bundle where the RUNNING server serves it ───────────
+# We just built THIS checkout's ui/dist, but on an FHS install the api resolves
+# the dashboard via HAL0_UI_DIST (api.env) or /usr/lib/hal0/ui/dist — a DIFFERENT
+# tree. Without this sync the build never reaches the served bundle and the UI
+# stays stale (the step-5 health check would still pass against the old one).
+# Idempotent; no-op when the served path already IS this checkout (editable host).
+if [[ "$DO_BUILD" -eq 1 ]]; then
+    served_dist=""
+    api_env="${HAL0_API_ENV:-/etc/hal0/api.env}"
+    if [[ -r "$api_env" ]]; then
+        served_dist="$(sed -n 's/^[[:space:]]*HAL0_UI_DIST=//p' "$api_env" | tail -1 | tr -d '"')"
+    fi
+    [[ -z "$served_dist" && -d /usr/lib/hal0/ui/dist ]] && served_dist=/usr/lib/hal0/ui/dist
+    built_dist="${REPO_ROOT}/ui/dist"
+    if [[ -n "$served_dist" ]]; then
+        served_real="$(readlink -f "$served_dist" 2>/dev/null || echo "$served_dist")"
+        built_real="$(readlink -f "$built_dist" 2>/dev/null || echo "$built_dist")"
+        if [[ "$served_real" == "$built_real" ]]; then
+            info "served path is this checkout — no install step needed"
+        elif command -v rsync >/dev/null 2>&1 \
+            && install -d "$served_dist" 2>/dev/null \
+            && rsync -a --delete "$built_dist"/ "$served_dist"/ 2>/dev/null; then
+            chmod -R a+rX "$served_dist" 2>/dev/null || true
+            info "installed bundle → ${served_dist} (served path)"
+        else
+            warn "could not install bundle to ${served_dist} (need root / rsync?) — UI may serve stale"
+        fi
+    fi
+fi
+
 # ── 2b. Sync runtime-mounted ComfyUI custom nodes ─────────────────────────────
 # ComfyUI imports custom nodes from the persistent model share, not the source
 # checkout. Keep shipped hal0 nodes in sync during runtime deploys; the ComfyUI

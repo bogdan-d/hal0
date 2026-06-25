@@ -1504,7 +1504,11 @@ def _mount_dashboard(app: FastAPI) -> None:
         # Don't shadow API routes — those return 404 normally if missing.
         if full_path.startswith("api/") or full_path.startswith("v1/"):
             return Response(status_code=404)
-        return FileResponse(index)
+        # no-cache so browsers always revalidate index.html and pick up a new
+        # build's hashed assets immediately (hashed /assets stay cacheable).
+        # Without this the dashboard serves stale after a deploy until a hard
+        # reload — the "can't see my change on 105" trap.
+        return FileResponse(index, headers={"Cache-Control": "no-cache"})
 
 
 app = create_app()
